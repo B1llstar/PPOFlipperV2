@@ -1,5 +1,6 @@
 package net.runelite.client.plugins.microbot.gestarv2;
 
+import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
@@ -45,12 +46,14 @@ public class GeStarV2Panel extends PluginPanel {
     private final GeStarV2Plugin plugin;
     private final GeStarV2Script script;
     private final GeStarOrderQueue queue;
+    private final GeStarPortfolio portfolio;
 
     private JButton executeButton;
     private JButton stopButton;
     private JLabel statusValueLabel;
     private JLabel stateValueLabel;
     private JLabel gpSpentValueLabel;
+    private JLabel realizedPnlValueLabel;
 
     private JTextField itemNameField;
     private JSpinner quantitySpinner;
@@ -62,11 +65,12 @@ public class GeStarV2Panel extends PluginPanel {
     private final Timer refreshTimer;
 
     @Inject
-    public GeStarV2Panel(GeStarV2Plugin plugin, GeStarV2Script script, GeStarOrderQueue queue) {
+    public GeStarV2Panel(GeStarV2Plugin plugin, GeStarV2Script script, GeStarOrderQueue queue, GeStarPortfolio portfolio) {
         super();
         this.plugin = plugin;
         this.script = script;
         this.queue = queue;
+        this.portfolio = portfolio;
 
         setBorder(new EmptyBorder(10, 10, 10, 10));
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
@@ -136,10 +140,12 @@ public class GeStarV2Panel extends PluginPanel {
         statusValueLabel = new JLabel();
         stateValueLabel = new JLabel();
         gpSpentValueLabel = new JLabel();
+        realizedPnlValueLabel = new JLabel();
 
         panel.add(statusRow("Status", statusValueLabel));
         panel.add(statusRow("State", stateValueLabel));
         panel.add(statusRow("GP spent (session)", gpSpentValueLabel));
+        panel.add(statusRow("Realized P&L (all-time)", realizedPnlValueLabel));
 
         return panel;
     }
@@ -273,6 +279,10 @@ public class GeStarV2Panel extends PluginPanel {
 
         stateValueLabel.setText(script.getState().name());
         gpSpentValueLabel.setText(String.format("%,d", script.getGpSpentThisSession()));
+
+        long realizedPnl = portfolio.getTotalRealizedProfit();
+        realizedPnlValueLabel.setText(String.format("%,d gp", realizedPnl));
+        realizedPnlValueLabel.setForeground(realizedPnl >= 0 ? DONE_GREEN : FAILED_RED);
     }
 
     private void refreshOrderList() {

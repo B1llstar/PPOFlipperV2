@@ -9,6 +9,7 @@ import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.grandexchange.GrandExchangePlugin;
+import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
@@ -30,7 +31,7 @@ import java.awt.image.BufferedImage;
 @Slf4j
 public class GeStarV2Plugin extends Plugin {
 
-    static final String version = "2.4.0";
+    static final String version = "2.5.0";
 
     @Inject
     private GeStarV2Config config;
@@ -46,6 +47,9 @@ public class GeStarV2Plugin extends Plugin {
 
     @Inject
     private GeStarOrderQueue queue;
+
+    @Inject
+    private GeStarPortfolio portfolio;
 
     @Inject
     private GeStarFirestoreSync firestoreSync;
@@ -82,7 +86,7 @@ public class GeStarV2Plugin extends Plugin {
     }
 
     private void addPanel() {
-        panel = new GeStarV2Panel(this, script, queue);
+        panel = new GeStarV2Panel(this, script, queue, portfolio);
 
         // Reuse the client's own Grand Exchange icon (bundled in the client jar) instead of
         // shipping a duplicate image asset.

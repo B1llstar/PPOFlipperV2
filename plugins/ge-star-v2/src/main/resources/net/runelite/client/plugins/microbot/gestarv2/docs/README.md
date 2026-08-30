@@ -115,6 +115,36 @@ project, not just this collection.
   `Status` (`QUEUED`/`SUBMITTED`/`DONE`/`SKIPPED`/`FAILED`) and fill count.
 - `GeStarV2Overlay.java` — in-game overlay showing state, queued-order
   count, active offers, GP spent this session.
+- `portfolio/GeStarPortfolio.java` — tracks live holdings (bank + inventory,
+  read fresh on every call) and a persisted weighted-average cost-basis
+  ledger, updated from every completed fill in `GeStarV2Script`. Shared
+  across GE Star V2's guardrails and the planned GE Flipper plugin - see
+  "Portfolio & cost basis" below.
+- `portfolio/CostBasisEntry.java` — one item's running average cost,
+  quantity held, and realized profit/loss.
+
+## Portfolio & cost basis
+
+`GeStarPortfolio` (injected as a Guice singleton, so it's the same instance
+everywhere) answers two different kinds of question:
+
+- **Holdings** (`getHeldQuantity`, `getAllHoldings`) — read live from
+  `Rs2Bank.bankItems()` + `Rs2Inventory.all()` on every call. Always
+  current, nothing to keep in sync.
+- **Cost basis** (`getAverageCost`, `getRealizedProfit`,
+  `getTotalRealizedProfit`, `getOpenPositions`) — the client has no concept
+  of "what did I pay for this," so `GeStarV2Script` records every completed
+  fill into a weighted-average-cost ledger
+  (`recordCostBasis` in `GeStarV2Script`, using
+  `GrandExchangeOfferDetails.getSpent()` for the *actual* GP that changed
+  hands, not the order's requested price - a partial fill or a different
+  clearing price cost-bases at what really happened). Persisted through
+  `ConfigManager` under the `gestarv2` group, so it survives plugin/client
+  restarts.
+
+The sidebar panel shows all-time realized P&L; the full open-positions
+breakdown is available via `getOpenPositions()` for anything that wants to
+render more detail (a future flipper panel, most likely).
 
 ## Guardrails (all configurable, `0` = disabled unless noted)
 
@@ -125,6 +155,13 @@ project, not just this collection.
 | Max quantity per item | 0 (off) | Rejects any single order above this qty |
 | Max price deviation from guide price | 25% | Rejects orders priced too far from the live guide price |
 | Stop script on guardrail breach | off | If on, any rejected order stops the script instead of just being skipped |
+
+Sell orders are also checked against `GeStarPortfolio.getHeldQuantity()`
+(bank + inventory combined) - a sell order for more than you actually own
+anywhere is rejected up front, rather than sitting forever failing the
+bank-withdrawal step. This check always runs regardless of the guardrails
+master switch, since it's catching an order that can never succeed rather
+than a risk/safety tradeoff.
 
 "Max concurrent offers" (default 4, how many of the 8 GE slots to use at
 once) lives in the **Behavior** section instead — it's a throttle, not a

@@ -14,6 +14,7 @@ import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeSlot
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.grandexchange.models.GrandExchangeOfferDetails;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 
 import javax.inject.Inject;
 import java.util.LinkedHashMap;
@@ -42,6 +43,7 @@ public class GeStarV2Script extends Script {
     }
 
     private final GeStarOrderQueue queue;
+    private final GeStarPortfolio portfolio;
 
     private GeStarV2Config config;
     private GeStarGuardrails guardrails;
@@ -52,13 +54,14 @@ public class GeStarV2Script extends Script {
     private GeStarOrder lastFundsShortfallOrder;
 
     @Inject
-    public GeStarV2Script(GeStarOrderQueue queue) {
+    public GeStarV2Script(GeStarOrderQueue queue, GeStarPortfolio portfolio) {
         this.queue = queue;
+        this.portfolio = portfolio;
     }
 
     public boolean run(GeStarV2Config config) {
         this.config = config;
-        this.guardrails = new GeStarGuardrails(config);
+        this.guardrails = new GeStarGuardrails(config, portfolio);
         this.guardrails.reset();
         this.state = State.GOING_TO_GE;
         this.activeOrders.clear();
@@ -272,6 +275,7 @@ public class GeStarV2Script extends Script {
 
             if (finished) {
                 log.info("GE Star V2: offer complete in slot {} - {} ({} filled)", slot, order, filled);
+                recordCostBasis(order, details, filled);
                 Rs2GrandExchange.collectOffer(slot, config.collectToBank());
                 order.setStatus(GeStarOrder.Status.DONE);
                 activeOrders.remove(slot);
@@ -283,6 +287,22 @@ public class GeStarV2Script extends Script {
             state = State.DONE;
         } else if (activeOrders.size() < Math.max(1, config.maxActiveOffers()) && queue.nextQueued().isPresent()) {
             state = State.SUBMITTING_ORDERS;
+        }
+    }
+
+    /**
+     * Records the actual filled quantity/GP against the portfolio's cost-basis ledger, using
+     * GrandExchangeOfferDetails.getSpent() (the real GP that changed hands for this offer)
+     * rather than order.getPrice() * filled - a partial fill or a fill at a different clearing
+     * price than requested should cost-base at what actually happened, not what was asked for.
+     */
+    private void recordCostBasis(GeStarOrder order, GrandExchangeOfferDetails details, int filled) {
+        if (filled <= 0) return;
+        int itemId = details.getItemId();
+        if (order.getAction() == GrandExchangeAction.BUY) {
+            portfolio.recordBuy(itemId, filled, details.getSpent());
+        } else {
+            portfolio.recordSell(itemId, filled, details.getSpent());
         }
     }
 

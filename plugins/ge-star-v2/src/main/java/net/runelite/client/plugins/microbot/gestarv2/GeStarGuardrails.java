@@ -2,6 +2,7 @@ package net.runelite.client.plugins.microbot.gestarv2;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.grandexchange.models.WikiPrice;
@@ -16,13 +17,15 @@ import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 public class GeStarGuardrails {
 
     private final GeStarV2Config config;
+    private final GeStarPortfolio portfolio;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
 
     @Getter
     private long gpSpentThisSession = 0;
 
-    public GeStarGuardrails(GeStarV2Config config) {
+    public GeStarGuardrails(GeStarV2Config config, GeStarPortfolio portfolio) {
         this.config = config;
+        this.portfolio = portfolio;
     }
 
     public void reset() {
@@ -38,6 +41,19 @@ public class GeStarGuardrails {
      * it was rejected.
      */
     public String check(GeStarOrder order) {
+        // Not a risk/safety tradeoff like the checks below - an order to sell more than is
+        // held anywhere can never succeed, it would just sit forever failing the
+        // PREPARING_FUNDS_OR_ITEMS bank-withdrawal step. Always rejected regardless of the
+        // guardrails master switch.
+        if (order.getAction() == GrandExchangeAction.SELL) {
+            int held = portfolio.getHeldQuantity(order.getItemName());
+            if (order.getQuantity() > held) {
+                return String.format(
+                    "sell quantity %d exceeds what's held (%d across bank + inventory)",
+                    order.getQuantity(), held);
+            }
+        }
+
         if (!config.guardrailsEnabled()) {
             return null;
         }
