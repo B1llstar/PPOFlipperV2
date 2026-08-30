@@ -31,7 +31,7 @@ import java.awt.image.BufferedImage;
 @Slf4j
 public class GeStarV2Plugin extends Plugin {
 
-    static final String version = "2.5.2";
+    static final String version = "2.5.3";
 
     @Inject
     private GeStarV2Config config;

@@ -219,9 +219,14 @@ public class GeStarV2Script extends Script {
         }
         lastFundsShortfallOrder = null;
 
+        // NOTE: Rs2GrandExchange.buyItem and .sellItem have inconsistent parameter order with
+        // each other - verified directly against the client jar's bytecode after a live bug
+        // report of price/quantity being swapped. buyItem(name, price, quantity) but
+        // sellItem(name, quantity, price). Do not "fix" this to look symmetric without
+        // re-verifying against the jar - it really is asymmetric.
         GrandExchangeSlots slotBefore = Rs2GrandExchange.getAvailableSlot();
         boolean submitted = order.getAction() == GrandExchangeAction.BUY
-            ? Rs2GrandExchange.buyItem(order.getItemName(), order.getQuantity(), order.getPrice())
+            ? Rs2GrandExchange.buyItem(order.getItemName(), order.getPrice(), order.getQuantity())
             : Rs2GrandExchange.sellItem(order.getItemName(), order.getQuantity(), order.getPrice());
 
         if (submitted) {

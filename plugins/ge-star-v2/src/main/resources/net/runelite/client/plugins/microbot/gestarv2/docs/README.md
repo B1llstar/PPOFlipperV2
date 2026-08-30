@@ -40,8 +40,12 @@ queue; that's what the panel buttons are for.
    - session GP spend cap (buys only)
    - max quantity per single order
    - max % deviation from the live guide price (`Rs2GrandExchange.getRealTimePrices`)
-4. Submits via `Rs2GrandExchange.buyItem(name, qty, price)` /
-   `sellItem(name, qty, price)`, marking the order `SUBMITTED`.
+4. Submits via `Rs2GrandExchange.buyItem(name, price, qty)` /
+   `sellItem(name, qty, price)`, marking the order `SUBMITTED`. **These two
+   methods take price and quantity in a different order from each other**
+   (verified against the client jar's bytecode after a live bug where they
+   were swapped) - see the comment at the call site in
+   `GeStarV2Script.java` before touching this.
 5. Withdraws coins (for buys) or the sale item (for sells) from the bank if
    the inventory doesn't already have enough, when "Withdraw from bank if
    needed" is enabled.
