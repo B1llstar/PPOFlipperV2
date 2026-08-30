@@ -55,12 +55,50 @@ queue; that's what the panel buttons are for.
 7. Optionally stops itself once the queue has no `QUEUED` or `SUBMITTED`
    orders left.
 
+## Web sync (PPOFlipperOpus)
+
+Orders can also come from the [PPOFlipperOpus web UI](https://ppoflipperopus.web.app)
+(`firebase/` at the repo root — a Cloud Functions + Firestore backend and a
+static page) instead of the in-game panel:
+
+1. Web UI calls a `createOrder` Cloud Function, which validates the request
+   and writes a `QUEUED` document to the `orders` Firestore collection.
+2. `GeStarFirestoreSync` (enabled via the **Web sync** config section) polls
+   that collection every 5 seconds on its own thread, pulls new `QUEUED`
+   documents into the same `GeStarOrderQueue` the sidebar panel uses, and
+   pushes status/fill changes back to Firestore as the script processes
+   them.
+3. The web UI has a live Firestore listener, so order status updates
+   (`QUEUED` → `SUBMITTED` → `DONE`/`SKIPPED`) appear there in real time too.
+
+Orders added locally through the panel and orders pulled from the web share
+one queue and go through the same guardrails — the web UI is just another
+way to add to the queue, not a separate execution path.
+
+**Auth model:** the plugin authenticates to Firestore using the Firebase
+service-account JSON (`ppoflipperopus-firebase-adminsdk-*.json` at the repo
+root, gitignored — see `firestoreServiceAccountPath` in config) via plain
+HTTPS (`GoogleServiceAccountAuth` signs a JWT and exchanges it for an OAuth
+token; `GeStarFirestoreClient` calls the Firestore REST API directly) rather
+than the Admin SDK, to avoid pulling gRPC/Guava/Protobuf into a jar that
+gets sideloaded into the same JVM as the game client. **Never commit or
+share that JSON file** — it grants full admin access to the whole Firebase
+project, not just this collection.
+
 ## Files
 
 - `GeStarV2Plugin.java` — `@PluginDescriptor`, wires config/overlay/script/
-  queue, adds the sidebar panel/nav button, subscribes to
+  queue/Firestore sync, adds the sidebar panel/nav button, subscribes to
   `GrandExchangeOfferChanged` for real-time fill detection. Exposes
   `execute()`/`stop()` for the panel.
+- `GeStarFirestoreSync.java` — polls Firestore for web-submitted orders and
+  mirrors status/fill changes back; runs on its own thread, independent of
+  Execute/Stop.
+- `GeStarFirestoreClient.java` — Firestore REST API calls (list QUEUED
+  orders, patch status) matching the schema in
+  `firebase/functions/src/orders.ts`.
+- `GoogleServiceAccountAuth.java` — service-account JWT signing and OAuth
+  token exchange/caching, no SDK dependency.
 - `GeStarV2Panel.java` — the sidebar `JPanel`: add-order form, live order
   queue list, Execute/Stop buttons, status readout.
 - `GeStarOrderQueue.java` — the shared, thread-safe order list the panel
@@ -115,6 +153,8 @@ stops the script, if configured) — it never reaches
 5. Adjust guardrails to taste in the config screen, especially the GP spend
    cap.
 6. Click **Execute** and watch the queue fill live.
+7. Optionally, enable **Web sync** in config and point it at the service
+   account JSON path to also accept orders from the PPOFlipperOpus web UI.
 
 ## Building
 
@@ -134,3 +174,10 @@ stops the script, if configured) — it never reaches
   `Rs2ItemManager.getItemId(String)`; if a name doesn't resolve, that
   specific guardrail is skipped rather than blocking the order (the GE's own
   search is the real source of truth for whether a name is valid).
+- The web UI's `cancelOrder` function only supports cancelling `QUEUED`
+  orders (no live GE offer exists yet). Cancelling a `SUBMITTED` order from
+  the web isn't wired up - it would need `GeStarFirestoreSync` to poll for a
+  cancellation flag and call `Rs2GrandExchange.abortOffer` locally.
+- `firebase/functions` requires the project to be on Firebase's Blaze
+  (pay-as-you-go) plan to deploy - Firestore rules/indexes and Hosting work
+  on the free Spark plan, but Cloud Functions do not.

@@ -138,4 +138,34 @@ public interface GeStarV2Config extends Config {
     default boolean stopWhenOrdersComplete() {
         return true;
     }
+
+    @ConfigSection(
+        name = "Web sync",
+        description = "Pull orders from the PPOFlipperOpus web UI via Firestore",
+        position = 3,
+        closedByDefault = true
+    )
+    String webSyncSection = "webSync";
+
+    @ConfigItem(
+        keyName = "firestoreSyncEnabled",
+        name = "Enable web sync",
+        description = "Poll Firestore for orders submitted from the web UI and add them to this queue, pushing status/fills back",
+        position = 0,
+        section = webSyncSection
+    )
+    default boolean firestoreSyncEnabled() {
+        return false;
+    }
+
+    @ConfigItem(
+        keyName = "firestoreServiceAccountPath",
+        name = "Service account JSON path",
+        description = "Absolute path to the Firebase service account key file. Never share this file or commit it to git.",
+        position = 1,
+        section = webSyncSection
+    )
+    default String firestoreServiceAccountPath() {
+        return "";
+    }
 }

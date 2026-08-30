@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PPOFlipperOpus - GE Star</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #1b1b1e;
+    --panel: #232327;
+    --panel-2: #2b2b30;
+    --border: #38383e;
+    --text: #e8e8ea;
+    --text-dim: #9a9aa2;
+    --accent: #d97b2b;
+    --green: #4fbf7a;
+    --red: #e05a50;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--text-dim); font-size: 13px; }
+  main {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+  }
+  .panel h2 { margin: 0 0 12px; font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+  #authPanel { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+  input {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 14px;
+  }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 9px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.secondary { background: var(--panel-2); border: 1px solid var(--border); }
+  button.danger { background: var(--red); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  form#orderForm { display: grid; grid-template-columns: 2fr 1fr 1fr auto auto; gap: 8px; align-items: end; }
+  form#orderForm label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  select { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-dim); font-weight: 500; }
+  .status-QUEUED { color: var(--text-dim); }
+  .status-SUBMITTED { color: var(--accent); }
+  .status-DONE { color: var(--green); }
+  .status-SKIPPED, .status-FAILED { color: var(--red); }
+  .hint { color: var(--text-dim); font-size: 12px; margin-top: 6px; }
+  #errorBanner {
+    display: none;
+    background: rgba(224, 90, 80, 0.15);
+    border: 1px solid var(--red);
+    color: var(--red);
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>GE Star - PPOFlipperOpus</h1>
+    <div class="sub">Submit Grand Exchange orders here, watch them get filled in-game</div>
+  </div>
+  <div id="userBox"></div>
+</header>
+
+<main>
+  <div id="errorBanner"></div>
+
+  <section class="panel" id="authPanel">
+    <h2>Sign in</h2>
+    <div id="signInForm">
+      <input id="email" type="email" placeholder="Email" autocomplete="username" />
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password" />
+      <div style="display:flex; gap:8px;">
+        <button id="signInBtn">Sign in</button>
+        <button id="signUpBtn" class="secondary">Create account</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="orderFormPanel" hidden>
+    <h2>New order</h2>
+    <form id="orderForm">
+      <div>
+        <label>Item name</label>
+        <input id="itemName" type="text" required maxlength="100" placeholder="e.g. Nature rune" />
+      </div>
+      <div>
+        <label>Quantity</label>
+        <input id="quantity" type="number" min="1" required placeholder="1000" />
+      </div>
+      <div>
+        <label>Price ea.</label>
+        <input id="price" type="number" min="1" required placeholder="180" />
+      </div>
+      <div>
+        <label>Action</label>
+        <select id="action">
+          <option value="BUY">Buy</option>
+          <option value="SELL">Sell</option>
+        </select>
+      </div>
+      <button id="addOrderBtn" type="submit">Add order</button>
+    </form>
+    <div class="hint">Orders land here as QUEUED, then GE Star V2 (running in your RuneLite client) picks them up, submits them on the Grand Exchange, and updates status live.</div>
+  </section>
+
+  <section class="panel" id="ordersPanel" hidden>
+    <h2>Your orders</h2>
+    <table>
+      <thead>
+        <tr><th>Action</th><th>Item</th><th>Qty</th><th>Price</th><th>Status</th><th></th></tr>
+      </thead>
+      <tbody id="ordersBody"></tbody>
+    </table>
+    <div class="hint" id="emptyHint">No orders yet - add one above.</div>
+  </section>
+</main>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getAuth, onAuthStateChanged, signInWithEmailAndPassword,
+    createUserWithEmailAndPassword, signOut
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+  import {
+    getFirestore, collection, query, where, orderBy, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+  import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-functions.js";
+
+  // Public web app config (safe to embed - Firestore security rules and
+  // callable-function auth checks are what actually protect data, not this key).
+  const firebaseConfig = {
+    projectId: "ppoflipperopus",
+    appId: "1:631485979464:web:b1696588c9ebc5eb7df17d",
+    storageBucket: "ppoflipperopus.firebasestorage.app",
+    apiKey: "AIzaSyAC3KY6nPtjlhVy3XER1JN2gIgX3e7VZcs",
+    authDomain: "ppoflipperopus.firebaseapp.com",
+    messagingSenderId: "631485979464",
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+  const functions = getFunctions(app);
+
+  const createOrderFn = httpsCallable(functions, "createOrder");
+  const cancelOrderFn = httpsCallable(functions, "cancelOrder");
+
+  const errorBanner = document.getElementById("errorBanner");
+  const userBox = document.getElementById("userBox");
+  const authPanel = document.getElementById("authPanel");
+  const orderFormPanel = document.getElementById("orderFormPanel");
+  const ordersPanel = document.getElementById("ordersPanel");
+  const ordersBody = document.getElementById("ordersBody");
+  const emptyHint = document.getElementById("emptyHint");
+
+  let unsubscribeOrders = null;
+
+  function showError(message) {
+    errorBanner.textContent = message;
+    errorBanner.style.display = "block";
+  }
+  function clearError() {
+    errorBanner.style.display = "none";
+  }
+
+  document.getElementById("signInBtn").addEventListener("click", async () => {
+    clearError();
+    try {
+      await signInWithEmailAndPassword(auth, email.value, password.value);
+    } catch (err) {
+      showError(err.message);
+    }
+  });
+
+  document.getElementById("signUpBtn").addEventListener("click", async () => {
+    clearError();
+    try {
+      await createUserWithEmailAndPassword(auth, email.value, password.value);
+    } catch (err) {
+      showError(err.message);
+    }
+  });
+
+  onAuthStateChanged(auth, (user) => {
+    if (unsubscribeOrders) {
+      unsubscribeOrders();
+      unsubscribeOrders = null;
+    }
+
+    if (user) {
+      userBox.innerHTML = "";
+      const label = document.createElement("span");
+      label.textContent = user.email + " ";
+      label.style.color = "var(--text-dim)";
+      label.style.fontSize = "13px";
+      const signOutBtn = document.createElement("button");
+      signOutBtn.textContent = "Sign out";
+      signOutBtn.className = "secondary";
+      signOutBtn.addEventListener("click", () => signOut(auth));
+      userBox.appendChild(label);
+      userBox.appendChild(signOutBtn);
+
+      authPanel.hidden = true;
+      orderFormPanel.hidden = false;
+      ordersPanel.hidden = false;
+
+      watchOrders(user.uid);
+    } else {
+      userBox.innerHTML = "";
+      authPanel.hidden = false;
+      orderFormPanel.hidden = true;
+      ordersPanel.hidden = true;
+      ordersBody.innerHTML = "";
+    }
+  });
+
+  function watchOrders(uid) {
+    const q = query(
+      collection(db, "orders"),
+      where("ownerUid", "==", uid),
+      orderBy("createdAt", "desc")
+    );
+    unsubscribeOrders = onSnapshot(q, (snapshot) => {
+      renderOrders(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })));
+    }, (err) => {
+      showError("Failed to load orders: " + err.message);
+    });
+  }
+
+  function renderOrders(orders) {
+    ordersBody.innerHTML = "";
+    emptyHint.style.display = orders.length === 0 ? "block" : "none";
+
+    for (const order of orders) {
+      const tr = document.createElement("tr");
+
+      const statusText = order.status === "SKIPPED" || order.status === "FAILED"
+        ? `${order.status}${order.statusDetail ? ": " + order.statusDetail : ""}`
+        : order.status === "SUBMITTED"
+          ? `SUBMITTED (${order.quantityFilled || 0}/${order.quantity})`
+          : order.status;
+
+      tr.innerHTML = `
+        <td>${escapeHtml(order.action)}</td>
+        <td>${escapeHtml(order.itemName)}</td>
+        <td>${order.quantity.toLocaleString()}</td>
+        <td>${order.price.toLocaleString()} gp</td>
+        <td class="status-${order.status}">${escapeHtml(statusText)}</td>
+        <td></td>
+      `;
+
+      if (order.status === "QUEUED") {
+        const cancelBtn = document.createElement("button");
+        cancelBtn.textContent = "Cancel";
+        cancelBtn.className = "danger";
+        cancelBtn.addEventListener("click", async () => {
+          cancelBtn.disabled = true;
+          try {
+            await cancelOrderFn({ orderId: order.id });
+          } catch (err) {
+            showError(err.message);
+            cancelBtn.disabled = false;
+          }
+        });
+        tr.lastElementChild.appendChild(cancelBtn);
+      }
+
+      ordersBody.appendChild(tr);
+    }
+  }
+
+  function escapeHtml(s) {
+    const div = document.createElement("div");
+    div.textContent = String(s);
+    return div.innerHTML;
+  }
+
+  document.getElementById("orderForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    clearError();
+
+    const addBtn = document.getElementById("addOrderBtn");
+    addBtn.disabled = true;
+
+    try {
+      await createOrderFn({
+        action: document.getElementById("action").value,
+        itemName: document.getElementById("itemName").value.trim(),
+        quantity: Number(document.getElementById("quantity").value),
+        price: Number(document.getElementById("price").value),
+      });
+      document.getElementById("orderForm").reset();
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      addBtn.disabled = false;
+    }
+  });
+</script>
+
+</body>
+</html>

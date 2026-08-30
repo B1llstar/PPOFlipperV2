@@ -10,3 +10,10 @@ out/
 .DS_Store
 
 gradle/wrapper/dists/
+
+# Firebase / GCP service account keys - never commit credentials
+*firebase-adminsdk*.json
+*serviceAccountKey*.json
+.env
+.env.*
+

@@ -45,6 +45,14 @@ public class GeStarOrder {
     @Setter
     private volatile GrandExchangeSlots slot;
 
+    /**
+     * Firestore document ID this order was created from, or null for orders added locally
+     * through the panel. Set by {@link GeStarFirestoreSync} so status/fill updates get
+     * written back to the same document instead of creating a duplicate.
+     */
+    @Setter
+    private volatile String firestoreDocId;
+
     public GeStarOrder(GrandExchangeAction action, String itemName, int quantity, int price) {
         this.action = action;
         this.itemName = itemName;

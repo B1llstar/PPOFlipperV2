@@ -1,0 +1,19 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Orders are created/updated only through Cloud Functions (which run with
+    // admin privileges and bypass these rules entirely) so that quantity/price
+    // guardrails and ownership are always enforced server-side. Signed-in users
+    // may only read their own orders directly for live UI updates.
+    match /orders/{orderId} {
+      allow read: if request.auth != null && request.auth.uid == resource.data.ownerUid;
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

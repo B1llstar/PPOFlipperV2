@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.grandexchange.GrandExchangePlugin;
@@ -29,7 +30,7 @@ import java.awt.image.BufferedImage;
 @Slf4j
 public class GeStarV2Plugin extends Plugin {
 
-    static final String version = "2.3.0";
+    static final String version = "2.4.0";
 
     @Inject
     private GeStarV2Config config;
@@ -45,6 +46,9 @@ public class GeStarV2Plugin extends Plugin {
 
     @Inject
     private GeStarOrderQueue queue;
+
+    @Inject
+    private GeStarFirestoreSync firestoreSync;
 
     @Inject
     private ClientToolbar clientToolbar;
@@ -63,10 +67,15 @@ public class GeStarV2Plugin extends Plugin {
         addPanel();
         // The script only starts when the panel's Execute button is clicked - enabling the
         // plugin just makes the sidebar panel and overlay available.
+
+        if (config.firestoreSyncEnabled()) {
+            firestoreSync.start(config);
+        }
     }
 
     @Override
     protected void shutDown() {
+        firestoreSync.stop();
         script.shutdown();
         removePanel();
         overlayManager.remove(overlay);
@@ -115,5 +124,17 @@ public class GeStarV2Plugin extends Plugin {
     @Subscribe
     public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event) {
         script.onOfferChanged(event);
+    }
+
+    @Subscribe
+    public void onConfigChanged(ConfigChanged event) {
+        if (!event.getGroup().equals("gestarv2")) return;
+        if (!event.getKey().equals("firestoreSyncEnabled") && !event.getKey().equals("firestoreServiceAccountPath")) return;
+
+        if (config.firestoreSyncEnabled()) {
+            firestoreSync.start(config);
+        } else {
+            firestoreSync.stop();
+        }
     }
 }
