@@ -196,10 +196,20 @@ uvicorn main:app --host 127.0.0.1 --port 8420
 ```
 
 `GET /candidates?limit=20` scans the currently-liquid item universe and
-returns the top-N by predicted margin - this is what the GE Flipper plugin
-(Java side, not yet built) will call to decide what to queue. `GET /health`
-for a liveness check. Binds to `127.0.0.1` only - a local sidecar for the
-plugin running on the same machine, not a public API.
+returns the top-N by predicted margin - this is what
+[FlipperStar](../plugins/flipper-star/) (the Java plugin) calls to decide
+what to queue into GE Star V2. `GET /health` for a liveness check. Binds to
+`127.0.0.1` only - a local sidecar for the plugin running on the same
+machine, not a public API.
+
+**Starting this alongside the game:** `scripts/launch-with-flipper.sh` (repo
+root) starts this service in the background, waits for it to report
+healthy, then launches the client via the normal `scripts/launch.sh` -
+one command instead of two terminals. It also has a Launchpad icon
+("BotStar + FlipperStar") alongside the plain "BotStar Launcher" - separate
+apps, since you don't always want the scoring service running (e.g. testing
+GE Star V2 alone). The service is killed automatically when the client
+closes.
 
 **Live feature computation is a necessary approximation of training,
 documented rather than glossed over** - see `service/live_features.py`'s

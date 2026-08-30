@@ -163,6 +163,20 @@ that are no longer valid, it will show failed auto-login attempts on
 startup — that's Jagex account state on your machine, unrelated to this
 repo's build. Log in manually from the client window when that happens.
 
+**With FlipperStar's scoring service:** `./scripts/launch-with-flipper.sh`
+starts the FlipperStar scoring service (`data/service/`) in the background,
+waits for it to report healthy, then runs `launch.sh` as normal — one
+command instead of running both separately. Kills the service automatically
+when the client closes. A separate script, not a flag on `launch.sh`, so
+the plain path stays untouched when you don't need the scoring service
+running (e.g. testing GE Star V2 alone). See `data/README.md`'s "Scoring
+service" section for details, and `plugins/flipper-star/`'s docs for what
+consumes it.
+
+On macOS, both scripts also have Launchpad icons ("BotStar Launcher" and
+"BotStar + FlipperStar") for a one-click launch without opening a terminal
+manually.
+
 ## Adding a new plugin
 
 1. `mkdir -p plugins/<name>/src/main/java/net/runelite/client/plugins/microbot/<name>`

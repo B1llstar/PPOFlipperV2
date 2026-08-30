@@ -24,5 +24,6 @@ data/raw/
 data/processed/
 data/__pycache__/
 data/pipeline/__pycache__/
+data/service.log
 *.pyc
 
