@@ -156,13 +156,13 @@ public class GeStarV2Script extends Script {
         }
 
         if (orderAwaitingFunds.getAction() == GrandExchangeAction.BUY) {
-            long needed = orderAwaitingFunds.totalValue() - Rs2Inventory.count(ItemID.COINS);
+            long needed = orderAwaitingFunds.totalValue() - Rs2Inventory.itemQuantity(ItemID.COINS);
             if (needed > 0) {
                 Rs2Bank.withdrawX(ItemID.COINS, (int) needed);
                 Rs2Inventory.waitForInventoryChanges(5000);
             }
         } else {
-            int have = Rs2Inventory.count(orderAwaitingFunds.getItemName());
+            int have = Rs2Inventory.itemQuantity(orderAwaitingFunds.getItemName());
             int needed = orderAwaitingFunds.getQuantity() - have;
             if (needed > 0) {
                 Rs2Bank.withdrawX(orderAwaitingFunds.getItemName(), needed);
@@ -243,9 +243,9 @@ public class GeStarV2Script extends Script {
 
     private boolean hasFundsOrItems(GeStarOrder order) {
         if (order.getAction() == GrandExchangeAction.BUY) {
-            return Rs2Inventory.count(ItemID.COINS) >= order.totalValue();
+            return Rs2Inventory.itemQuantity(ItemID.COINS) >= order.totalValue();
         }
-        return Rs2Inventory.count(order.getItemName()) >= order.getQuantity();
+        return Rs2Inventory.itemQuantity(order.getItemName()) >= order.getQuantity();
     }
 
     private void monitorOffers() {
