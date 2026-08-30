@@ -99,12 +99,42 @@ re-running this ~3.5 minute build. Even a fairly strict filter
 so training will need an explicit percentile clip on top of a liquidity
 filter, not liquidity filtering alone.
 
+## Preparing the training dataset
+
+```bash
+cd pipeline
+python prepare_training_data.py
+```
+
+Applies the liquidity filter + outlier clip called for above, on top of
+`features.parquet`, then splits chronologically into `processed/train.parquet`
+and `processed/validation.parquet` (last 21 days by default, `--validation-days`
+to change) - **never a random split**, since a random split would let the
+model train on rows whose 4-hour forward label window overlaps
+validation-period data it's being tested on, making validation error look
+better than it really is. A 4-hour gap (matching the label horizon) is left
+between the two periods so no training row's label reaches into validation
+data at all - verified on the actual output (`train.timestamp.max()` to
+`validation.timestamp.min()` is exactly 4.0h).
+
+Defaults (`--min-price 10 --min-qty 5 --clip-percentile 0.995`) keep 40% of
+rows and clip label_margin_pct to roughly [-10%, 200%] - down from a raw max
+of 432,000%. Resulting train set: 4.78M rows, median margin 3.4%, no nulls.
+
+**Memory design:** this machine runs with genuinely tight, sustained memory
+pressure (confirmed via `sysctl vm.swapusage` showing real swap usage even
+at idle, not just app noise) - a first version that loaded the full 3.3GB
+`features.parquet` via `pd.read_parquet()` got this process killed. The
+script now streams through the file's row groups (`pyarrow.parquet`'s
+`iter_batches`, 50k rows at a time) in two passes - one to compute clip
+thresholds from just the label column, one to filter/clip/split and write
+incrementally - so peak memory stays bounded by one small batch at a time
+regardless of the input file's total size. In practice this finishes the
+full 52M-row dataset in under 20 seconds.
+
 ## Next steps (not yet built)
 
-- Training dataset prep: liquidity filter + outlier clipping on top of
-  `features.parquet` (see above), train/validation split (careful to split
-  by time, not randomly - a model trained on data that leaks future
-  information back into "past" training rows would look better than it is).
-- Training a margin-prediction model on the resulting dataset.
+- Training a margin-prediction model on `processed/train.parquet` /
+  `processed/validation.parquet`.
 - A small scoring service the GE Flipper plugin calls over HTTP to get
   ranked flip candidates.
