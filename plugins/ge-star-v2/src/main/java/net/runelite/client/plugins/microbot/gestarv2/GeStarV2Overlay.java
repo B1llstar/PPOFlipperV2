@@ -12,11 +12,13 @@ import java.awt.*;
 public class GeStarV2Overlay extends OverlayPanel {
 
     private final GeStarV2Script script;
+    private final GeStarOrderQueue queue;
 
     @Inject
-    GeStarV2Overlay(GeStarV2Plugin plugin, GeStarV2Script script) {
+    GeStarV2Overlay(GeStarV2Plugin plugin, GeStarV2Script script, GeStarOrderQueue queue) {
         super(plugin);
         this.script = script;
+        this.queue = queue;
         setPosition(OverlayPosition.TOP_LEFT);
         setLayer(OverlayLayer.ABOVE_WIDGETS);
     }
@@ -35,8 +37,8 @@ public class GeStarV2Overlay extends OverlayPanel {
             .build());
 
         panelComponent.getChildren().add(LineComponent.builder()
-            .left("Pending orders")
-            .right(String.valueOf(script.getPendingOrderCount()))
+            .left("Queued orders")
+            .right(String.valueOf(queue.countByStatus(GeStarOrder.Status.QUEUED)))
             .build());
 
         panelComponent.getChildren().add(LineComponent.builder()

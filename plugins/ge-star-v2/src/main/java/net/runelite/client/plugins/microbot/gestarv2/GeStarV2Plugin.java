@@ -18,7 +18,7 @@ import java.awt.image.BufferedImage;
 
 @PluginDescriptor(
     name = "BotStar GE Star V2",
-    description = "Buys and sells items on the Grand Exchange from name/price/quantity order lists, with spend and price guardrails.",
+    description = "Buys and sells items on the Grand Exchange from an order queue managed in the sidebar panel, with spend and price guardrails.",
     tags = {"ge", "grand exchange", "flip", "buy", "sell", "economy"},
     authors = {"billstar"},
     version = GeStarV2Plugin.version,
@@ -29,7 +29,7 @@ import java.awt.image.BufferedImage;
 @Slf4j
 public class GeStarV2Plugin extends Plugin {
 
-    static final String version = "2.1.0";
+    static final String version = "2.2.0";
 
     @Inject
     private GeStarV2Config config;
@@ -42,6 +42,9 @@ public class GeStarV2Plugin extends Plugin {
 
     @Inject
     private GeStarV2Script script;
+
+    @Inject
+    private GeStarOrderQueue queue;
 
     @Inject
     private ClientToolbar clientToolbar;
@@ -70,7 +73,7 @@ public class GeStarV2Plugin extends Plugin {
     }
 
     private void addPanel() {
-        panel = new GeStarV2Panel(this, script, config);
+        panel = new GeStarV2Panel(this, script, queue);
 
         // Reuse the client's own Grand Exchange icon (bundled in the client jar) instead of
         // shipping a duplicate image asset.

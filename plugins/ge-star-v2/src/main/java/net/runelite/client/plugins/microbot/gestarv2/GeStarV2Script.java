@@ -16,18 +16,16 @@ import net.runelite.client.plugins.microbot.util.grandexchange.models.GrandExcha
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 
 import javax.inject.Inject;
-import java.util.ArrayDeque;
-import java.util.Arrays;
-import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /**
- * State machine that walks the buy/sell order lists, submits offers through
- * {@link Rs2GrandExchange}, and collects fills as they complete. Guardrails from
- * {@link GeStarGuardrails} are checked immediately before every offer submission.
+ * State machine that pulls queued orders from the shared {@link GeStarOrderQueue} (the same
+ * queue the sidebar panel reads and lets the user add/remove from), submits offers through
+ * {@link Rs2GrandExchange}, and updates each order's live status/fill as it progresses.
+ * Guardrails from {@link GeStarGuardrails} are checked immediately before every submission.
  */
 @Slf4j
 public class GeStarV2Script extends Script {
@@ -35,6 +33,7 @@ public class GeStarV2Script extends Script {
     private static final int SCHEDULE_INTERVAL_MS = 600;
 
     enum State {
+        IDLE,
         GOING_TO_GE,
         PREPARING_FUNDS_OR_ITEMS,
         SUBMITTING_ORDERS,
@@ -42,26 +41,33 @@ public class GeStarV2Script extends Script {
         DONE
     }
 
+    private final GeStarOrderQueue queue;
+
     private GeStarV2Config config;
     private GeStarGuardrails guardrails;
 
-    private State state = State.GOING_TO_GE;
-    private final Deque<GeStarOrder> pendingOrders = new ArrayDeque<>();
+    private State state = State.IDLE;
     private final Map<GrandExchangeSlots, GeStarOrder> activeOrders = new LinkedHashMap<>();
-    private GeStarOrder ordersAwaitingFunds;
+    private GeStarOrder orderAwaitingFunds;
     private GeStarOrder lastFundsShortfallOrder;
+
+    @Inject
+    public GeStarV2Script(GeStarOrderQueue queue) {
+        this.queue = queue;
+    }
 
     public boolean run(GeStarV2Config config) {
         this.config = config;
         this.guardrails = new GeStarGuardrails(config);
         this.guardrails.reset();
         this.state = State.GOING_TO_GE;
-        this.pendingOrders.clear();
         this.activeOrders.clear();
-        this.ordersAwaitingFunds = null;
+        this.orderAwaitingFunds = null;
         this.lastFundsShortfallOrder = null;
 
-        loadOrders();
+        // Re-queue anything left SUBMITTED from a previous run that got interrupted -
+        // there's no live GE slot backing it anymore, so it needs to be resubmitted.
+        queue.getByStatus(GeStarOrder.Status.SUBMITTED).forEach(o -> o.setStatus(GeStarOrder.Status.QUEUED));
 
         Rs2AntibanSettings.naturalMouse = true;
         Rs2Antiban.setActivityIntensity(ActivityIntensity.LOW);
@@ -82,30 +88,18 @@ public class GeStarV2Script extends Script {
 
     @Override
     public void shutdown() {
-        pendingOrders.clear();
         activeOrders.clear();
-        ordersAwaitingFunds = null;
+        orderAwaitingFunds = null;
         lastFundsShortfallOrder = null;
+        state = State.IDLE;
         super.shutdown();
-    }
-
-    private void loadOrders() {
-        Arrays.stream(config.buyOrders().split("\\r?\\n"))
-            .map(line -> GeStarOrder.parse(GrandExchangeAction.BUY, line))
-            .filter(java.util.Objects::nonNull)
-            .forEach(pendingOrders::add);
-
-        Arrays.stream(config.sellOrders().split("\\r?\\n"))
-            .map(line -> GeStarOrder.parse(GrandExchangeAction.SELL, line))
-            .filter(java.util.Objects::nonNull)
-            .forEach(pendingOrders::add);
-
-        log.info("GE Star V2 loaded {} order(s): {}", pendingOrders.size(),
-            pendingOrders.stream().map(GeStarOrder::toString).collect(Collectors.joining(" | ")));
     }
 
     private void tick() {
         switch (state) {
+            case IDLE:
+                break;
+
             case GOING_TO_GE:
                 if (Rs2GrandExchange.isOpen()) {
                     state = State.SUBMITTING_ORDERS;
@@ -131,26 +125,23 @@ public class GeStarV2Script extends Script {
 
             case DONE:
                 if (config.stopWhenOrdersComplete()) {
-                    log.info("GE Star V2: all orders complete, stopping plugin.");
-                    Microbot.getClientThread().invoke(() -> Microbot.stopPlugin(
-                        Microbot.getPluginManager().getPlugins().stream()
-                            .filter(p -> p.getClass().getSimpleName().equals("GeStarV2Plugin"))
-                            .findFirst()
-                            .orElse(null)));
+                    log.info("GE Star V2: queue empty, stopping script.");
+                    shutdown();
                 }
                 break;
         }
     }
 
     private void prepareFundsOrItems() {
-        if (ordersAwaitingFunds == null) {
+        if (orderAwaitingFunds == null) {
             state = State.SUBMITTING_ORDERS;
             return;
         }
 
         if (!config.withdrawFromBank()) {
-            log.warn("GE Star V2: insufficient funds/items for {} and bank withdrawal is disabled, skipping.", ordersAwaitingFunds);
-            ordersAwaitingFunds = null;
+            log.warn("GE Star V2: insufficient funds/items for {} and bank withdrawal is disabled, skipping.", orderAwaitingFunds);
+            markSkipped(orderAwaitingFunds, "Insufficient funds/items, bank withdrawal disabled");
+            orderAwaitingFunds = null;
             state = State.SUBMITTING_ORDERS;
             return;
         }
@@ -160,24 +151,24 @@ public class GeStarV2Script extends Script {
             sleepUntil(Rs2Bank::isOpen);
         }
 
-        if (ordersAwaitingFunds.getAction() == GrandExchangeAction.BUY) {
-            long needed = ordersAwaitingFunds.totalValue() - Rs2Inventory.count("Coins");
+        if (orderAwaitingFunds.getAction() == GrandExchangeAction.BUY) {
+            long needed = orderAwaitingFunds.totalValue() - Rs2Inventory.count("Coins");
             if (needed > 0) {
                 Rs2Bank.withdrawX("Coins", (int) needed);
                 Rs2Inventory.waitForInventoryChanges(5000);
             }
         } else {
-            int have = Rs2Inventory.count(ordersAwaitingFunds.getItemName());
-            int needed = ordersAwaitingFunds.getQuantity() - have;
+            int have = Rs2Inventory.count(orderAwaitingFunds.getItemName());
+            int needed = orderAwaitingFunds.getQuantity() - have;
             if (needed > 0) {
-                Rs2Bank.withdrawX(ordersAwaitingFunds.getItemName(), needed);
+                Rs2Bank.withdrawX(orderAwaitingFunds.getItemName(), needed);
                 Rs2Inventory.waitForInventoryChanges(5000);
             }
         }
 
         Rs2Bank.closeBank();
         sleepUntil(() -> !Rs2Bank.isOpen());
-        ordersAwaitingFunds = null;
+        orderAwaitingFunds = null;
         state = State.SUBMITTING_ORDERS;
     }
 
@@ -192,24 +183,20 @@ public class GeStarV2Script extends Script {
             return;
         }
 
-        if (pendingOrders.isEmpty()) {
+        Optional<GeStarOrder> next = queue.nextQueued();
+        if (!next.isPresent()) {
             state = activeOrders.isEmpty() ? State.DONE : State.MONITORING_OFFERS;
             return;
         }
-
-        GeStarOrder order = pendingOrders.peekFirst();
+        GeStarOrder order = next.get();
 
         String rejection = guardrails.check(order);
         if (rejection != null) {
             log.warn("GE Star V2: rejected order [{}] - {}", order, rejection);
-            pendingOrders.pollFirst();
+            markSkipped(order, rejection);
             if (config.stopOnGuardrailBreach()) {
                 log.error("GE Star V2: stopping on guardrail breach as configured.");
-                Microbot.getClientThread().invoke(() -> Microbot.stopPlugin(
-                    Microbot.getPluginManager().getPlugins().stream()
-                        .filter(p -> p.getClass().getSimpleName().equals("GeStarV2Plugin"))
-                        .findFirst()
-                        .orElse(null)));
+                shutdown();
             }
             return;
         }
@@ -217,12 +204,12 @@ public class GeStarV2Script extends Script {
         if (!hasFundsOrItems(order)) {
             if (order == lastFundsShortfallOrder) {
                 log.warn("GE Star V2: still short funds/items for {} after a bank visit, skipping.", order);
-                pendingOrders.pollFirst();
+                markSkipped(order, "Insufficient funds/items after bank visit");
                 lastFundsShortfallOrder = null;
                 return;
             }
             lastFundsShortfallOrder = order;
-            ordersAwaitingFunds = order;
+            orderAwaitingFunds = order;
             state = State.PREPARING_FUNDS_OR_ITEMS;
             return;
         }
@@ -234,11 +221,13 @@ public class GeStarV2Script extends Script {
             : Rs2GrandExchange.sellItem(order.getItemName(), order.getQuantity(), order.getPrice());
 
         if (submitted) {
-            pendingOrders.pollFirst();
             if (order.getAction() == GrandExchangeAction.BUY) {
                 guardrails.recordSpend(order.totalValue());
             }
             GrandExchangeSlots slot = slotBefore != null ? slotBefore : Rs2GrandExchange.findSlotForItem(order.getItemName(), order.getAction() == GrandExchangeAction.BUY);
+            order.setSlot(slot);
+            order.setStatus(GeStarOrder.Status.SUBMITTED);
+            queue.notifyChanged();
             if (slot != null) {
                 activeOrders.put(slot, order);
             }
@@ -273,6 +262,7 @@ public class GeStarV2Script extends Script {
             int filled = order.getAction() == GrandExchangeAction.BUY
                 ? Rs2GrandExchange.getItemsBoughtFromOffer(slot)
                 : Rs2GrandExchange.getItemsSoldFromOffer(slot);
+            order.setQuantityFilled(filled);
 
             GrandExchangeOfferState offerState = details.getState();
             boolean finished = offerState == GrandExchangeOfferState.BOUGHT
@@ -283,15 +273,23 @@ public class GeStarV2Script extends Script {
             if (finished) {
                 log.info("GE Star V2: offer complete in slot {} - {} ({} filled)", slot, order, filled);
                 Rs2GrandExchange.collectOffer(slot, config.collectToBank());
+                order.setStatus(GeStarOrder.Status.DONE);
                 activeOrders.remove(slot);
             }
+            queue.notifyChanged();
         }
 
-        if (activeOrders.isEmpty() && pendingOrders.isEmpty()) {
+        if (activeOrders.isEmpty() && !queue.nextQueued().isPresent()) {
             state = State.DONE;
-        } else if (activeOrders.size() < Math.max(1, config.maxActiveOffers()) && !pendingOrders.isEmpty()) {
+        } else if (activeOrders.size() < Math.max(1, config.maxActiveOffers()) && queue.nextQueued().isPresent()) {
             state = State.SUBMITTING_ORDERS;
         }
+    }
+
+    private void markSkipped(GeStarOrder order, String reason) {
+        order.setStatus(GeStarOrder.Status.SKIPPED);
+        order.setStatusDetail(reason);
+        queue.notifyChanged();
     }
 
     /**
@@ -307,10 +305,6 @@ public class GeStarV2Script extends Script {
             log.info("GE Star V2: detected fill in slot {} - {} of {}, state {}",
                 event.getSlot(), event.getOffer().getQuantitySold(), event.getOffer().getTotalQuantity(), offerState);
         }
-    }
-
-    public int getPendingOrderCount() {
-        return pendingOrders.size();
     }
 
     public int getActiveOfferCount() {

@@ -8,9 +8,9 @@ import net.runelite.client.config.ConfigSection;
 
 @ConfigGroup("gestarv2")
 @ConfigInformation(
-    "Buys and sells items on the Grand Exchange from simple order lists, with spend/price guardrails.<br /><br />" +
-    "Enter one order per line as <b>itemName,quantity,price</b>, e.g.:<br />" +
-    "<pre>Nature rune,1000,180\nYew logs,500,300</pre>" +
+    "Buys and sells items on the Grand Exchange from an order queue you manage in the sidebar" +
+    " panel (add items by name/quantity/price, watch them fill live), with spend/price" +
+    " guardrails.<br /><br />" +
     "Start at (or near) the Grand Exchange with the items or coins already in your inventory or bank.<br /><br />" +
     "made by billstar"
 )
@@ -18,39 +18,17 @@ public interface GeStarV2Config extends Config {
 
     @ConfigSection(
         name = "Orders",
-        description = "What to buy and sell",
+        description = "General order behavior",
         position = 0,
         closedByDefault = false
     )
     String ordersSection = "orders";
 
     @ConfigItem(
-        keyName = "buyOrders",
-        name = "Buy orders",
-        description = "One per line: itemName,quantity,price",
-        position = 0,
-        section = ordersSection
-    )
-    default String buyOrders() {
-        return "";
-    }
-
-    @ConfigItem(
-        keyName = "sellOrders",
-        name = "Sell orders",
-        description = "One per line: itemName,quantity,price. Items must be in your inventory or bank.",
-        position = 1,
-        section = ordersSection
-    )
-    default String sellOrders() {
-        return "";
-    }
-
-    @ConfigItem(
         keyName = "withdrawFromBank",
         name = "Withdraw from bank if needed",
         description = "If a sell item or GP shortfall isn't in your inventory, withdraw it from the bank before offering",
-        position = 2,
+        position = 0,
         section = ordersSection
     )
     default boolean withdrawFromBank() {
@@ -141,8 +119,8 @@ public interface GeStarV2Config extends Config {
 
     @ConfigItem(
         keyName = "stopWhenOrdersComplete",
-        name = "Stop plugin when all orders complete",
-        description = "Shuts the plugin down once every order in both lists has been filled and collected",
+        name = "Stop script when queue is empty",
+        description = "Shuts the script down once every queued order has been filled and collected",
         position = 1,
         section = behaviorSection
     )

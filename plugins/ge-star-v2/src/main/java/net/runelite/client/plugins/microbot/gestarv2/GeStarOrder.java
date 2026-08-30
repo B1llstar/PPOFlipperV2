@@ -1,54 +1,64 @@
 package net.runelite.client.plugins.microbot.gestarv2;
 
 import lombok.Getter;
+import lombok.Setter;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
+import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeSlots;
+
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * One line of a GE Star order list: {@code itemName,quantity,price}.
- * Price is the per-item offer price the user wants submitted (not a live market price).
+ * One buy/sell order, created from the panel's add-order form and tracked through its whole
+ * lifecycle in {@link GeStarOrderQueue} - the same instance is mutated in place as it moves
+ * from queued to submitted to done, so the panel can render live progress.
  */
 @Getter
 public class GeStarOrder {
 
+    public enum Status {
+        QUEUED,
+        SUBMITTED,
+        DONE,
+        SKIPPED,
+        FAILED
+    }
+
+    private static final AtomicLong NEXT_ID = new AtomicLong(1);
+
+    private final long id = NEXT_ID.getAndIncrement();
     private final GrandExchangeAction action;
     private final String itemName;
     private final int quantity;
     private final int price;
 
-    private GeStarOrder(GrandExchangeAction action, String itemName, int quantity, int price) {
+    @Setter
+    private volatile Status status = Status.QUEUED;
+
+    /** How many units have filled so far. Only meaningful once SUBMITTED. */
+    @Setter
+    private volatile int quantityFilled = 0;
+
+    /** Set when status is SKIPPED or FAILED, for display in the panel. */
+    @Setter
+    private volatile String statusDetail;
+
+    @Setter
+    private volatile GrandExchangeSlots slot;
+
+    public GeStarOrder(GrandExchangeAction action, String itemName, int quantity, int price) {
         this.action = action;
         this.itemName = itemName;
         this.quantity = quantity;
         this.price = price;
     }
 
-    /**
-     * Parses a single "name,quantity,price" line. Returns null (rather than throwing) on a
-     * malformed line so one bad row in the config box doesn't take down the whole batch.
-     */
-    public static GeStarOrder parse(GrandExchangeAction action, String line) {
-        if (line == null) return null;
-        String trimmed = line.trim();
-        if (trimmed.isEmpty() || trimmed.startsWith("#")) return null;
-
-        String[] parts = trimmed.split(",");
-        if (parts.length != 3) return null;
-
-        String name = parts[0].trim();
-        if (name.isEmpty()) return null;
-
-        try {
-            int quantity = Integer.parseInt(parts[1].trim());
-            int price = Integer.parseInt(parts[2].trim());
-            if (quantity <= 0 || price <= 0) return null;
-            return new GeStarOrder(action, name, quantity, price);
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
     public long totalValue() {
         return (long) quantity * price;
+    }
+
+    public int getProgressPercentage() {
+        if (quantity <= 0) return 0;
+        return Math.min(100, (int) (quantityFilled * 100L / quantity));
     }
 
     @Override
