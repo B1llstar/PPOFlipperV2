@@ -110,17 +110,42 @@ Each plugin subproject produces a shaded jar under
 
 ## Running it (side-loading — no marketplace, no PR)
 
-MicroBot's client supports loading plugins from a local folder without
-going through the in-client Plugin Hub. Point your client's side-load /
-external-plugins directory at the built jar (check the client's settings
-for the exact folder name/flag; it's covered in MicroBot's own docs under
-`docs/`), copy or symlink the jar there, and restart/reload the client.
+```bash
+./scripts/launch.sh
+```
 
-This is the entire distribution story for this repo: build locally,
-side-load locally. There is intentionally no CI publishing step, no GitHub
-Release, and no upstream PR — none of that machinery is needed unless you
-later decide you want a plugin listed in the official Microbot-Hub
-marketplace for other people to install.
+This does everything, fresh, every time — nothing here is a one-off manual
+step:
+
+1. Resolves the latest MicroBot client version from
+   `https://microbot.cloud/api/version/client` (falls back to the newest
+   already-downloaded jar if offline).
+2. Downloads `microbot-<version>.jar` from
+   [chsami/Microbot releases](https://github.com/chsami/Microbot/releases)
+   into `~/microbot-client/` if it isn't already cached there.
+3. Runs `./gradlew build -PmicrobotClientVersion=<version>`, so every
+   plugin in `plugins/` compiles against that exact client build.
+4. Copies every plugin's built jar into `~/.runelite/plugins/` — this is
+   RuneLite's real side-load directory (confirmed from the client's own
+   `RuneLite.PLUGINS_DIR` constant and `loadSideLoadPlugins()`, verified
+   by inspecting the actual class file — see
+   [plugins/VERIFYING_THE_API.md](plugins/VERIFYING_THE_API.md) for the
+   same verify-against-the-jar approach), auto-scanned on client startup.
+   No client settings/flags to configure by hand.
+5. Launches the client jar with the JDK 11 runtime Gradle already
+   provisioned (`~/.gradle/jdks/`), so no separate system Java install is
+   required.
+
+This is the entire distribution story for this repo: one script, always
+current, local only. There is intentionally no CI publishing step, no
+GitHub Release, and no upstream PR — none of that machinery is needed
+unless you later decide you want a plugin listed in the official
+Microbot-Hub marketplace for other people to install.
+
+Note: if the client has saved login credentials from a previous session
+that are no longer valid, it will show failed auto-login attempts on
+startup — that's Jagex account state on your machine, unrelated to this
+repo's build. Log in manually from the client window when that happens.
 
 ## Adding a new plugin
 
