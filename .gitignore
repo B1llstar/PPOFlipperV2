@@ -17,3 +17,12 @@ gradle/wrapper/dists/
 .env
 .env.*
 
+# GE Flipper data pipeline - pulled historical price data and Python venv,
+# not source, not something to commit (this dataset is large)
+data/venv/
+data/raw/
+data/processed/
+data/__pycache__/
+data/pipeline/__pycache__/
+*.pyc
+
