@@ -1,5 +1,7 @@
 package net.runelite.client.plugins.microbot.gestarv2.portfolio;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.config.ConfigManager;
@@ -27,6 +29,19 @@ import java.util.stream.Stream;
  * Holdings are read live on every call - they're cheap client-side lookups, no reason to
  * cache them stale. The cost-basis ledger is the only state actually owned by this class, and
  * it's persisted through ConfigManager so it survives plugin/client restarts.
+ *
+ * <p><b>Why this hand-rolls JSON via Gson instead of using
+ * {@code ConfigManager.setConfiguration(group, key, Object)} directly:</b> that generic
+ * overload only has clean JSON serialization for a handful of special-cased types (Color,
+ * Enum, Set, a few others - verified against {@code ConfigManager.objectToString}'s actual
+ * bytecode). For anything else, including a plain {@code Map}, it silently falls back to
+ * {@code Object.toString()} - which for a HashMap produces Java's default
+ * {@code {key=value}} debug format, not valid JSON. This plugin crashed on startup with
+ * {@code ClassCastException: String cannot be cast to Map} because of exactly that: the
+ * ledger was being "persisted" as a non-JSON string, then Gson choked trying to parse it back
+ * on the next load. Explicitly serializing to a JSON string ourselves and storing/loading that
+ * string through the plain String overloads sidesteps ConfigManager's generic-Object path
+ * entirely.
  */
 @Slf4j
 @Singleton
@@ -38,6 +53,7 @@ public class GeStarPortfolio {
 
     private final ConfigManager configManager;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
+    private final Gson gson = new Gson();
 
     private final Map<Integer, CostBasisEntry> ledger;
 
@@ -48,12 +64,23 @@ public class GeStarPortfolio {
     }
 
     private Map<Integer, CostBasisEntry> loadLedger() {
-        Map<Integer, CostBasisEntry> loaded = configManager.getConfiguration(CONFIG_GROUP, LEDGER_KEY, LEDGER_TYPE);
-        return loaded != null ? new HashMap<>(loaded) : new HashMap<>();
+        String json = configManager.getConfiguration(CONFIG_GROUP, LEDGER_KEY);
+        if (json == null || json.isEmpty()) {
+            return new HashMap<>();
+        }
+        try {
+            Map<Integer, CostBasisEntry> loaded = gson.fromJson(json, LEDGER_TYPE);
+            return loaded != null ? new HashMap<>(loaded) : new HashMap<>();
+        } catch (JsonSyntaxException e) {
+            // Stored value predates this fix and isn't valid JSON (see class javadoc) -
+            // there's no way to recover it, so start fresh rather than crash on every startup.
+            log.warn("GE Star V2: portfolio ledger config was not valid JSON, resetting it - {}", e.getMessage());
+            return new HashMap<>();
+        }
     }
 
     private void persistLedger() {
-        configManager.setConfiguration(CONFIG_GROUP, LEDGER_KEY, ledger);
+        configManager.setConfiguration(CONFIG_GROUP, LEDGER_KEY, gson.toJson(ledger, LEDGER_TYPE));
     }
 
     /** Total quantity of an item held across bank + inventory right now. */
