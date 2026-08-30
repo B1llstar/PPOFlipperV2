@@ -1,0 +1,47 @@
+{
+  "trained_at": "2026-08-30T16:05:43.032956+00:00",
+  "train_rows": 3874997,
+  "validation_rows": 552403,
+  "best_iteration": 811,
+  "validation_rmse": 0.02910011214029663,
+  "validation_mae": 0.014788541513388737,
+  "ranking_top_100": {
+    "top_k": 100,
+    "predicted_top_k_mean_true_margin": 0.5849545277581146,
+    "overall_mean_true_margin": 0.04679658889920725,
+    "best_possible_top_k_mean_true_margin": 0.5917312661498709
+  },
+  "ranking_top_500": {
+    "top_k": 500,
+    "predicted_top_k_mean_true_margin": 0.5716969844601381,
+    "overall_mean_true_margin": 0.04679658889920725,
+    "best_possible_top_k_mean_true_margin": 0.5917312661498709
+  },
+  "feature_importance_gain": {
+    "spread_pct": 24363.0003273841,
+    "volatility_1h": 1133.2412497997284,
+    "mean_price_1h": 3434.606204474345,
+    "volume_1h": 215.6129036359489,
+    "momentum_1h": 9087.88258555904,
+    "volatility_6h": 2130.625850180164,
+    "mean_price_6h": 1354.558181995526,
+    "volume_6h": 527.7677752431482,
+    "momentum_6h": 7606.12985970825,
+    "volatility_24h": 3078.623294506222,
+    "mean_price_24h": 1597.0732694733888,
+    "volume_24h": 1146.410498822108,
+    "momentum_24h": 1996.1222646906972
+  },
+  "params": {
+    "objective": "regression",
+    "metric": "rmse",
+    "num_leaves": 31,
+    "max_bin": 63,
+    "num_threads": 2,
+    "learning_rate": 0.05,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "verbose": -1
+  }
+}

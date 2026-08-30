@@ -117,9 +117,20 @@ between the two periods so no training row's label reaches into validation
 data at all - verified on the actual output (`train.timestamp.max()` to
 `validation.timestamp.min()` is exactly 4.0h).
 
-Defaults (`--min-price 10 --min-qty 5 --clip-percentile 0.995`) keep 40% of
-rows and clip label_margin_pct to roughly [-10%, 200%] - down from a raw max
-of 432,000%. Resulting train set: 4.78M rows, median margin 3.4%, no nulls.
+Defaults (`--min-price 10 --min-qty 5 --min-volume-1h 5000 --clip-percentile 0.995`)
+keep ~30% of rows and clip label_margin_pct to roughly [-10%, 200%] - down
+from a raw max of 432,000%. Resulting train set: 3.87M rows, no nulls.
+
+**`--min-volume-1h` matters more than it looks:** the achievable-qty filter
+alone only checks the two specific 5-minute blocks a trade actually used,
+not the item's overall recent liquidity - an item can clear `--min-qty` on
+one thin trade while being fundamentally illiquid. Without a trailing-volume
+filter, rows with >50% label margin turned out to have ~16x lower median
+`volume_1h` than normal rows even after the qty filter, and dominated the
+trained model's top-K rankings with implausible, unexecutable "flips" (see
+"Training a model" below for the concrete effect this had on validation
+metrics). `--min-volume-1h 5000` cuts that contamination meaningfully while
+keeping ~81% of the liquidity-filtered rows.
 
 **Memory design:** this machine runs with genuinely tight, sustained memory
 pressure (confirmed via `sysctl vm.swapusage` showing real swap usage even
@@ -132,9 +143,52 @@ incrementally - so peak memory stays bounded by one small batch at a time
 regardless of the input file's total size. In practice this finishes the
 full 52M-row dataset in under 20 seconds.
 
+## Training a model
+
+```bash
+cd pipeline
+python train_model.py --num-boost-round 1500
+```
+
+Trains a LightGBM regressor (`objective=regression`, target `label_margin_pct`)
+on the 13 rolling spread/volatility/volume/momentum features, with early
+stopping against the validation split. Saves `models/margin_model.txt`
+(LightGBM's native text format - loadable via `lgb.Booster(model_file=...)`,
+no pickle/version coupling to this exact sklearn/lightgbm install) and
+`models/margin_model_metrics.json` (RMSE/MAE, ranking quality, feature
+importance, and the params used - so a later run can be compared against
+what came before it).
+
+Beyond RMSE/MAE, `train_model.py` reports a ranking-quality metric that
+matters more for how this model actually gets used: of the top-K items by
+predicted margin, what's their *true* mean margin, versus the true mean
+across everything (the no-model baseline) and the true best-possible top-K
+(the ceiling)? A model can have mediocre RMSE and still be very useful here
+if it reliably ranks the genuinely good flips near the top - which is
+exactly what the flipper needs, not precise margin regression on every item.
+
+**Model selection was not just "run it once and ship it" -** the first run
+(500 rounds, pre-volume-filter data) hit the round cap without early
+stopping ever triggering, and its top-100-by-prediction ranking metric
+looked suspicious: best-possible top-100 true margin landed exactly at the
+label clip cap (2.0 / 200%), which turned out to mean the "best" validation
+rows were dominated by the low-volume outlier contamination described
+above, not genuinely good flips. Diagnosed that before trusting the model,
+added `--min-volume-1h` to the prep script, and retrained: early stopping
+now triggers properly (811 rounds), RMSE roughly halved (0.0565 -> 0.0291),
+and top-100-by-prediction's true mean margin (58.5%) now sits close to the
+true best-possible top-100 (59.2%) instead of being pinned at the clip
+ceiling - a model that's actually finding good flips, not artifacts.
+
+**Memory:** same tight-machine constraints as the rest of this pipeline
+(see prepare_training_data.py's memory-design note) - LightGBM's own
+histogram-based training doesn't need the full dataset as a dense matrix,
+and `--max-bin 63` / `--num-threads 2` (both LightGBM defaults halved or
+reduced) keep its footprint predictable rather than left at library
+defaults. Measured peak RSS ~1.8GB training on 3.87M rows, finishes in
+under 90 seconds.
+
 ## Next steps (not yet built)
 
-- Training a margin-prediction model on `processed/train.parquet` /
-  `processed/validation.parquet`.
 - A small scoring service the GE Flipper plugin calls over HTTP to get
-  ranked flip candidates.
+  ranked flip candidates from `models/margin_model.txt`.

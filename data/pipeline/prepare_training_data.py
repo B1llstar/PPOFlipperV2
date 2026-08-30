@@ -25,7 +25,7 @@ Peak memory is bounded by one batch at a time, not the whole dataset.
 
 Usage:
     python prepare_training_data.py
-    python prepare_training_data.py --min-price 10 --min-qty 5 --clip-percentile 0.995
+    python prepare_training_data.py --min-price 10 --min-qty 5 --min-volume-1h 5000 --clip-percentile 0.995
 """
 
 import argparse
@@ -66,7 +66,7 @@ ALL_COLUMNS = ID_COLUMNS + ["avg_low_price", "label_achievable_qty"] + FEATURE_C
 BATCH_SIZE = 50_000
 
 
-def compute_clip_thresholds(min_price: float, min_qty: float, percentile: float) -> tuple[float, float, int, int]:
+def compute_clip_thresholds(min_price: float, min_qty: float, min_volume_1h: float, percentile: float) -> tuple[float, float, int, int]:
     """Pass 1: streams the file collecting only label_margin_pct for rows that
     pass the liquidity filter, to compute clip thresholds without holding any
     other column in memory. Returns (floor, cap, kept_rows, total_rows)."""
@@ -76,12 +76,16 @@ def compute_clip_thresholds(min_price: float, min_qty: float, percentile: float)
     labels = []
     kept_rows = 0
     for batch in tqdm(
-        pf.iter_batches(batch_size=BATCH_SIZE, columns=["avg_low_price", "label_achievable_qty", LABEL_COLUMN]),
+        pf.iter_batches(batch_size=BATCH_SIZE, columns=["avg_low_price", "label_achievable_qty", "volume_1h", LABEL_COLUMN]),
         desc="pass 1: scanning for clip thresholds",
         total=(total_rows // BATCH_SIZE) + 1,
     ):
         df = batch.to_pandas()
-        mask = (df["avg_low_price"] >= min_price) & (df["label_achievable_qty"] >= min_qty)
+        mask = (
+            (df["avg_low_price"] >= min_price)
+            & (df["label_achievable_qty"] >= min_qty)
+            & (df["volume_1h"] >= min_volume_1h)
+        )
         kept_rows += int(mask.sum())
         labels.append(df.loc[mask, LABEL_COLUMN].to_numpy())
 
@@ -91,7 +95,8 @@ def compute_clip_thresholds(min_price: float, min_qty: float, percentile: float)
     floor = float(np.quantile(all_labels, 1 - percentile))
     del all_labels
 
-    print(f"Liquidity filter (price >= {min_price}, achievable qty >= {min_qty}): "
+    print(f"Liquidity filter (price >= {min_price}, achievable qty >= {min_qty}, "
+          f"volume_1h >= {min_volume_1h}): "
           f"{kept_rows:,} / {total_rows:,} rows pass ({100 * kept_rows / total_rows:.1f}%)")
     print(f"Clip thresholds at percentile {percentile}: [{floor:.4f}, {cap:.4f}]")
 
@@ -120,7 +125,7 @@ def find_split_boundary(validation_days: int) -> tuple[int, int]:
 
 
 def stream_filter_clip_split(
-    min_price: float, min_qty: float, floor: float, cap: float,
+    min_price: float, min_qty: float, min_volume_1h: float, floor: float, cap: float,
     train_end: int, validation_start: int,
 ) -> None:
     """Pass 2: streams the file again, this time reading every needed column,
@@ -144,7 +149,11 @@ def stream_filter_clip_split(
         ):
             df = batch.to_pandas()
 
-            mask = (df["avg_low_price"] >= min_price) & (df["label_achievable_qty"] >= min_qty)
+            mask = (
+                (df["avg_low_price"] >= min_price)
+                & (df["label_achievable_qty"] >= min_qty)
+                & (df["volume_1h"] >= min_volume_1h)
+            )
             df = df.loc[mask]
             if df.empty:
                 continue
@@ -188,6 +197,8 @@ def main() -> None:
                          help="Minimum avg_low_price to keep a row (default: 10gp) - filters out near-worthless items whose margins are technically-correct but not meaningfully tradeable")
     parser.add_argument("--min-qty", type=float, default=5.0,
                          help="Minimum label_achievable_qty to keep a row (default: 5) - filters out single-unit trades that produce noisy, unrepresentative margins")
+    parser.add_argument("--min-volume-1h", type=float, default=5000.0,
+                         help="Minimum trailing 1h total trade volume to keep a row (default: 5000) - the achievable-qty filter alone only checks the two specific blocks in a trade, not the item's overall liquidity; low-volume-1h items are ~16x overrepresented among extreme (>50%%) label outliers even after that filter")
     parser.add_argument("--clip-percentile", type=float, default=0.995,
                          help="Clip label_margin_pct to this percentile and its mirror on the low end (default: 0.995, i.e. clip to the middle 99%%)")
     parser.add_argument("--validation-days", type=int, default=21,
@@ -199,9 +210,9 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    floor, cap, _, _ = compute_clip_thresholds(args.min_price, args.min_qty, args.clip_percentile)
+    floor, cap, _, _ = compute_clip_thresholds(args.min_price, args.min_qty, args.min_volume_1h, args.clip_percentile)
     train_end, validation_start = find_split_boundary(args.validation_days)
-    stream_filter_clip_split(args.min_price, args.min_qty, floor, cap, train_end, validation_start)
+    stream_filter_clip_split(args.min_price, args.min_qty, args.min_volume_1h, floor, cap, train_end, validation_start)
 
 
 if __name__ == "__main__":
