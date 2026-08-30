@@ -3,6 +3,7 @@ package net.runelite.client.plugins.microbot.gestarv2;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.events.GrandExchangeOfferChanged;
+import net.runelite.api.gameval.ItemID;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
 import net.runelite.client.plugins.microbot.util.antiban.Rs2Antiban;
@@ -155,9 +156,9 @@ public class GeStarV2Script extends Script {
         }
 
         if (orderAwaitingFunds.getAction() == GrandExchangeAction.BUY) {
-            long needed = orderAwaitingFunds.totalValue() - Rs2Inventory.count("Coins");
+            long needed = orderAwaitingFunds.totalValue() - Rs2Inventory.count(ItemID.COINS);
             if (needed > 0) {
-                Rs2Bank.withdrawX("Coins", (int) needed);
+                Rs2Bank.withdrawX(ItemID.COINS, (int) needed);
                 Rs2Inventory.waitForInventoryChanges(5000);
             }
         } else {
@@ -242,7 +243,7 @@ public class GeStarV2Script extends Script {
 
     private boolean hasFundsOrItems(GeStarOrder order) {
         if (order.getAction() == GrandExchangeAction.BUY) {
-            return Rs2Inventory.count("Coins") >= order.totalValue();
+            return Rs2Inventory.count(ItemID.COINS) >= order.totalValue();
         }
         return Rs2Inventory.count(order.getItemName()) >= order.getQuantity();
     }
