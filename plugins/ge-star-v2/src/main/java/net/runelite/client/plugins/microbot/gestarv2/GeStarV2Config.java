@@ -44,10 +44,21 @@ public interface GeStarV2Config extends Config {
     String guardrailsSection = "guardrails";
 
     @ConfigItem(
+        keyName = "guardrailsEnabled",
+        name = "Guardrails enabled",
+        description = "Master switch for all guardrail checks below. Off submits every order as-is with no safety checks.",
+        position = 0,
+        section = guardrailsSection
+    )
+    default boolean guardrailsEnabled() {
+        return true;
+    }
+
+    @ConfigItem(
         keyName = "maxGpToSpend",
         name = "Max GP to spend (session)",
         description = "Hard cap on total coins spent on buy orders this session. 0 = no cap.",
-        position = 0,
+        position = 1,
         section = guardrailsSection
     )
     default int maxGpToSpend() {
@@ -58,7 +69,7 @@ public interface GeStarV2Config extends Config {
         keyName = "maxQuantityPerItem",
         name = "Max quantity per item",
         description = "Refuse to place any single order above this quantity, regardless of what the order list says. 0 = no cap.",
-        position = 1,
+        position = 2,
         section = guardrailsSection
     )
     default int maxQuantityPerItem() {
@@ -69,7 +80,7 @@ public interface GeStarV2Config extends Config {
         keyName = "maxPriceDeviationPercent",
         name = "Max price deviation from guide price (%)",
         description = "Refuse an order if its price is more than this % away from the GE guide price. 0 = disabled.",
-        position = 2,
+        position = 3,
         section = guardrailsSection
     )
     default int maxPriceDeviationPercent() {
@@ -77,20 +88,9 @@ public interface GeStarV2Config extends Config {
     }
 
     @ConfigItem(
-        keyName = "maxActiveOffers",
-        name = "Max concurrent offers",
-        description = "Cap on how many of the 8 GE slots this script will use at once",
-        position = 3,
-        section = guardrailsSection
-    )
-    default int maxActiveOffers() {
-        return 4;
-    }
-
-    @ConfigItem(
         keyName = "stopOnGuardrailBreach",
-        name = "Stop plugin on guardrail breach",
-        description = "If off, a rejected order is just skipped and the script moves to the next one. If on, the whole plugin stops.",
+        name = "Stop script on guardrail breach",
+        description = "If off, a rejected order is just skipped and the script moves to the next one. If on, the whole script stops. No effect while guardrails are disabled.",
         position = 4,
         section = guardrailsSection
     )
@@ -107,10 +107,21 @@ public interface GeStarV2Config extends Config {
     String behaviorSection = "behavior";
 
     @ConfigItem(
+        keyName = "maxActiveOffers",
+        name = "Max concurrent offers",
+        description = "Cap on how many of the 8 GE slots this script will use at once",
+        position = 0,
+        section = behaviorSection
+    )
+    default int maxActiveOffers() {
+        return 4;
+    }
+
+    @ConfigItem(
         keyName = "collectToBank",
         name = "Collect completed offers to bank",
         description = "Off collects to inventory instead",
-        position = 0,
+        position = 1,
         section = behaviorSection
     )
     default boolean collectToBank() {
@@ -121,7 +132,7 @@ public interface GeStarV2Config extends Config {
         keyName = "stopWhenOrdersComplete",
         name = "Stop script when queue is empty",
         description = "Shuts the script down once every queued order has been filled and collected",
-        position = 1,
+        position = 2,
         section = behaviorSection
     )
     default boolean stopWhenOrdersComplete() {

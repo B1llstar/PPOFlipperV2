@@ -35,11 +35,11 @@ queue; that's what the panel buttons are for.
 
 1. Walks to the Grand Exchange and opens it.
 2. Pulls the next `QUEUED` order from the shared order queue.
-3. Before submitting each order, runs it through `GeStarGuardrails`:
+3. Before submitting each order, runs it through `GeStarGuardrails` (unless
+   guardrails are disabled entirely):
    - session GP spend cap (buys only)
    - max quantity per single order
-   - max % deviation from the live GE guide price (`Rs2GrandExchange.getPrice`)
-   - max concurrent offer slots used
+   - max % deviation from the live guide price (`Rs2GrandExchange.getRealTimePrices`)
 4. Submits via `Rs2GrandExchange.buyItem(name, qty, price)` /
    `sellItem(name, qty, price)`, marking the order `SUBMITTED`.
 5. Withdraws coins (for buys) or the sale item (for sells) from the bank if
@@ -82,11 +82,24 @@ queue; that's what the panel buttons are for.
 
 | Setting | Default | Effect |
 |---|---|---|
+| Guardrails enabled | on | Master switch. Off submits every order as-is, skipping every check below entirely |
 | Max GP to spend (session) | 0 (off) | Hard cap on total coins spent on buys |
 | Max quantity per item | 0 (off) | Rejects any single order above this qty |
-| Max price deviation from guide price | 25% | Rejects orders priced too far from the wiki guide price |
-| Max concurrent offers | 4 | Caps how many of the 8 GE slots are used at once |
+| Max price deviation from guide price | 25% | Rejects orders priced too far from the live guide price |
 | Stop script on guardrail breach | off | If on, any rejected order stops the script instead of just being skipped |
+
+"Max concurrent offers" (default 4, how many of the 8 GE slots to use at
+once) lives in the **Behavior** section instead — it's a throttle, not a
+safety check, and stays in effect even with guardrails disabled.
+
+The price-deviation guardrail compares against
+`Rs2GrandExchange.getRealTimePrices()` (the OSRS Wiki's real-time price
+API), matched to the correct side of the book — a buy order is checked
+against the recent buy price, a sell order against the recent sell price.
+It deliberately avoids `Rs2GrandExchange.getPrice()`, which hits
+ge-tracker.com's derived "overall" price and can drift badly from the real
+market on low-volume items (observed: it reported 103gp for an item that
+was actually trading around 27gp).
 
 A rejected order is marked `SKIPPED` with the reason shown in its row (or
 stops the script, if configured) — it never reaches
