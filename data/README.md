@@ -232,10 +232,17 @@ percentage - a high percentage margin on a cheap, GE-limit-capped item can
 still be a much smaller real opportunity than a lower-percentage margin on
 something with real trading volume behind it.
 
+## Where this connects to the plugin side
+
+[FlipperStar](../plugins/flipper-star/) (`plugins/flipper-star/`) calls this
+service's `/candidates`, cross-references `GeStarPortfolio` (current
+holdings/cost-basis, in `plugins/ge-star-v2/`) to decide sizing and avoid
+overexposure, and pushes the resulting orders into GE Star V2's
+`GeStarOrderQueue` for actual execution - see FlipperStar's own docs for how
+it talks to a separately-sideloaded plugin jar (reflection, not a compile-
+time dependency - RuneLite gives each sideloaded plugin its own classloader).
+
 ## Next steps (not yet built)
 
-- The GE Flipper Java plugin: calls this service's `/candidates`, cross-
-  references `GeStarPortfolio` (current holdings/cost-basis, already built
-  in `plugins/ge-star-v2/`) to decide sizing and avoid overexposure, and
-  pushes the resulting orders into GE Star V2's existing `GeStarOrderQueue`
-  - see that plugin's docs for the execution side this feeds into.
+- Sell-side automation - FlipperStar currently only queues buys; selling
+  filled positions is manual via GE Star V2's panel.
