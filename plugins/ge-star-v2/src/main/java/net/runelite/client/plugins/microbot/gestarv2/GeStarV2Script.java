@@ -18,7 +18,9 @@ import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 
 import javax.inject.Inject;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -54,6 +56,15 @@ public class GeStarV2Script extends Script {
     private GeStarOrder orderAwaitingFunds;
     private GeStarOrder lastFundsShortfallOrder;
 
+    // True right after Execute, until the first reconcile pass has run once the GE is open.
+    // Needed because Stop never cancels real in-game offers (it only stops this script's own
+    // loop) - a SUBMITTED order may still have a genuinely live GE offer behind it, so on
+    // resume every SUBMITTED order must be checked against what's actually on the GE before
+    // deciding whether to treat it as still-active or truly orphaned. Blindly resetting every
+    // SUBMITTED order back to QUEUED on every Execute (the previous behavior) resubmitted
+    // orders that were already live, buying/selling the same thing twice.
+    private boolean needsReconcile = false;
+
     @Inject
     public GeStarV2Script(GeStarOrderQueue queue, GeStarPortfolio portfolio) {
         this.queue = queue;
@@ -68,10 +79,7 @@ public class GeStarV2Script extends Script {
         this.activeOrders.clear();
         this.orderAwaitingFunds = null;
         this.lastFundsShortfallOrder = null;
-
-        // Re-queue anything left SUBMITTED from a previous run that got interrupted -
-        // there's no live GE slot backing it anymore, so it needs to be resubmitted.
-        queue.getByStatus(GeStarOrder.Status.SUBMITTED).forEach(o -> o.setStatus(GeStarOrder.Status.QUEUED));
+        this.needsReconcile = true;
 
         Rs2AntibanSettings.naturalMouse = true;
         Rs2Antiban.setActivityIntensity(ActivityIntensity.LOW);
@@ -99,6 +107,59 @@ public class GeStarV2Script extends Script {
         super.shutdown();
     }
 
+    /**
+     * Runs once, right after Execute, the first time the GE interface is confirmed open.
+     * Stopping the script never cancels real in-game offers - only the previous run's
+     * in-memory {@code activeOrders} map is lost - so every order still marked SUBMITTED from
+     * before needs to be checked against what's actually live on the GE right now, rather than
+     * assumed orphaned. A SUBMITTED order that matches a live offer gets its slot restored
+     * into activeOrders (monitoring picks it back up exactly where it left off); only orders
+     * with no matching live offer (e.g. a genuinely lost/collected-outside-the-script offer)
+     * get reset back to QUEUED for resubmission.
+     */
+    private void reconcileSubmittedOrders() {
+        List<GeStarOrder> submittedOrders = new ArrayList<>(queue.getByStatus(GeStarOrder.Status.SUBMITTED));
+        if (submittedOrders.isEmpty()) return;
+
+        for (GrandExchangeSlots slot : Rs2GrandExchange.getActiveOfferSlots()) {
+            GrandExchangeOfferDetails details = Rs2GrandExchange.getOfferDetails(slot);
+            if (details == null) continue;
+
+            GrandExchangeAction liveAction = details.isSelling() ? GrandExchangeAction.SELL : GrandExchangeAction.BUY;
+
+            GeStarOrder match = submittedOrders.stream()
+                .filter(o -> !activeOrders.containsValue(o))
+                .filter(o -> o.getAction() == liveAction)
+                .filter(o -> o.getItemName().equalsIgnoreCase(details.getItemName()))
+                .filter(o -> o.getQuantity() == details.getTotalQuantity())
+                .filter(o -> o.getPrice() == details.getPrice())
+                .findFirst()
+                .orElse(null);
+
+            if (match != null) {
+                match.setSlot(slot);
+                match.setQuantityFilled(liveAction == GrandExchangeAction.BUY
+                    ? Rs2GrandExchange.getItemsBoughtFromOffer(slot)
+                    : Rs2GrandExchange.getItemsSoldFromOffer(slot));
+                activeOrders.put(slot, match);
+                log.info("GE Star V2: reconciled SUBMITTED order {} to live slot {}", match, slot);
+            }
+        }
+
+        int orphaned = 0;
+        for (GeStarOrder order : submittedOrders) {
+            if (!activeOrders.containsValue(order)) {
+                order.setStatus(GeStarOrder.Status.QUEUED);
+                orphaned++;
+            }
+        }
+
+        if (orphaned > 0) {
+            log.warn("GE Star V2: {} SUBMITTED order(s) had no matching live GE offer, re-queued for resubmission", orphaned);
+        }
+        queue.notifyChanged();
+    }
+
     private void tick() {
         switch (state) {
             case IDLE:
@@ -106,11 +167,19 @@ public class GeStarV2Script extends Script {
 
             case GOING_TO_GE:
                 if (Rs2GrandExchange.isOpen()) {
+                    if (needsReconcile) {
+                        reconcileSubmittedOrders();
+                        needsReconcile = false;
+                    }
                     state = State.SUBMITTING_ORDERS;
                     return;
                 }
                 Rs2GrandExchange.walkToGrandExchange();
                 if (Rs2GrandExchange.openExchange()) {
+                    if (needsReconcile) {
+                        reconcileSubmittedOrders();
+                        needsReconcile = false;
+                    }
                     state = State.SUBMITTING_ORDERS;
                 }
                 break;
