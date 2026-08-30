@@ -79,13 +79,21 @@ BotStar/
 ├── settings.gradle              # declares plugin subprojects
 ├── gradlew, gradle/wrapper/     # self-contained Gradle 8.2 wrapper
 ├── plugins/
-│   └── afk-woodcutting/         # example plugin — copy this as a template
+│   ├── afk-woodcutting/          # example plugin — copy this as a template
+│   │   ├── build.gradle
+│   │   └── src/main/java/net/runelite/client/plugins/microbot/afkwoodcutting/
+│   │       ├── AfkWoodcuttingPlugin.java    # @PluginDescriptor, wires config/overlay/script
+│   │       ├── AfkWoodcuttingScript.java    # the actual chop -> bank/drop -> repeat loop
+│   │       ├── AfkWoodcuttingConfig.java    # in-client config panel
+│   │       └── AfkWoodcuttingOverlay.java   # on-screen status overlay
+│   └── nmz-star-v2/              # Nightmare Zone combat bot skeleton (WIP, see its docs/README.md)
 │       ├── build.gradle
-│       └── src/main/java/net/runelite/client/plugins/microbot/afkwoodcutting/
-│           ├── AfkWoodcuttingPlugin.java    # @PluginDescriptor, wires config/overlay/script
-│           ├── AfkWoodcuttingScript.java    # the actual chop -> bank/drop -> repeat loop
-│           ├── AfkWoodcuttingConfig.java    # in-client config panel
-│           └── AfkWoodcuttingOverlay.java   # on-screen status overlay
+│       └── src/main/java/net/runelite/client/plugins/microbot/nmzstarv2/
+│           ├── NmzStarV2Plugin.java   # @PluginDescriptor, wires config/overlay/script
+│           ├── NmzStarV2Script.java   # dream -> navigate -> attack state machine (stubbed)
+│           ├── NmzStarV2Config.java   # in-client config panel
+│           ├── NmzStarV2Overlay.java  # on-screen state/target overlay
+│           └── NmzNpcIds.java         # verified NMZ boss/host NPC ids
 └── vendor/microbot-hub/          # git submodule, reference-only, never built
 ```
 
@@ -125,13 +133,21 @@ step:
    into `~/microbot-client/` if it isn't already cached there.
 3. Runs `./gradlew build -PmicrobotClientVersion=<version>`, so every
    plugin in `plugins/` compiles against that exact client build.
-4. Copies every plugin's built jar into `~/.runelite/plugins/` — this is
-   RuneLite's real side-load directory (confirmed from the client's own
-   `RuneLite.PLUGINS_DIR` constant and `loadSideLoadPlugins()`, verified
-   by inspecting the actual class file — see
+4. Copies every plugin's built jar into `~/.runelite/sideloaded-plugins/` —
+   this is RuneLite's real side-load directory, backing
+   `PluginManager.loadSideLoadPlugins()` / `PluginManager.SIDELOADED_PLUGINS`
+   (`new File(RuneLite.RUNELITE_DIR, "sideloaded-plugins")`), auto-scanned
+   on client startup. No client settings/flags to configure by hand.
+
+   Note: `~/.runelite/plugins/` (`RuneLite.PLUGINS_DIR`) is a *different*
+   directory used by `ExternalPluginManager` for plugins matched against
+   the official Plugin Hub manifest — an unlisted jar dropped there is
+   silently ignored, with no log line at all. This was verified the hard
+   way: jars copied there across several sessions never once produced a
+   "Plugin loaded" line, which sent us back to inspect
+   `PluginManager.class` directly (see
    [plugins/VERIFYING_THE_API.md](plugins/VERIFYING_THE_API.md) for the
-   same verify-against-the-jar approach), auto-scanned on client startup.
-   No client settings/flags to configure by hand.
+   verify-against-the-jar approach) and find the actual field.
 5. Launches the client jar with the JDK 11 runtime Gradle already
    provisioned (`~/.gradle/jdks/`), so no separate system Java install is
    required.

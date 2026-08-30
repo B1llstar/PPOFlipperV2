@@ -54,6 +54,29 @@ superseding it, but its replacement isn't documented anywhere in this
 submodule yet. Re-check `javap` on it before starting a new plugin, in
 case it's gone by then.
 
+This same verify-don't-assume rule applies beyond API *classes* — it
+caught a real, costly mistake in the *side-load directory* claim in the
+root README. `~/.runelite/plugins/` (`RuneLite.PLUGINS_DIR`) looks like
+the obvious answer and was asserted there as fact, but it's actually
+consumed by `ExternalPluginManager` against the official Plugin Hub
+manifest — an unlisted jar dropped there is silently ignored, with zero
+log output either way. Across seven separate build-and-launch sessions,
+our own side-loaded jars never once produced a "Plugin loaded" line, and
+the silence looked identical to "plugin loaded fine but its scheduled
+loop never fires" — which is what sent us chasing a phantom logic bug for
+a while first. The real directory, found by `javap`-ing
+`PluginManager.class` directly instead of trusting the earlier note:
+
+```bash
+unzip -o -q <path-to-jar> "net/runelite/client/plugins/PluginManager.class"
+javap -c -p -constants net/runelite/client/plugins/PluginManager.class \
+  | grep -B15 "SIDELOADED_PLUGINS:Ljava/io/File;"
+# -> new File(RuneLite.RUNELITE_DIR, "sideloaded-plugins")
+```
+
+`~/.runelite/sideloaded-plugins/` is the real one, backing
+`PluginManager.loadSideLoadPlugins()`. `scripts/launch.sh` now targets it.
+
 ## 3. Reference plugins
 
 Where: `vendor/microbot-hub/src/main/java/net/runelite/client/plugins/microbot/`

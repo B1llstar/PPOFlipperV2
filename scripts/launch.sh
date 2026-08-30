@@ -6,7 +6,13 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLIENT_DIR="${MICROBOT_CLIENT_DIR:-$HOME/microbot-client}"
-RUNELITE_PLUGINS_DIR="$HOME/.runelite/plugins"
+# NOT ~/.runelite/plugins (that's RuneLite.PLUGINS_DIR, consumed by
+# ExternalPluginManager against the official Plugin Hub manifest — unlisted
+# jars dropped there are silently ignored, no log line at all). The real
+# sideload path is PluginManager.SIDELOADED_PLUGINS, verified directly
+# against the client jar's bytecode: `new File(RuneLite.RUNELITE_DIR,
+# "sideloaded-plugins")`. See plugins/VERIFYING_THE_API.md.
+RUNELITE_PLUGINS_DIR="$HOME/.runelite/sideloaded-plugins"
 VERSION_ENDPOINT="https://microbot.cloud/api/version/client"
 
 mkdir -p "$CLIENT_DIR" "$RUNELITE_PLUGINS_DIR"
@@ -33,8 +39,12 @@ else
     echo "==> microbot-$VERSION.jar already cached, skipping download"
 fi
 
-echo "==> Building plugins against microbot $VERSION"
+echo "==> Refreshing vendor/microbot-hub reference submodule to latest upstream"
 cd "$REPO_DIR"
+git submodule update --remote --merge vendor/microbot-hub || \
+    echo "==> Could not refresh vendor/microbot-hub (offline?); using existing checkout"
+
+echo "==> Building plugins against microbot $VERSION"
 ./gradlew build -PmicrobotClientVersion="$VERSION" --console=plain
 
 echo "==> Side-loading built plugin jars into $RUNELITE_PLUGINS_DIR"

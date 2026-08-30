@@ -5,3 +5,5 @@ plugins {
 rootProject.name = 'BotStar'
 
 include ':plugins:afk-woodcutting'
+include ':plugins:nmz-star-v2'
+include ':plugins:nmz-debug'

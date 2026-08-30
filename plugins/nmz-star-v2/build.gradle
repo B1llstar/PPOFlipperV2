@@ -1,0 +1,23 @@
+plugins {
+    id 'java'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+dependencies {
+    compileOnly "com.microbot:microbot:${rootProject.ext.microbotClientVersion}@jar"
+    compileOnly 'org.projectlombok:lombok:1.18.30'
+    annotationProcessor 'org.projectlombok:lombok:1.18.30'
+}
+
+shadowJar {
+    archiveBaseName.set('NmzStarV2Plugin')
+    archiveClassifier.set('')
+    // The Microbot client provides its own classes at runtime; don't bundle it.
+    dependencies {
+        exclude(dependency('com.microbot:microbot'))
+    }
+}
+
+tasks.build {
+    dependsOn shadowJar
+}
