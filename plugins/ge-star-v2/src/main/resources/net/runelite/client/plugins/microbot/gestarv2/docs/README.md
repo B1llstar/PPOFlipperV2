@@ -8,6 +8,23 @@ Microbot Hub's `Rs2GrandExchange` utility, following the same shape as
 (kept in `vendor/microbot-hub/` for reference only — see root README for why
 that repo is never a build dependency).
 
+## Controlling it
+
+Enabling the plugin adds a **GE Star V2** icon to the client sidebar (reuses
+the same icon as the built-in Grand Exchange plugin) with a small panel:
+
+- **Execute** — starts the order-processing script (equivalent to what used
+  to run automatically on plugin startup).
+- **Stop** — shuts the script down without disabling the plugin, so you can
+  edit the order lists in the config and hit Execute again without a full
+  plugin restart.
+- A live status block (state, pending orders, active offers, GP spent this
+  session) refreshes once a second from the running script.
+
+Enabling/disabling the plugin itself only adds/removes the panel and
+overlay — it does not start or stop the script; that's what the panel
+buttons are for.
+
 ## What it does
 
 1. Walks to the Grand Exchange and opens it.
@@ -34,7 +51,10 @@ that repo is never a build dependency).
 ## Files
 
 - `GeStarV2Plugin.java` — `@PluginDescriptor`, wires config/overlay/script,
-  subscribes to `GrandExchangeOfferChanged` for real-time fill detection.
+  adds the sidebar panel/nav button, subscribes to `GrandExchangeOfferChanged`
+  for real-time fill detection. Exposes `execute()`/`stop()` for the panel.
+- `GeStarV2Panel.java` — the sidebar `JPanel`: Execute/Stop buttons plus a
+  live status readout, polling the script once a second.
 - `GeStarV2Script.java` — the state machine:
   `GOING_TO_GE -> SUBMITTING_ORDERS -> MONITORING_OFFERS -> DONE`, with a
   `PREPARING_FUNDS_OR_ITEMS` side-state for bank withdrawals.
@@ -42,8 +62,8 @@ that repo is never a build dependency).
 - `GeStarGuardrails.java` — the safety checks, isolated from click/widget
   logic so the rules are easy to read and adjust.
 - `GeStarOrder.java` — parses one `name,quantity,price` config line.
-- `GeStarV2Overlay.java` — shows state, pending orders, active offers, GP
-  spent this session.
+- `GeStarV2Overlay.java` — in-game overlay showing state, pending orders,
+  active offers, GP spent this session (same data as the sidebar panel).
 
 ## Guardrails (all configurable, `0` = disabled unless noted)
 
@@ -69,6 +89,8 @@ A rejected order is logged and skipped (or stops the plugin, if configured)
    Yew logs,500,300
    ```
 4. Adjust guardrails to taste, especially the GP spend cap.
+5. Enable the plugin, click the GE Star V2 sidebar icon, then click
+   **Execute**.
 
 ## Building
 

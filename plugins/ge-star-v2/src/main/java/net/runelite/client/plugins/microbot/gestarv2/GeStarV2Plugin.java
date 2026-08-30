@@ -7,9 +7,14 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.grandexchange.GrandExchangePlugin;
+import net.runelite.client.ui.ClientToolbar;
+import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.util.ImageUtil;
 
 import javax.inject.Inject;
+import java.awt.image.BufferedImage;
 
 @PluginDescriptor(
     name = "BotStar GE Star V2",
@@ -24,7 +29,7 @@ import javax.inject.Inject;
 @Slf4j
 public class GeStarV2Plugin extends Plugin {
 
-    static final String version = "2.0.0";
+    static final String version = "2.1.0";
 
     @Inject
     private GeStarV2Config config;
@@ -38,6 +43,12 @@ public class GeStarV2Plugin extends Plugin {
     @Inject
     private GeStarV2Script script;
 
+    @Inject
+    private ClientToolbar clientToolbar;
+
+    private GeStarV2Panel panel;
+    private NavigationButton navButton;
+
     @Provides
     GeStarV2Config provideConfig(ConfigManager configManager) {
         return configManager.getConfig(GeStarV2Config.class);
@@ -46,13 +57,51 @@ public class GeStarV2Plugin extends Plugin {
     @Override
     protected void startUp() {
         overlayManager.add(overlay);
-        script.run(config);
+        addPanel();
+        // The script only starts when the panel's Execute button is clicked - enabling the
+        // plugin just makes the sidebar panel and overlay available.
     }
 
     @Override
     protected void shutDown() {
         script.shutdown();
+        removePanel();
         overlayManager.remove(overlay);
+    }
+
+    private void addPanel() {
+        panel = new GeStarV2Panel(this, script, config);
+
+        // Reuse the client's own Grand Exchange icon (bundled in the client jar) instead of
+        // shipping a duplicate image asset.
+        BufferedImage icon = ImageUtil.loadImageResource(GrandExchangePlugin.class, "ge_icon.png");
+
+        navButton = NavigationButton.builder()
+            .tooltip("GE Star V2")
+            .icon(icon)
+            .priority(6)
+            .panel(panel)
+            .build();
+
+        clientToolbar.addNavigation(navButton);
+    }
+
+    private void removePanel() {
+        if (navButton != null) {
+            clientToolbar.removeNavigation(navButton);
+            navButton = null;
+        }
+        panel = null;
+    }
+
+    public void execute() {
+        script.run(config);
+        if (panel != null) panel.onScriptStateChanged();
+    }
+
+    public void stop() {
+        script.shutdown();
+        if (panel != null) panel.onScriptStateChanged();
     }
 
     /**
