@@ -184,6 +184,24 @@ A rejected order is marked `SKIPPED` with the reason shown in its row (or
 stops the script, if configured) — it never reaches
 `Rs2GrandExchange.buyItem`/`sellItem`.
 
+## Hard price clamp (not a guardrail — always on)
+
+Separate from the price-deviation guardrail above (which *rejects* an
+order that's too far from guide price, and can be loosened or disabled),
+`GeStarV2Script.clampToLivePrice()` runs on every single order right
+before submission and *adjusts* the price actually offered: a BUY order is
+never offered above the live insta-buy price
+(`Rs2GrandExchange.getRealTimePrices().buyPrice`), and a SELL order is
+never offered below the live insta-sell price (`.sellPrice`). This exists
+because the price an order was queued at can go stale by the time it's
+actually submitted (queue backlog, script paused and resumed later,
+market movement) — added after a live report of an order being submitted
+noticeably above the item's in-game guide price. This clamp cannot be
+turned off from config; if you genuinely want to pay above the live
+price for faster fill, set the order's price directly on the resulting
+narrower range (the clamp only ever moves price toward the live rate,
+never further away from it in the caller's favor).
+
 ## Setup
 
 1. Start at or near the Grand Exchange.

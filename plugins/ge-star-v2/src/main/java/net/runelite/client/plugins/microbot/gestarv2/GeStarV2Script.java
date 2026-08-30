@@ -14,7 +14,9 @@ import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeActi
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeSlots;
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.grandexchange.models.GrandExchangeOfferDetails;
+import net.runelite.client.plugins.microbot.util.grandexchange.models.WikiPrice;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 
 import javax.inject.Inject;
@@ -47,6 +49,7 @@ public class GeStarV2Script extends Script {
 
     private final GeStarOrderQueue queue;
     private final GeStarPortfolio portfolio;
+    private final Rs2ItemManager itemManager = new Rs2ItemManager();
 
     private GeStarV2Config config;
     private GeStarGuardrails guardrails;
@@ -288,6 +291,8 @@ public class GeStarV2Script extends Script {
         }
         lastFundsShortfallOrder = null;
 
+        int submitPrice = clampToLivePrice(order);
+
         // NOTE: Rs2GrandExchange.buyItem and .sellItem have inconsistent parameter order with
         // each other - verified directly against the client jar's bytecode after a live bug
         // report of price/quantity being swapped. buyItem(name, price, quantity) but
@@ -295,12 +300,12 @@ public class GeStarV2Script extends Script {
         // re-verifying against the jar - it really is asymmetric.
         GrandExchangeSlots slotBefore = Rs2GrandExchange.getAvailableSlot();
         boolean submitted = order.getAction() == GrandExchangeAction.BUY
-            ? Rs2GrandExchange.buyItem(order.getItemName(), order.getPrice(), order.getQuantity())
-            : Rs2GrandExchange.sellItem(order.getItemName(), order.getQuantity(), order.getPrice());
+            ? Rs2GrandExchange.buyItem(order.getItemName(), submitPrice, order.getQuantity())
+            : Rs2GrandExchange.sellItem(order.getItemName(), order.getQuantity(), submitPrice);
 
         if (submitted) {
             if (order.getAction() == GrandExchangeAction.BUY) {
-                guardrails.recordSpend(order.totalValue());
+                guardrails.recordSpend((long) submitPrice * order.getQuantity());
             }
             GrandExchangeSlots slot = slotBefore != null ? slotBefore : Rs2GrandExchange.findSlotForItem(order.getItemName(), order.getAction() == GrandExchangeAction.BUY);
             order.setSlot(slot);
@@ -312,6 +317,42 @@ public class GeStarV2Script extends Script {
             log.info("GE Star V2: submitted {}", order);
         } else {
             log.warn("GE Star V2: failed to submit order {}, will retry next tick.", order);
+        }
+    }
+
+    /**
+     * Hard price cap enforced at the moment of submission, independent of the (softer,
+     * rejects-rather-than-clamps) price-deviation guardrail: a BUY order is never actually
+     * offered above the live insta-buy price, and a SELL order is never actually offered
+     * below the live insta-sell price - so the plugin never pays more than the real market for
+     * a buy, or accepts less than the real market for a sell, even if the order's queued price
+     * (set when it was added, possibly stale by the time it's actually submitted) was higher/
+     * lower. If live price data isn't available for any reason, falls back to the order's own
+     * price unchanged rather than blocking submission on a missing lookup.
+     */
+    private int clampToLivePrice(GeStarOrder order) {
+        int itemId = itemManager.getItemId(order.getItemName());
+        if (itemId <= 0) return order.getPrice();
+
+        WikiPrice wikiPrice = Rs2GrandExchange.getRealTimePrices(itemId);
+        if (wikiPrice == null) return order.getPrice();
+
+        if (order.getAction() == GrandExchangeAction.BUY) {
+            if (wikiPrice.buyPrice <= 0) return order.getPrice();
+            int capped = Math.min(order.getPrice(), wikiPrice.buyPrice);
+            if (capped < order.getPrice()) {
+                log.info("GE Star V2: capped buy price for {} from {} to live insta-buy price {}",
+                    order.getItemName(), order.getPrice(), wikiPrice.buyPrice);
+            }
+            return capped;
+        } else {
+            if (wikiPrice.sellPrice <= 0) return order.getPrice();
+            int floored = Math.max(order.getPrice(), wikiPrice.sellPrice);
+            if (floored > order.getPrice()) {
+                log.info("GE Star V2: raised sell price for {} from {} to live insta-sell price {}",
+                    order.getItemName(), order.getPrice(), wikiPrice.sellPrice);
+            }
+            return floored;
         }
     }
 
