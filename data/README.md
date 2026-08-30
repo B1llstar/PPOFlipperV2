@@ -188,7 +188,54 @@ reduced) keep its footprint predictable rather than left at library
 defaults. Measured peak RSS ~1.8GB training on 3.87M rows, finishes in
 under 90 seconds.
 
+## Scoring service
+
+```bash
+cd service
+uvicorn main:app --host 127.0.0.1 --port 8420
+```
+
+`GET /candidates?limit=20` scans the currently-liquid item universe and
+returns the top-N by predicted margin - this is what the GE Flipper plugin
+(Java side, not yet built) will call to decide what to queue. `GET /health`
+for a liveness check. Binds to `127.0.0.1` only - a local sidecar for the
+plugin running on the same machine, not a public API.
+
+**Live feature computation is a necessary approximation of training,
+documented rather than glossed over** - see `service/live_features.py`'s
+docstring for the full reasoning. Summary: the service gets live data from
+4 bulk wiki API calls (`/latest`, `/1h`, `/6h`, `/24h` - no per-item
+looping, same principle as the data pipeline), which cover `spread_pct` and
+the `momentum_*` features (71% of the model's combined feature importance)
+as close analogs of their training-time definitions. `volatility_*` (11%
+combined importance) has no live equivalent of the true rolling standard
+deviation training used - approximated as each window's own high/low spread
+instead, a real but different signal.
+
+**Caught and fixed a real bug in that approximation before trusting it:**
+the wiki's `avgHighPrice`/`avgLowPrice` for a window can legitimately cross
+(`avgHigh < avgLow`) when trade timing shifts within the window - confirmed
+on live data (item 6289, Snakeskin, 6h window: avgHigh=12 < avgLow=15). The
+first version of the volatility proxy didn't guard against this and could
+produce a negative "volatility," a value shape the model never saw in
+training (a std dev is always >= 0) and had no learned response to. Fixed
+with `abs()`. `spread_pct` was checked against the same concern and left
+alone - training's `spread_pct` genuinely does go negative on ~4.7% of real
+training rows, so a negative live value is in-distribution, not a bug.
+
+The same liquidity bar used to build the training data
+(`min_price=10`, `min_volume_1h=5000`) is applied before scoring, so the
+model is never asked to extrapolate onto items unlike anything it trained
+on. Response includes `absolute_margin_gp` and `ge_limit`/
+`max_position_value_gp` (from the item mapping) alongside the raw
+percentage - a high percentage margin on a cheap, GE-limit-capped item can
+still be a much smaller real opportunity than a lower-percentage margin on
+something with real trading volume behind it.
+
 ## Next steps (not yet built)
 
-- A small scoring service the GE Flipper plugin calls over HTTP to get
-  ranked flip candidates from `models/margin_model.txt`.
+- The GE Flipper Java plugin: calls this service's `/candidates`, cross-
+  references `GeStarPortfolio` (current holdings/cost-basis, already built
+  in `plugins/ge-star-v2/`) to decide sizing and avoid overexposure, and
+  pushes the resulting orders into GE Star V2's existing `GeStarOrderQueue`
+  - see that plugin's docs for the execution side this feeds into.
