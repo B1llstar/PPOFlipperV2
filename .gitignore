@@ -1,0 +1,12 @@
+.gradle/
+build/
+out/
+*.class
+
+.idea/
+*.iml
+.vscode/
+
+.DS_Store
+
+gradle/wrapper/dists/

@@ -1,0 +1,84 @@
+// Root build: shared config for every plugin subproject under plugins/.
+// Resolves the Microbot client as a live binary dependency, always defaulting
+// to the newest published release. Nothing here ever compiles or depends on
+// Microbot-Hub — vendor/microbot-hub is a reference-only submodule, not a
+// build input. See README.md for the full explanation.
+
+ext {
+    // https://microbot.cloud/api/version/client -> plain-text latest version string
+    microbotClientVersionEndpoint = 'https://microbot.cloud/api/version/client'
+    microbotClientReleaseBaseUrl = 'https://github.com/chsami/Microbot/releases/download'
+    fallbackMicrobotClientVersion = '2.6.9'
+    targetJdkVersion = 11
+
+    fetchLatestMicrobotClientVersion = {
+        if (gradle.startParameter.offline) {
+            logger.warn("Offline: skipping client version lookup, using ${fallbackMicrobotClientVersion}")
+            return null
+        }
+        try {
+            def connection = new URL(microbotClientVersionEndpoint).openConnection()
+            connection.setRequestProperty('Accept', 'text/plain')
+            connection.connectTimeout = 3000
+            connection.readTimeout = 3000
+            def version = connection.inputStream.getText('UTF-8')?.trim()
+            if (version) {
+                logger.lifecycle("Resolved latest Microbot client version: ${version}")
+            }
+            return version
+        } catch (Exception e) {
+            logger.warn("Could not reach ${microbotClientVersionEndpoint}: ${e.message}")
+            return null
+        }
+    }
+
+    resolveMicrobotClientVersion = {
+        def override = findProperty('microbotClientVersion')
+        if (override && !override.toString().equalsIgnoreCase('latest')) {
+            return override.toString()
+        }
+        return fetchLatestMicrobotClientVersion() ?: fallbackMicrobotClientVersion
+    }
+
+    microbotClientVersion = resolveMicrobotClientVersion()
+    microbotClientPath = findProperty('microbotClientPath')
+}
+
+subprojects {
+    apply plugin: 'java'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(rootProject.ext.targetJdkVersion)
+        }
+    }
+
+    repositories {
+        ivy {
+            name = 'microbot-client-github-releases'
+            url = uri(rootProject.ext.microbotClientReleaseBaseUrl)
+            patternLayout {
+                artifact '[revision]/microbot-[revision].[ext]'
+            }
+            metadataSources { artifact() }
+        }
+        mavenCentral()
+    }
+
+    dependencies {
+        if (rootProject.ext.microbotClientPath) {
+            def clientFile = file(rootProject.ext.microbotClientPath)
+            if (!clientFile.exists()) {
+                throw new GradleException("microbotClientPath does not exist: ${clientFile}")
+            }
+            compileOnly files(clientFile)
+        } else {
+            compileOnly "com.microbot:microbot:${rootProject.ext.microbotClientVersion}@jar"
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.release = rootProject.ext.targetJdkVersion
+    }
+}

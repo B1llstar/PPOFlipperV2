@@ -1,0 +1,3 @@
+[submodule "vendor/microbot-hub"]
+	path = vendor/microbot-hub
+	url = https://github.com/chsami/Microbot-Hub.git
