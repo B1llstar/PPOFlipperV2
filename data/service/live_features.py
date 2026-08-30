@@ -75,8 +75,8 @@ def fetch_all_windows(client: httpx.Client) -> dict[str, dict[int, LiveWindow]]:
 class ItemFeatures:
     item_id: int
     features: dict[str, float]
-    current_buy_price: float  # latest.avg_low_price - what a buy order would need to offer
-    current_sell_price: float  # latest.avg_high_price - what a sell order would need to offer
+    current_buy_price: float  # latest.avg_high_price - the recent insta-buy price, i.e. what buyers are currently paying and a new buy order needs to compete with
+    current_sell_price: float  # latest.avg_low_price - the recent insta-sell price, i.e. what sellers are currently getting and a new sell order needs to compete with
 
 
 def compute_live_features(item_id: int, windows: dict[str, dict[int, LiveWindow]]) -> ItemFeatures | None:
@@ -147,9 +147,15 @@ def compute_live_features(item_id: int, windows: dict[str, dict[int, LiveWindow]
         "momentum_24h": momentum(w24h),
     }
 
+    # latest.avg_high_price is the most recent insta-buy trade (what buyers are paying right
+    # now) and latest.avg_low_price is the most recent insta-sell trade (what sellers are
+    # getting right now) - a buy order needs to compete with other buyers, so it should be
+    # priced near the high, not the low. Bug found live: this was previously swapped, pricing
+    # buy orders at the insta-sell price - e.g. offering ~100gp on an item recent buyers were
+    # actually paying ~140gp for, which the order correctly then failed to fill promptly at.
     return ItemFeatures(
         item_id=item_id,
         features=features,
-        current_buy_price=latest.avg_low_price,
-        current_sell_price=latest.avg_high_price,
+        current_buy_price=latest.avg_high_price,
+        current_sell_price=latest.avg_low_price,
     )
