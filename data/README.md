@@ -219,6 +219,28 @@ what to queue into GE Star V2. `GET /health` for a liveness check. Binds to
 `127.0.0.1` only - a local sidecar for the plugin running on the same
 machine, not a public API.
 
+**Restricted to Jagex's own top-100 most-traded items.** At startup, the
+service loads a `tradableItems` allowlist from Firestore (project
+`ppoflipperopus`, same one `GeStarFirestoreSync` already uses - populated by
+`pipeline/upload_tradable_items.py`, which scrapes
+`secure.runescape.com/m=itemdb_oldschool/top100`, Jagex's own live "Most
+Traded Items" ranking) and only ever scans/scores items on that list -
+nothing outside it is ever considered a candidate. Live-reported case this
+responds to: a candidate (Yanillian seed) the model confidently recommended
+had zero rows in its training data and isn't on Jagex's top-100 list either -
+restricting to genuinely consistently-liquid staple items (runes, ammo,
+logs, ores, bars) rules out this whole class of thin/illiquid false
+positive at the source, rather than patching around it per-item. If
+Firestore is unreachable at startup, this fails **open** (no restriction,
+loud warning logged) rather than silently scoring nothing - see
+`GET /health`'s `tradable_items_loaded`/`tradable_items_count` fields to
+confirm the allowlist actually loaded.
+
+Re-run `python pipeline/upload_tradable_items.py` periodically to refresh
+the list, since Jagex's own top-100 rankings shift over time - it's
+idempotent (re-uploads the same 100 documents, overwriting `rank`/
+`fetchedAt`).
+
 **Starting this alongside the game:** `scripts/launch-with-flipper.sh` (repo
 root) starts this service in the background, waits for it to report
 healthy, then launches the client via the normal `scripts/launch.sh` -

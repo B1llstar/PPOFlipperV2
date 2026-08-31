@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 import lightgbm as lgb
 from fastapi import FastAPI, HTTPException, Query
+from google.cloud import firestore
 from pydantic import BaseModel
 
 from live_features import ItemFeatures, compute_live_features, compute_position_features, fetch_all_windows
@@ -33,6 +34,7 @@ from wiki_client import get_with_retry, make_client
 MODEL_PATH = pathlib.Path(__file__).parent.parent / "models" / "margin_model.txt"
 EXIT_MODEL_PATH = pathlib.Path(__file__).parent.parent / "models" / "exit_model.txt"
 TRAINING_ROW_COUNTS_PATH = pathlib.Path(__file__).parent.parent / "models" / "margin_model_training_row_counts.json"
+FIRESTORE_SERVICE_ACCOUNT_PATH = pathlib.Path(__file__).parent.parent.parent / "ppoflipperopus-firebase-adminsdk-fbsvc-4e78117dde.json"
 
 FEATURE_ORDER = [
     "spread_pct",
@@ -108,6 +110,25 @@ async def lifespan(app: FastAPI):
         for item in mapping_payload
     }
 
+    # Restricts every candidate this service will ever recommend to Jagex's own official
+    # "Most Traded Items" top 100 (see pipeline/upload_tradable_items.py, which populates this
+    # Firestore collection) - the bot should only ever trade consistently liquid, high-volume
+    # staple items, not whatever a live scan happens to surface. This is the primary
+    # enforcement point (not a GE Star V2-side guardrail): if an item's id isn't in this set,
+    # it's never even considered a candidate, so nothing downstream ever sees it. Falls back to
+    # "no restriction" (empty set treated as "allow everything") only if Firestore is
+    # unreachable - logged loudly since that's a real gap, not a normal/expected state.
+    try:
+        fs_client = firestore.Client.from_service_account_json(str(FIRESTORE_SERVICE_ACCOUNT_PATH))
+        model_state["tradable_item_ids"] = {
+            int(doc.id) for doc in fs_client.collection("tradableItems").stream()
+        }
+        print(f"Loaded {len(model_state['tradable_item_ids'])} tradable item ids from Firestore")
+    except Exception as e:
+        print(f"WARNING: could not load tradableItems from Firestore ({e}) - "
+              f"candidate scanning will NOT be restricted to the allowlist until this is fixed")
+        model_state["tradable_item_ids"] = None
+
     yield
     model_state.clear()
 
@@ -137,6 +158,7 @@ def score_all_candidates() -> tuple[list[Candidate], int, int, int]:
     booster: lgb.Booster = model_state["booster"]
     item_meta: dict[int, ItemMeta] = model_state["item_meta"]
     training_row_counts: dict[int, int] = model_state["training_row_counts"]
+    tradable_item_ids: set[int] | None = model_state["tradable_item_ids"]
 
     with make_client() as client:
         windows = fetch_all_windows(client)
@@ -145,6 +167,14 @@ def score_all_candidates() -> tuple[list[Candidate], int, int, int]:
     # trading in the last hour can't pass the volume filter below regardless,
     # so this keeps the per-item loop scoped to plausible candidates only.
     candidate_ids = list(windows["1h"].keys())
+
+    # Restrict to the Firestore tradableItems allowlist (see lifespan) before doing any
+    # per-item work - the bot should only ever consider Jagex's own top-100 most-traded items,
+    # not whatever a live scan happens to surface. tradable_item_ids is None only if Firestore
+    # was unreachable at startup, in which case this deliberately does not restrict (fails
+    # open with a startup warning already logged, rather than silently scoring nothing).
+    if tradable_item_ids is not None:
+        candidate_ids = [item_id for item_id in candidate_ids if item_id in tradable_item_ids]
 
     item_features: list[ItemFeatures] = []
     skipped = 0
@@ -297,8 +327,11 @@ def should_sell(req: ShouldSellRequest) -> ShouldSellResponse:
 
 @app.get("/health")
 def health() -> dict:
+    tradable_item_ids = model_state.get("tradable_item_ids")
     return {
         "status": "ok",
         "model_loaded": "booster" in model_state,
         "exit_model_loaded": "exit_booster" in model_state,
+        "tradable_items_loaded": tradable_item_ids is not None,
+        "tradable_items_count": len(tradable_item_ids) if tradable_item_ids is not None else 0,
     }
