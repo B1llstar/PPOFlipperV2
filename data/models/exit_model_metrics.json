@@ -1,0 +1,57 @@
+{
+  "trained_at": "2026-08-30T18:35:15.246338+00:00",
+  "train_rows": 907784,
+  "validation_rows": 128865,
+  "best_iteration": 436,
+  "validation_rmse": 0.052400476502101,
+  "validation_mae": 0.025938152183003896,
+  "ranking_top_100": {
+    "top_k": 100,
+    "predicted_top_k_mean_true_margin": 0.7353232809132302,
+    "overall_mean_true_margin": 0.06574517437364585,
+    "best_possible_top_k_mean_true_margin": 0.7741935483870971
+  },
+  "ranking_top_500": {
+    "top_k": 500,
+    "predicted_top_k_mean_true_margin": 0.6036676844925495,
+    "overall_mean_true_margin": 0.06574517437364585,
+    "best_possible_top_k_mean_true_margin": 0.7590742506886142
+  },
+  "threshold_decision": {
+    "threshold": 0.01,
+    "accuracy": 0.9604314592790906,
+    "precision_sell": 0.8984881209503239,
+    "recall_sell": 0.14253897550111358,
+    "precision_hold": 0.9608797942769601,
+    "recall_hold": 0.9992359462886498
+  },
+  "feature_importance_gain": {
+    "spread_pct": 6630.962913859636,
+    "volatility_1h": 440.1656769402325,
+    "mean_price_1h": 1524.9589936807752,
+    "volume_1h": 222.7144689336419,
+    "momentum_1h": 1975.9302630349994,
+    "volatility_6h": 946.6653594002128,
+    "mean_price_6h": 573.9228529930115,
+    "volume_6h": 352.5911012738943,
+    "momentum_6h": 3708.783796455711,
+    "volatility_24h": 1920.0666962005198,
+    "mean_price_24h": 795.808841984719,
+    "volume_24h": 829.807385686785,
+    "momentum_24h": 868.2510540001094,
+    "unrealized_pnl_pct": 1059.8592982403934,
+    "holding_duration_hours": 7.355215683579445
+  },
+  "params": {
+    "objective": "regression",
+    "metric": "rmse",
+    "num_leaves": 31,
+    "max_bin": 63,
+    "num_threads": 2,
+    "learning_rate": 0.05,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "verbose": -1
+  }
+}

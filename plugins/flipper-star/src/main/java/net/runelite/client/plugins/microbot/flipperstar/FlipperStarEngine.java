@@ -6,7 +6,9 @@ import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeActi
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -15,14 +17,17 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Scan/decide/queue logic: fetches ranked candidates from the scoring service, filters by
- * config thresholds and current exposure, sizes a buy order per candidate, and queues it into
- * GE Star V2 via {@link GeStarBridge}. Not a {@code Script} (the base class most Hub plugins'
- * game-loop logic extends) - scanning never touches the game world (no widgets, no walking,
- * no login state), it's pure HTTP + reflection, so gating it on
- * {@code Microbot.isLoggedIn()}/the client-thread conventions a real Script needs would be
- * dishonest about what this actually does. GE Star V2 (a real Script) is what executes
- * anything in-game.
+ * Scan/decide/queue logic: fetches ranked buy candidates and per-position sell decisions from
+ * the scoring service, filters by config thresholds and current exposure, sizes orders, and
+ * queues them into GE Star V2 via {@link GeStarBridge}. Buys are model-ranked candidates from
+ * the entry margin model; sells are model-driven hold/sell decisions from the dedicated exit
+ * model (see HANDOFF_FLIPPER_EXIT_MODEL.md for why a repurposed entry signal isn't used for
+ * exits) - "hold" is simply not queuing a SELL, there's no separate hold action to take. Not a
+ * {@code Script} (the base class most Hub plugins' game-loop logic extends) - scanning never
+ * touches the game world (no widgets, no walking, no login state), it's pure HTTP + reflection,
+ * so gating it on {@code Microbot.isLoggedIn()}/the client-thread conventions a real Script
+ * needs would be dishonest about what this actually does. GE Star V2 (a real Script) is what
+ * executes anything in-game.
  */
 @Slf4j
 @Singleton
@@ -40,6 +45,12 @@ public class FlipperStarEngine {
     @Getter
     private volatile List<Candidate> lastScanCandidates = List.of();
 
+    @Getter
+    private volatile String lastExitScanSummary = "Never scanned";
+
+    @Getter
+    private volatile long lastExitScanTimestamp = 0;
+
     // Order ids FlipperStar itself queued this session, so maxOpenFlips only counts flips it
     // originated - GE Star V2's queue may also hold orders added manually or from the web UI,
     // which shouldn't count against FlipperStar's own exposure cap. ConcurrentHashMap-backed
@@ -47,6 +58,12 @@ public class FlipperStarEngine {
     // Timer roughly every 2s while scanAndQueue() may be mutating this concurrently from a
     // background scan thread (manual Scan button) or the auto-scan executor.
     private final Set<Long> openOrderIds = ConcurrentHashMap.newKeySet();
+
+    // Separate from openOrderIds - maxOpenFlips is a buy-specific exposure cap and shouldn't
+    // be shared with sell tracking. Keyed by item id (not order id) so a position already has
+    // a pending SELL is easy to check without a second lookup, and the order id is kept so
+    // reconcileOrders can drop it once GE Star V2 reports it finished/failed/removed.
+    private final Map<Integer, Long> pendingSellOrderIdsByItemId = new ConcurrentHashMap<>();
 
     private ScheduledExecutorService executor;
     private ScheduledFuture<?> autoScanTask;
@@ -72,7 +89,7 @@ public class FlipperStarEngine {
             return;
         }
 
-        reconcileOpenOrders();
+        reconcileOrders(openOrderIds);
 
         List<Candidate> candidates = scoringServiceClient.getCandidates(config.serviceUrl(), config.candidateLimit());
         lastScanCandidates = candidates;
@@ -124,6 +141,84 @@ public class FlipperStarEngine {
             "%d candidates, %d queued, %d below margin threshold, %d at exposure cap, %d already held",
             candidates.size(), queued, skippedMargin, skippedExposure, skippedAlreadyHeld);
         log.info("FlipperStar: scan complete - {}", lastScanSummary);
+
+        if (config.exitScanEnabled()) {
+            scanPositionsForExit(config);
+        }
+    }
+
+    /**
+     * Pulls every open position from GE Star V2, asks the scoring service's exit model whether
+     * each should be sold, and queues a full-quantity SELL for anything it says to sell.
+     * "Hold" has no explicit action - a position the model doesn't flag just isn't touched this
+     * scan. Called from {@link #scanAndQueue} when {@link FlipperStarConfig#exitScanEnabled()}
+     * is on, so "Scan" stays one user-facing action rather than needing a second auto-scan
+     * timer.
+     */
+    public synchronized void scanPositionsForExit(FlipperStarConfig config) {
+        if (!geStarBridge.isAvailable()) {
+            lastExitScanSummary = "GE Star V2 not running - enable it first";
+            log.warn("FlipperStar: {}", lastExitScanSummary);
+            return;
+        }
+
+        reconcileOrders(pendingSellOrderIdsByItemId.values());
+
+        List<OpenPosition> positions = geStarBridge.getOpenPositions();
+        if (positions.isEmpty()) {
+            lastExitScanSummary = "No open positions";
+            lastExitScanTimestamp = System.currentTimeMillis();
+            return;
+        }
+
+        List<SellDecision> decisions = scoringServiceClient.getShouldSellDecisions(
+            config.serviceUrl(), config.shouldSellEndpointPath(), positions);
+        if (decisions.isEmpty()) {
+            lastExitScanSummary = "Scoring service returned no exit decisions (is it running, with an exit model loaded?)";
+            log.warn("FlipperStar: {}", lastExitScanSummary);
+            lastExitScanTimestamp = System.currentTimeMillis();
+            return;
+        }
+
+        int sold = 0;
+        int skippedAlreadyPending = 0;
+        for (SellDecision decision : decisions) {
+            if (!decision.isSell()) continue;
+
+            if (pendingSellOrderIdsByItemId.containsKey(decision.getItemId())) {
+                skippedAlreadyPending++;
+                continue;
+            }
+
+            OpenPosition position = findPosition(positions, decision.getItemId());
+            if (position == null || position.getQuantityHeld() <= 0) continue;
+
+            // A reasonable starting ask - GE Star V2's clampToLivePrice floors any SELL up to
+            // the true live insta-sell rate before submission regardless, so this doesn't need
+            // to be precise, just in the right neighborhood.
+            int price = (int) Math.floor(decision.getCurrentSellPrice());
+            long orderId = geStarBridge.addOrder(
+                GrandExchangeAction.SELL, position.getItemName(), position.getQuantityHeld(), price);
+            if (orderId >= 0) {
+                pendingSellOrderIdsByItemId.put(decision.getItemId(), orderId);
+                sold++;
+                log.info("FlipperStar: queued SELL {}x {} @ {} ({})",
+                    position.getQuantityHeld(), position.getItemName(), price, decision);
+            }
+        }
+
+        lastExitScanTimestamp = System.currentTimeMillis();
+        lastExitScanSummary = String.format(
+            "%d positions, %d SELL decisions queued, %d already pending",
+            positions.size(), sold, skippedAlreadyPending);
+        log.info("FlipperStar: exit scan complete - {}", lastExitScanSummary);
+    }
+
+    private static OpenPosition findPosition(List<OpenPosition> positions, int itemId) {
+        for (OpenPosition position : positions) {
+            if (position.getItemId() == itemId) return position;
+        }
+        return null;
     }
 
     /** Quantity capped by both the GP budget and the item's GE limit (if known) - never overspend the budget, never exceed what could actually be bought in one 4h window. */
@@ -142,12 +237,14 @@ public class FlipperStarEngine {
 
     /**
      * Drops any tracked order id that's no longer QUEUED or SUBMITTED in GE Star V2 (finished,
-     * skipped, failed, or removed entirely) - called at the start of every scan so
-     * maxOpenFlips reflects real current exposure, not a monotonically growing set of every
-     * order FlipperStar has ever queued this session.
+     * skipped, failed, or removed entirely) - called at the start of every scan so exposure
+     * tracking (maxOpenFlips, and pending-sell-per-item) reflects real current state, not a
+     * monotonically growing set of every order FlipperStar has ever queued this session. Used
+     * for both openOrderIds directly and pendingSellOrderIdsByItemId's values() (a live view -
+     * removing from it removes the corresponding item-id entry from the backing map too).
      */
-    private void reconcileOpenOrders() {
-        openOrderIds.removeIf(orderId -> {
+    private void reconcileOrders(Collection<Long> orderIds) {
+        orderIds.removeIf(orderId -> {
             String status = geStarBridge.getOrderStatusName(orderId);
             return status == null || (!status.equals("QUEUED") && !status.equals("SUBMITTED"));
         });
@@ -155,6 +252,10 @@ public class FlipperStarEngine {
 
     public int getOpenFlipCount() {
         return openOrderIds.size();
+    }
+
+    public int getPendingSellCount() {
+        return pendingSellOrderIdsByItemId.size();
     }
 
     public synchronized void startAutoScan(FlipperStarConfig config) {

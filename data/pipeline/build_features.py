@@ -64,10 +64,26 @@ def load_all_months() -> pd.DataFrame:
 
 
 def compute_item_features(item_df: pd.DataFrame) -> pd.DataFrame:
-    """Computes features + label for one item's full timeseries. item_df must
-    already be sorted by timestamp and reindexed to a complete, gap-filled
-    5-minute grid (see fill_time_gaps) so rolling windows and the forward-looking
-    label both operate over uniform time steps."""
+    """Computes features + the buy-side label for one item's full timeseries.
+    item_df must already be sorted by timestamp and reindexed to a complete,
+    gap-filled 5-minute grid (see fill_time_gaps) so rolling windows and the
+    forward-looking label both operate over uniform time steps.
+
+    Thin wrapper kept for backward compatibility: compute_rolling_features and
+    compute_forward_label are the actual building blocks, split apart so
+    build_exit_labels.py can reuse the rolling features with a different label
+    horizon (24h instead of this module's 4h) without recomputing or duplicating
+    the rolling-window logic."""
+    df = compute_rolling_features(item_df)
+    df["label_margin_pct"], df["label_achievable_qty"] = compute_forward_label(df)
+    return df
+
+
+def compute_rolling_features(item_df: pd.DataFrame) -> pd.DataFrame:
+    """Computes the horizon-independent rolling spread/volatility/volume/momentum
+    features for one item's full timeseries. item_df must already be sorted by
+    timestamp and reindexed to a complete, gap-filled 5-minute grid (see
+    fill_time_gaps)."""
     df = item_df.copy()
 
     # Current spread: the raw margin opportunity at this block, before considering
@@ -89,14 +105,12 @@ def compute_item_features(item_df: pd.DataFrame) -> pd.DataFrame:
     for label, window in ROLLING_WINDOWS.items():
         df[f"momentum_{label}"] = mid_price.pct_change(periods=window)
 
-    df["label_margin_pct"], df["label_achievable_qty"] = compute_forward_label(df)
-
     return df
 
 
-def compute_forward_label(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+def compute_forward_label(df: pd.DataFrame, horizon_blocks: int = HORIZON_BLOCKS) -> tuple[np.ndarray, np.ndarray]:
     """For each row, buys at that block's avg_low_price (sized by low_price_volume)
-    and finds the best net-profit sell within the next HORIZON_BLOCKS blocks, sized
+    and finds the best net-profit sell within the next horizon_blocks blocks, sized
     by the smaller of the buy/sell volumes at those two points. Returns
     (margin_pct, achievable_qty) arrays aligned to df's index.
 
@@ -105,6 +119,12 @@ def compute_forward_label(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     *would* be if selling k blocks ahead, then take the max across all k in range
     for each starting row. This is O(rows * horizon) but as numpy array ops, not
     Python-level iteration - fast enough for a few thousand rows per item.
+
+    horizon_blocks defaults to this module's 4h buy-side horizon; build_exit_labels.py
+    calls this with horizon_blocks=288 (24h) to get each row's "best forward return
+    from here," which it then re-anchors to simulated purchase points rather than
+    treating this row's own price as the entry price - see that module for why the
+    same function serves both purposes.
     """
     n = len(df)
     buy_price = df["avg_low_price"].to_numpy()
@@ -115,7 +135,7 @@ def compute_forward_label(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     best_margin = np.full(n, np.nan)
     best_qty = np.zeros(n)
 
-    for k in range(1, HORIZON_BLOCKS + 1):
+    for k in range(1, horizon_blocks + 1):
         shifted_sell_price = np.roll(sell_price, -k)
         shifted_sell_volume = np.roll(sell_volume, -k)
         # Rows within k of the end have no valid future block at offset k - roll()

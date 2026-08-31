@@ -14,7 +14,6 @@ import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeActi
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeSlots;
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.grandexchange.models.GrandExchangeOfferDetails;
-import net.runelite.client.plugins.microbot.util.grandexchange.models.WikiPrice;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
@@ -50,6 +49,7 @@ public class GeStarV2Script extends Script {
     private final GeStarOrderQueue queue;
     private final GeStarPortfolio portfolio;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
+    private final GeStarWikiPriceClient wikiPriceClient = new GeStarWikiPriceClient();
 
     private GeStarV2Config config;
     private GeStarGuardrails guardrails;
@@ -119,10 +119,17 @@ public class GeStarV2Script extends Script {
      * into activeOrders (monitoring picks it back up exactly where it left off); only orders
      * with no matching live offer (e.g. a genuinely lost/collected-outside-the-script offer)
      * get reset back to QUEUED for resubmission.
+     *
+     * <p>Also adopts any live GE slot that isn't accounted for by the queue at all - an offer
+     * placed manually, by another tool, or left over from before this plugin was ever run. Left
+     * unadopted, these were invisible to maxActiveOffers (letting the script try to use a slot
+     * that's actually occupied) and would never get collected/cost-based by this script. Adopted
+     * as a synthetic GeStarOrder built from the live offer's own details, so it flows through
+     * the exact same monitor/collect/recordCostBasis path as any order this script submitted
+     * itself.
      */
     private void reconcileSubmittedOrders() {
         List<GeStarOrder> submittedOrders = new ArrayList<>(queue.getByStatus(GeStarOrder.Status.SUBMITTED));
-        if (submittedOrders.isEmpty()) return;
 
         for (GrandExchangeSlots slot : Rs2GrandExchange.getActiveOfferSlots()) {
             GrandExchangeOfferDetails details = Rs2GrandExchange.getOfferDetails(slot);
@@ -146,6 +153,16 @@ public class GeStarV2Script extends Script {
                     : Rs2GrandExchange.getItemsSoldFromOffer(slot));
                 activeOrders.put(slot, match);
                 log.info("GE Star V2: reconciled SUBMITTED order {} to live slot {}", match, slot);
+            } else {
+                GeStarOrder adopted = new GeStarOrder(liveAction, details.getItemName(), details.getTotalQuantity(), details.getPrice());
+                adopted.setSlot(slot);
+                adopted.setStatus(GeStarOrder.Status.SUBMITTED);
+                adopted.setQuantityFilled(liveAction == GrandExchangeAction.BUY
+                    ? Rs2GrandExchange.getItemsBoughtFromOffer(slot)
+                    : Rs2GrandExchange.getItemsSoldFromOffer(slot));
+                queue.add(adopted);
+                activeOrders.put(slot, adopted);
+                log.info("GE Star V2: adopted untracked live offer in slot {} - {}", slot, adopted);
             }
         }
 
@@ -200,9 +217,21 @@ public class GeStarV2Script extends Script {
                 break;
 
             case DONE:
+                // Only actually stop if configured to - otherwise stay in DONE, idling on this
+                // same fixed-delay tick loop, and re-check the queue every tick so an order
+                // added later (e.g. by FlipperStar's autonomous scan, long after this script
+                // reached DONE) gets picked up without needing Execute clicked again. Without
+                // this re-check, DONE was a dead end: nothing ever transitioned back out of it
+                // once reached, so a script left running from idle never noticed new orders.
                 if (config.stopWhenOrdersComplete()) {
                     log.info("GE Star V2: queue empty, stopping script.");
                     shutdown();
+                } else if (queue.nextQueued().isPresent()) {
+                    // A manual/foreign GE offer could have been placed while idling in DONE -
+                    // reconcile once more before resubmitting so maxActiveOffers/slot counting
+                    // accounts for it, same as the reconcile pass that runs right after Execute.
+                    reconcileSubmittedOrders();
+                    state = State.SUBMITTING_ORDERS;
                 }
                 break;
         }
@@ -329,28 +358,36 @@ public class GeStarV2Script extends Script {
      * (set when it was added, possibly stale by the time it's actually submitted) was higher/
      * lower. If live price data isn't available for any reason, falls back to the order's own
      * price unchanged rather than blocking submission on a missing lookup.
+     *
+     * <p>Uses {@link GeStarWikiPriceClient} (a direct call to the OSRS Wiki's real-time API),
+     * not {@code Rs2GrandExchange.getRealTimePrices} - that Microbot Hub utility sources its
+     * price from ge-tracker.com's API first (verified against its bytecode), a third-party
+     * aggregator whose data caused a live-reported bad clamp (an order clamped down to ~10gp
+     * for an item genuinely worth ~40gp). See GeStarWikiPriceClient's javadoc for the full
+     * story - this is the one price lookup in the whole submission path that must not trust a
+     * lagging/wrong source, since it's the last check before real GP moves.
      */
     private int clampToLivePrice(GeStarOrder order) {
         int itemId = itemManager.getItemId(order.getItemName());
         if (itemId <= 0) return order.getPrice();
 
-        WikiPrice wikiPrice = Rs2GrandExchange.getRealTimePrices(itemId);
-        if (wikiPrice == null) return order.getPrice();
+        GeStarWikiPriceClient.Price price = wikiPriceClient.getLatestPrice(itemId);
+        if (price == null) return order.getPrice();
 
         if (order.getAction() == GrandExchangeAction.BUY) {
-            if (wikiPrice.buyPrice <= 0) return order.getPrice();
-            int capped = Math.min(order.getPrice(), wikiPrice.buyPrice);
+            if (price.instaBuyPrice <= 0) return order.getPrice();
+            int capped = Math.min(order.getPrice(), price.instaBuyPrice);
             if (capped < order.getPrice()) {
                 log.info("GE Star V2: capped buy price for {} from {} to live insta-buy price {}",
-                    order.getItemName(), order.getPrice(), wikiPrice.buyPrice);
+                    order.getItemName(), order.getPrice(), price.instaBuyPrice);
             }
             return capped;
         } else {
-            if (wikiPrice.sellPrice <= 0) return order.getPrice();
-            int floored = Math.max(order.getPrice(), wikiPrice.sellPrice);
+            if (price.instaSellPrice <= 0) return order.getPrice();
+            int floored = Math.max(order.getPrice(), price.instaSellPrice);
             if (floored > order.getPrice()) {
                 log.info("GE Star V2: raised sell price for {} from {} to live insta-sell price {}",
-                    order.getItemName(), order.getPrice(), wikiPrice.sellPrice);
+                    order.getItemName(), order.getPrice(), price.instaSellPrice);
             }
             return floored;
         }
@@ -416,7 +453,7 @@ public class GeStarV2Script extends Script {
         if (filled <= 0) return;
         int itemId = details.getItemId();
         if (order.getAction() == GrandExchangeAction.BUY) {
-            portfolio.recordBuy(itemId, filled, details.getSpent());
+            portfolio.recordBuy(itemId, filled, details.getSpent(), System.currentTimeMillis());
         } else {
             portfolio.recordSell(itemId, filled, details.getSpent());
         }

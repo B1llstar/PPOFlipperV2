@@ -159,3 +159,17 @@ def compute_live_features(item_id: int, windows: dict[str, dict[int, LiveWindow]
         current_buy_price=latest.avg_high_price,
         current_sell_price=latest.avg_low_price,
     )
+
+
+def compute_position_features(
+    current_price: float, cost_basis_per_unit: float, purchase_timestamp: float, now_timestamp: float,
+) -> dict:
+    """Builds the two position-aware features the exit model needs, from caller-supplied
+    position data - no wiki call, pure arithmetic. current_price should be the live insta-sell
+    reference (ItemFeatures.current_sell_price), matching what a real SELL order prices
+    against and what the exit label's current_price meant during training (see
+    data/pipeline/build_exit_labels.py)."""
+    return {
+        "unrealized_pnl_pct": (current_price - cost_basis_per_unit) / cost_basis_per_unit,
+        "holding_duration_hours": (now_timestamp - purchase_timestamp) / 3600.0,
+    }

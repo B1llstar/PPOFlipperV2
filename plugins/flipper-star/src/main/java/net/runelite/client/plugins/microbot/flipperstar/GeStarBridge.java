@@ -1,13 +1,19 @@
 package net.runelite.client.plugins.microbot.flipperstar;
 
+import com.google.gson.Gson;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 
+import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * Reflective bridge to the running GE Star V2 plugin (a separately-built, separately-sideloaded
@@ -41,13 +47,84 @@ public class GeStarBridge {
 
     private static final String GE_STAR_PLUGIN_CLASS_NAME = "GeStarV2Plugin";
 
+    // GE Star V2's ConfigGroup name/key for "Stop script when queue is empty" - see
+    // GeStarV2Config.java. ConfigManager itself is a shared client-jar singleton (not a
+    // plugin-defined type), so setting another plugin's config through it directly is safe
+    // across the classloader boundary - unlike GeStarOrderQueue/GeStarPortfolio, no reflection
+    // is needed here, just the right group/key string pair.
+    private static final String GE_STAR_CONFIG_GROUP = "gestarv2";
+    private static final String STOP_WHEN_ORDERS_COMPLETE_KEY = "stopWhenOrdersComplete";
+
+    private final Gson gson = new Gson();
+    private final ConfigManager configManager;
+
+    @Inject
+    public GeStarBridge(ConfigManager configManager) {
+        this.configManager = configManager;
+    }
+
     private Plugin geStarPlugin;
     private Object orderQueue;
     private Object portfolio;
+    private Object script;
 
     /** Returns true if GE Star V2 is running and both its order queue and portfolio were reached. */
     public boolean isAvailable() {
         return findOrderQueue() != null && findPortfolio() != null;
+    }
+
+    /**
+     * True if GE Star V2's execution script is actively ticking (i.e. Execute has been
+     * clicked and it hasn't stopped) - via the shared Microbot {@code Script.isRunning()}
+     * base-class method, safe to call reflectively since it returns a primitive and the
+     * method itself is declared on a type loaded once by the shared parent classloader, not
+     * a GE Star V2-defined type. False if GE Star V2 isn't reachable at all.
+     */
+    public boolean isScriptRunning() {
+        Object scriptObj = findScript();
+        if (scriptObj == null) return false;
+
+        try {
+            Method method = scriptObj.getClass().getMethod("isRunning");
+            return (Boolean) method.invoke(scriptObj);
+        } catch (Exception e) {
+            log.error("FlipperStar: failed to read GE Star V2 script running state - {}", e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Starts GE Star V2's execution script (equivalent of clicking Execute in its panel) if
+     * it isn't already running. Returns true if the script is running after this call
+     * (whether it was already running or just started), false if GE Star V2 isn't reachable.
+     */
+    public boolean startScriptIfNotRunning() {
+        if (isScriptRunning()) return true;
+
+        Plugin plugin = findGeStarPlugin();
+        if (plugin == null) return false;
+
+        try {
+            Method method = plugin.getClass().getMethod("execute");
+            method.invoke(plugin);
+            log.info("FlipperStar: started GE Star V2's script (Automate)");
+            return true;
+        } catch (Exception e) {
+            log.error("FlipperStar: failed to start GE Star V2's script - {}", e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Turns off GE Star V2's "Stop script when queue is empty" setting, so its script stays
+     * alive and keeps noticing newly-queued orders instead of shutting down once its queue
+     * drains - a prerequisite for unattended operation (see GeStarV2Script's DONE-state
+     * handling). Deliberately only ever turns this off, never back on - FlipperStar's own
+     * Automate toggle shouldn't reach over and change GE Star V2's behavior back once turned
+     * off, since the user may have set it deliberately for other reasons.
+     */
+    public void disableGeStarStopWhenOrdersComplete() {
+        configManager.setConfiguration(GE_STAR_CONFIG_GROUP, STOP_WHEN_ORDERS_COMPLETE_KEY, false);
     }
 
     /**
@@ -105,6 +182,26 @@ public class GeStarBridge {
         }
     }
 
+    /**
+     * Every open position in GE Star V2's portfolio (item id/name, quantity held, average
+     * cost, purchase timestamp), via GeStarPortfolio.getOpenPositionsJson(). Empty list if
+     * unreachable or there are no open positions.
+     */
+    public List<OpenPosition> getOpenPositions() {
+        Object portfolioObj = findPortfolio();
+        if (portfolioObj == null) return Collections.emptyList();
+
+        try {
+            Method method = portfolioObj.getClass().getMethod("getOpenPositionsJson");
+            String json = (String) method.invoke(portfolioObj);
+            OpenPosition[] parsed = gson.fromJson(json, OpenPosition[].class);
+            return parsed != null ? Arrays.asList(parsed) : Collections.emptyList();
+        } catch (Exception e) {
+            log.error("FlipperStar: failed to read open positions - {}", e.getMessage(), e);
+            return Collections.emptyList();
+        }
+    }
+
     /** Weighted-average cost per unit for an item id, via GE Star V2's GeStarPortfolio. 0 if unreachable or never bought. */
     public int getAverageCost(int itemId) {
         Object portfolioObj = findPortfolio();
@@ -151,6 +248,16 @@ public class GeStarBridge {
         return portfolio;
     }
 
+    private Object findScript() {
+        if (script != null) return script;
+
+        Plugin plugin = findGeStarPlugin();
+        if (plugin == null) return null;
+
+        script = getFieldValue(plugin, "script");
+        return script;
+    }
+
     private Object getFieldValue(Object target, String fieldName) {
         try {
             Field field = target.getClass().getDeclaredField(fieldName);
@@ -167,5 +274,6 @@ public class GeStarBridge {
         geStarPlugin = null;
         orderQueue = null;
         portfolio = null;
+        script = null;
     }
 }

@@ -39,7 +39,9 @@ queue; that's what the panel buttons are for.
    guardrails are disabled entirely):
    - session GP spend cap (buys only)
    - max quantity per single order
-   - max % deviation from the live guide price (`Rs2GrandExchange.getRealTimePrices`)
+   - max % deviation from the live guide price (`GeStarWikiPriceClient`, see
+     "Hard price clamp" below - the guardrail and the clamp share the same
+     trusted price source)
 4. Submits via `Rs2GrandExchange.buyItem(name, price, qty)` /
    `sellItem(name, qty, price)`, marking the order `SUBMITTED`. **These two
    methods take price and quantity in a different order from each other**
@@ -56,8 +58,27 @@ queue; that's what the panel buttons are for.
    on, which the plugin also subscribes to directly for real-time logging.
    Completed offers are auto-collected (to bank or inventory, per config)
    and marked `DONE`.
-7. Optionally stops itself once the queue has no `QUEUED` or `SUBMITTED`
-   orders left.
+7. With **"Stop script when queue is empty"** off, the script stays running
+   once the queue drains instead of shutting down - it idles on the same
+   tick loop and re-checks the queue every tick, so an order queued later
+   (e.g. by [FlipperStar](../../../../../../../../../../plugins/flipper-star)'s
+   autonomous scan, long after this script last had anything to do) gets
+   picked up and submitted without Execute needing to be clicked again. This
+   is what makes unattended, continuously-running buy/sell automation
+   possible - with the default (on), the script fully stops once its queue
+   empties and needs a manual Execute to notice anything new.
+8. **Detects and adopts GE offers it didn't queue itself.** Every time the
+   script (re)opens the GE - right after Execute, and again whenever it
+   resumes from idle to submit a newly-queued order - it scans all 8 GE
+   slots (`Rs2GrandExchange.getActiveOfferSlots`) and, for any live offer
+   that doesn't match a known order, builds a synthetic `GeStarOrder` from
+   the offer's own details (item, quantity, price, buy/sell) and adds it to
+   the queue as `SUBMITTED`. That offer - whether placed manually, by
+   another tool, or left over from a previous session - is then monitored,
+   collected, and cost-based exactly like any order this script submitted
+   itself. Without this, an untracked offer sitting in a slot would be
+   invisible to `maxActiveOffers`' slot counting and would never get
+   collected or recorded into the portfolio by this script.
 
 ## Web sync (PPOFlipperOpus)
 
@@ -112,6 +133,9 @@ project, not just this collection.
   `GOING_TO_GE -> SUBMITTING_ORDERS -> MONITORING_OFFERS -> DONE`, with a
   `PREPARING_FUNDS_OR_ITEMS` side-state for bank withdrawals. Mutates each
   `GeStarOrder`'s status/fill in place as it progresses.
+- `GeStarWikiPriceClient.java` — direct OSRS Wiki `/latest` client used only
+  by the hard price clamp (see "Hard price clamp" below for why this exists
+  instead of `Rs2GrandExchange.getRealTimePrices()`).
 - `GeStarV2Config.java` — guardrail + behavior settings (no order data).
 - `GeStarGuardrails.java` — the safety checks, isolated from click/widget
   logic so the rules are easy to read and adjust.
@@ -167,18 +191,21 @@ bank-withdrawal step. This check always runs regardless of the guardrails
 master switch, since it's catching an order that can never succeed rather
 than a risk/safety tradeoff.
 
-"Max concurrent offers" (default 4, how many of the 8 GE slots to use at
+"Max concurrent offers" (default 8, how many of the 8 GE slots to use at
 once) lives in the **Behavior** section instead — it's a throttle, not a
-safety check, and stays in effect even with guardrails disabled.
+safety check, and stays in effect even with guardrails disabled. Lower it
+if you'd rather the script keep some slots free (e.g. for placing manual
+offers alongside it).
 
-The price-deviation guardrail compares against
-`Rs2GrandExchange.getRealTimePrices()` (the OSRS Wiki's real-time price
-API), matched to the correct side of the book — a buy order is checked
-against the recent buy price, a sell order against the recent sell price.
-It deliberately avoids `Rs2GrandExchange.getPrice()`, which hits
-ge-tracker.com's derived "overall" price and can drift badly from the real
-market on low-volume items (observed: it reported 103gp for an item that
-was actually trading around 27gp).
+The price-deviation guardrail compares against `GeStarWikiPriceClient` (a
+direct call to the OSRS Wiki's real-time price API - see "Hard price
+clamp" below), matched to the correct side of the book — a buy order is
+checked against the recent insta-buy price, a sell order against the
+recent insta-sell price. It deliberately avoids
+`Rs2GrandExchange.getRealTimePrices()`/`.getPrice()`, which hit
+ge-tracker.com's derived "overall" price first and can drift badly from
+the real market on low-volume items (observed: it reported 103gp for an
+item that was actually trading around 27gp).
 
 A rejected order is marked `SKIPPED` with the reason shown in its row (or
 stops the script, if configured) — it never reaches
@@ -190,17 +217,30 @@ Separate from the price-deviation guardrail above (which *rejects* an
 order that's too far from guide price, and can be loosened or disabled),
 `GeStarV2Script.clampToLivePrice()` runs on every single order right
 before submission and *adjusts* the price actually offered: a BUY order is
-never offered above the live insta-buy price
-(`Rs2GrandExchange.getRealTimePrices().buyPrice`), and a SELL order is
-never offered below the live insta-sell price (`.sellPrice`). This exists
-because the price an order was queued at can go stale by the time it's
-actually submitted (queue backlog, script paused and resumed later,
-market movement) — added after a live report of an order being submitted
-noticeably above the item's in-game guide price. This clamp cannot be
-turned off from config; if you genuinely want to pay above the live
-price for faster fill, set the order's price directly on the resulting
-narrower range (the clamp only ever moves price toward the live rate,
-never further away from it in the caller's favor).
+never offered above the live insta-buy price, and a SELL order is never
+offered below the live insta-sell price. This exists because the price an
+order was queued at can go stale by the time it's actually submitted (queue
+backlog, script paused and resumed later, market movement) — added after a
+live report of an order being submitted noticeably above the item's
+in-game guide price. This clamp cannot be turned off from config; if you
+genuinely want to pay above the live price for faster fill, set the
+order's price directly on the resulting narrower range (the clamp only
+ever moves price toward the live rate, never further away from it in the
+caller's favor).
+
+**Price source: `GeStarWikiPriceClient`, a direct call to the OSRS Wiki's
+`/latest` API — deliberately not `Rs2GrandExchange.getRealTimePrices()`.**
+That Microbot Hub utility was the original source here, but tracing it
+against its own bytecode showed it calls `getPrice`/`getSellPrice` first,
+which hit `ge-tracker.com`'s API (a third-party price aggregator) - not
+the wiki - and only fall back to the wiki if that call fails outright. A
+live-reported bug (an order clamped down to ~10gp for an item genuinely
+worth ~40gp) traced directly to ge-tracker's price for that item being
+stale/wrong, with no sanity check catching it. `GeStarWikiPriceClient`
+bypasses that path entirely, hitting the wiki directly - the same source
+the buy-side model, scoring service, and data pipeline already use and
+trust - with a 30s per-item cache (this clamp runs on every submission
+tick, no reason to refetch more often than the wiki's own data changes).
 
 ## Setup
 
@@ -214,6 +254,13 @@ never further away from it in the caller's favor).
 6. Click **Execute** and watch the queue fill live.
 7. Optionally, enable **Web sync** in config and point it at the service
    account JSON path to also accept orders from the PPOFlipperOpus web UI.
+
+**For unattended operation driven by [FlipperStar](../../../../../../../../../../plugins/flipper-star)**
+(auto-scanning and queuing buys/sells on its own, with no manual Scan/Execute
+after the first click): turn off **"Stop script when queue is empty"** above,
+click **Execute** once, and leave it running - see item 7 in "What it does"
+above for why this keeps the script alive to notice orders FlipperStar
+queues later, and FlipperStar's own docs for its auto-scan/exit-scan config.
 
 ## Building
 

@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.ItemComposition;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
@@ -108,10 +109,10 @@ public class GeStarPortfolio {
         return entry != null ? entry.getAverageCost() : 0;
     }
 
-    /** Records a completed buy fill against the cost-basis ledger and persists it. Call this once per completed BUY offer, with the actual quantity/gp spent (not the requested order size - a partial fill only cost-bases what actually filled). */
-    public synchronized void recordBuy(int itemId, int quantity, long totalSpent) {
+    /** Records a completed buy fill against the cost-basis ledger and persists it. Call this once per completed BUY offer, with the actual quantity/gp spent (not the requested order size - a partial fill only cost-bases what actually filled) and the timestamp the fill was recorded, used to track holding duration for exit decisions. */
+    public synchronized void recordBuy(int itemId, int quantity, long totalSpent, long timestampMillis) {
         if (quantity <= 0) return;
-        ledger.computeIfAbsent(itemId, CostBasisEntry::new).recordBuy(quantity, totalSpent);
+        ledger.computeIfAbsent(itemId, CostBasisEntry::new).recordBuy(quantity, totalSpent, timestampMillis);
         persistLedger();
     }
 
@@ -137,5 +138,31 @@ public class GeStarPortfolio {
         return ledger.values().stream()
             .filter(e -> e.getQuantityHeld() > 0)
             .collect(Collectors.toList());
+    }
+
+    /**
+     * Cross-plugin-safe snapshot of every open position, as a JSON array string - see this
+     * class's javadoc for why hand-rolled JSON via Gson, and GeStarOrderQueue's
+     * getOrderStatusName for why primitives/String-only across the classloader boundary
+     * (CostBasisEntry itself is a plugin-defined type and can't cross it directly). Each
+     * element: {"itemId": int, "itemName": string, "quantityHeld": int, "averageCost": int,
+     * "purchaseTimestampMillis": long}. "[]" if no open positions. itemName is included so a
+     * caller (e.g. FlipperStar, which needs an item name to queue a SELL order) doesn't need a
+     * second reflective round-trip just to resolve it.
+     */
+    public String getOpenPositionsJson() {
+        List<Map<String, Object>> snapshot = getOpenPositions().stream()
+            .map(e -> {
+                ItemComposition composition = itemManager.getItemComposition(e.getItemId());
+                Map<String, Object> entry = new HashMap<>();
+                entry.put("itemId", e.getItemId());
+                entry.put("itemName", composition != null ? composition.getName() : "");
+                entry.put("quantityHeld", e.getQuantityHeld());
+                entry.put("averageCost", e.getAverageCost());
+                entry.put("purchaseTimestampMillis", e.getWeightedAcquisitionTimestampMillis());
+                return entry;
+            })
+            .collect(Collectors.toList());
+        return gson.toJson(snapshot);
     }
 }

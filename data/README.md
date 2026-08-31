@@ -242,17 +242,94 @@ percentage - a high percentage margin on a cheap, GE-limit-capped item can
 still be a much smaller real opportunity than a lower-percentage margin on
 something with real trading volume behind it.
 
+## Exit (hold/sell) model
+
+The buy-side model above answers "what's worth entering"; it has no concept
+of an already-open position (cost basis, holding duration) and isn't reused
+for exits - a real hold/sell decision needs both, plus a HOLD state distinct
+from "not a good new entry" (see `HANDOFF_FLIPPER_EXIT_MODEL.md`, kept at the
+repo root, for the full reasoning this responds to).
+
+```bash
+cd pipeline
+python build_exit_labels.py --min-rows 200
+python prepare_exit_training_data.py
+python train_exit_model.py --num-boost-round 1500
+```
+
+**Label + row-count design:** there's no historical position ledger, so
+training rows are built by sampling simulated purchase points across each
+item's history (`--purchase-stride-blocks`, default 24 = every 2h) and, for
+each one, evaluating a small fixed set of later decision points
+(`HOLD_CHECK_OFFSETS_BLOCKS`: 1h/4h/8h/12h/18h/24h after the simulated
+purchase) rather than every possible later block. Crossing every purchase
+point against every one of the 288 possible 24h-horizon decision points would
+have pushed this dataset past ~300M rows - not viable on this machine's
+confirmed sustained memory pressure (see "Memory design" above). The chosen
+stride/offsets land at ~8.1M rows (`processed/exit_features.parquet`), well
+under the buy side's proven-working 52M, while still giving the model varied
+coverage of "how does the decision look at different points in a position's
+life."
+
+At each decision point T, `label_hold_return_pct` is exactly
+`build_features.py`'s `compute_forward_label` - the same fill-feasibility-
+aware forward-margin computation the buy side uses and already had verified
+against a brute-force scan - called with a 24h horizon (vs. the buy side's
+4h) and re-anchored to T's own price rather than a purchase price. It answers
+"if I sold right now at T and immediately looked for a new flip, what's the
+best achievable margin in the next 24h" - i.e. the value of continuing past T
+vs. cashing out here. `unrealized_pnl_pct` and `holding_duration_hours` are
+computed directly from the simulated (purchase, decision) pair. Verified this
+join against a brute-force per-row recomputation on sample data before
+trusting the vectorized pipeline, same discipline as the buy side.
+
+**Training/serving split:** the model predicts a continuous value
+(`label_hold_return_pct`), not a HOLD/SELL class - the decision is a
+threshold applied at serving time (`EXIT_SELL_THRESHOLD_PCT` in
+`service/main.py`, currently 1%, covering GE's sell tax/friction), not baked
+into training. `train_exit_model.py` reports the usual RMSE/ranking metrics
+plus a threshold-decision precision/recall at that same threshold, since
+that's the number that actually maps to live behavior. First trained run:
+RMSE 0.052 on 908K training / 129K validation rows, SELL precision ~90% but
+recall only ~14% at the 1% threshold - i.e. deliberately conservative, rarely
+triggers a sell unless fairly confident. Retune `EXIT_SELL_THRESHOLD_PCT` (and
+retrain to re-evaluate against it) if that bias turns out to be too
+conservative in practice.
+
+Saves `models/exit_model.txt` + `models/exit_model_metrics.json`, same
+LightGBM params/memory-conscious design as the buy-side model - see "Training
+a model" above, unchanged here.
+
+## Scoring service: `/should-sell`
+
+`POST /should-sell` takes a batch of currently-held positions
+(`item_id`, `quantity_held`, `average_cost_per_unit`, `purchase_timestamp`)
+and returns a HOLD/SELL decision per item, fetching the live wiki windows
+once for the whole batch (same bulk-endpoint discipline as `/candidates` -
+`fetch_all_windows` isn't called per position). Position-aware features
+(`unrealized_pnl_pct`, `holding_duration_hours`) are computed from the
+caller-supplied cost basis/timestamp against the live insta-sell reference
+price (`current_sell_price`, i.e. `avg_low_price` - what a real SELL order
+prices against, matching what the exit label's `current_price` meant during
+training). 503s if the exit model hasn't been trained yet
+(`models/exit_model.txt` missing) - `/candidates` keeps working regardless,
+so a fresh checkout doesn't lose buy-side scanning while the exit model is
+still pending.
+
 ## Where this connects to the plugin side
 
-[FlipperStar](../plugins/flipper-star/) (`plugins/flipper-star/`) calls this
-service's `/candidates`, cross-references `GeStarPortfolio` (current
-holdings/cost-basis, in `plugins/ge-star-v2/`) to decide sizing and avoid
-overexposure, and pushes the resulting orders into GE Star V2's
-`GeStarOrderQueue` for actual execution - see FlipperStar's own docs for how
-it talks to a separately-sideloaded plugin jar (reflection, not a compile-
-time dependency - RuneLite gives each sideloaded plugin its own classloader).
+[FlipperStar](../plugins/flipper-star/) (`plugins/flipper-star/`) calls
+`/candidates` for buys and `/should-sell` for exits, cross-references
+`GeStarPortfolio` (current holdings/cost-basis, in `plugins/ge-star-v2/`) to
+decide sizing/exposure and to read open positions, and pushes the resulting
+BUY/SELL orders into GE Star V2's `GeStarOrderQueue` for actual execution -
+see FlipperStar's own docs for how it talks to a separately-sideloaded plugin
+jar (reflection, not a compile-time dependency - RuneLite gives each
+sideloaded plugin its own classloader). "Hold" has no explicit action on
+either side - a position the exit model doesn't flag for SELL just isn't
+touched that scan.
 
 ## Next steps (not yet built)
 
-- Sell-side automation - FlipperStar currently only queues buys; selling
-  filled positions is manual via GE Star V2's panel.
+- Visual display of scan/position/decision history - currently text-only in
+  the plugin panels and service logs.

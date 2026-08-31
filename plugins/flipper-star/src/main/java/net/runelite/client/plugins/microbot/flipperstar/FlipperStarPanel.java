@@ -25,8 +25,10 @@ import java.util.List;
 /**
  * Sidebar panel: a Scan button for on-demand candidate review (the primary, recommended way
  * to use this plugin), an auto-scan status readout (on/off is a config toggle, not a panel
- * control - see FlipperStarConfig's "Automation" section), and a live list of the last scan's
- * top candidates.
+ * control - see FlipperStarConfig's "Automation" section), pending-sell/exit-scan status (see
+ * the "Exit (sell) scanning" config section - exit scanning runs as part of the same Scan
+ * action when enabled, not a separate button), and a live list of the last scan's top buy
+ * candidates.
  */
 public class FlipperStarPanel extends PluginPanel {
 
@@ -39,10 +41,13 @@ public class FlipperStarPanel extends PluginPanel {
     private final GeStarBridge geStarBridge;
 
     private JButton scanButton;
+    private JLabel automateValueLabel;
     private JLabel statusValueLabel;
     private JLabel autoScanValueLabel;
     private JLabel openFlipsValueLabel;
     private JLabel lastScanValueLabel;
+    private JLabel pendingSellsValueLabel;
+    private JLabel lastExitScanValueLabel;
     private JPanel candidateListPanel;
 
     private final Timer refreshTimer;
@@ -100,15 +105,21 @@ public class FlipperStarPanel extends PluginPanel {
         panel.setBackground(ColorScheme.DARK_GRAY_COLOR);
         panel.setBorder(new EmptyBorder(8, 8, 8, 8));
 
+        automateValueLabel = new JLabel();
         statusValueLabel = new JLabel();
         autoScanValueLabel = new JLabel();
         openFlipsValueLabel = new JLabel();
         lastScanValueLabel = new JLabel();
+        pendingSellsValueLabel = new JLabel();
+        lastExitScanValueLabel = new JLabel();
 
+        panel.add(statusRow("Automate", automateValueLabel));
         panel.add(statusRow("GE Star V2", statusValueLabel));
         panel.add(statusRow("Auto-scan", autoScanValueLabel));
         panel.add(statusRow("Open flips", openFlipsValueLabel));
         panel.add(statusRow("Last scan", lastScanValueLabel));
+        panel.add(statusRow("Pending sells", pendingSellsValueLabel));
+        panel.add(statusRow("Last exit scan", lastExitScanValueLabel));
 
         return panel;
     }
@@ -158,6 +169,18 @@ public class FlipperStarPanel extends PluginPanel {
     }
 
     private void refreshInternal() {
+        boolean automate = config.automateEnabled();
+        if (automate && geStarBridge.isScriptRunning()) {
+            automateValueLabel.setText("On");
+            automateValueLabel.setForeground(GREEN);
+        } else if (automate) {
+            automateValueLabel.setText("On (GE Star V2 not running yet)");
+            automateValueLabel.setForeground(ORANGE);
+        } else {
+            automateValueLabel.setText("Off");
+            automateValueLabel.setForeground(Color.LIGHT_GRAY);
+        }
+
         boolean geStarAvailable = geStarBridge.isAvailable();
         statusValueLabel.setText(geStarAvailable ? "Running" : "Not running");
         statusValueLabel.setForeground(geStarAvailable ? GREEN : Color.LIGHT_GRAY);
@@ -170,6 +193,13 @@ public class FlipperStarPanel extends PluginPanel {
 
         long lastScan = engine.getLastScanTimestamp();
         lastScanValueLabel.setText(lastScan == 0 ? "Never" : new SimpleDateFormat("HH:mm:ss").format(new Date(lastScan)));
+
+        boolean exitScan = config.exitScanEnabled();
+        pendingSellsValueLabel.setText(exitScan ? String.valueOf(engine.getPendingSellCount()) : "Off");
+        pendingSellsValueLabel.setForeground(exitScan ? Color.WHITE : Color.LIGHT_GRAY);
+
+        long lastExitScan = engine.getLastExitScanTimestamp();
+        lastExitScanValueLabel.setText(lastExitScan == 0 ? "Never" : new SimpleDateFormat("HH:mm:ss").format(new Date(lastExitScan)));
 
         showCandidates(engine.getLastScanCandidates());
     }

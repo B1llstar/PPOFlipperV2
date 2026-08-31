@@ -19,6 +19,29 @@ import net.runelite.client.config.ConfigSection;
 public interface FlipperStarConfig extends Config {
 
     @ConfigSection(
+        name = "Automate",
+        description = "One switch for fully unattended operation - buys, sells, and holds without any manual scanning or Execute clicks",
+        position = -1,
+        closedByDefault = false
+    )
+    String automateSection = "automate";
+
+    @ConfigItem(
+        keyName = "automateEnabled",
+        name = "Automate",
+        description = "Turns on auto-scan and exit-scan together, and starts GE Star V2's script if it isn't already " +
+            "running (also turns off its \"Stop script when queue is empty\" setting, so it keeps running instead of " +
+            "halting once its queue drains) - equivalent to turning on every setting below by hand. Turning this back " +
+            "off stops auto/exit scanning again but does not stop GE Star V2's script - it just stops queuing anything " +
+            "new into it.",
+        position = 0,
+        section = automateSection
+    )
+    default boolean automateEnabled() {
+        return false;
+    }
+
+    @ConfigSection(
         name = "Scoring service",
         description = "Connection to the local scoring service",
         position = 0,
@@ -117,5 +140,35 @@ public interface FlipperStarConfig extends Config {
     )
     default int autoScanIntervalMinutes() {
         return 15;
+    }
+
+    @ConfigSection(
+        name = "Exit (sell) scanning",
+        description = "Model-driven hold/sell decisions for currently-held positions",
+        position = 3,
+        closedByDefault = false
+    )
+    String exitSection = "exit";
+
+    @ConfigItem(
+        keyName = "exitScanEnabled",
+        name = "Scan positions for exit",
+        description = "If on, scans open positions each cycle and queues SELL orders the exit model recommends - off by default until proven live",
+        position = 0,
+        section = exitSection
+    )
+    default boolean exitScanEnabled() {
+        return false;
+    }
+
+    @ConfigItem(
+        keyName = "shouldSellEndpointPath",
+        name = "Should-sell endpoint path",
+        description = "Path appended to Service URL for the exit decision endpoint",
+        position = 1,
+        section = exitSection
+    )
+    default String shouldSellEndpointPath() {
+        return "/should-sell";
     }
 }

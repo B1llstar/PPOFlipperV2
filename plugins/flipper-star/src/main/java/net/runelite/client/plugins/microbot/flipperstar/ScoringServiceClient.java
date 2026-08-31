@@ -2,12 +2,16 @@ package net.runelite.client.plugins.microbot.flipperstar;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
+import com.google.gson.annotations.SerializedName;
 import lombok.extern.slf4j.Slf4j;
+import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.RequestBody;
 import okhttp3.Response;
 
 import javax.inject.Singleton;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -70,6 +74,86 @@ public class ScoringServiceClient {
             return response.isSuccessful();
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    /**
+     * Batched hold/sell decision for every open position, in one call - fetches every
+     * position's decision from the exit model at once rather than one HTTP round-trip per
+     * item, matching getCandidates' single-bulk-call precedent (see data/service/main.py's
+     * POST /should-sell, which itself fetches the live wiki windows once for the whole batch).
+     * Returns an empty list (never null) if the service isn't reachable, the exit model isn't
+     * loaded yet (HTTP 503), or the response is malformed - callers should treat that as
+     * "nothing to do this scan."
+     */
+    public List<SellDecision> getShouldSellDecisions(String baseUrl, String path, List<OpenPosition> positions) {
+        if (positions.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<PositionQueryBody> positionBodies = new ArrayList<>();
+        for (OpenPosition position : positions) {
+            positionBodies.add(new PositionQueryBody(position));
+        }
+        String jsonBody = gson.toJson(new ShouldSellRequestBody(positionBodies));
+
+        Request request = new Request.Builder()
+            .url(baseUrl + path)
+            .post(RequestBody.create(MediaType.parse("application/json"), jsonBody))
+            .build();
+
+        String body;
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                log.warn("FlipperStar: scoring service returned HTTP {} for {}", response.code(), path);
+                return Collections.emptyList();
+            }
+            body = response.body() != null ? response.body().string() : null;
+        } catch (Exception e) {
+            log.warn("FlipperStar: could not reach scoring service at {}{} - {}", baseUrl, path, e.getMessage());
+            return Collections.emptyList();
+        }
+
+        if (body == null || body.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        try {
+            ShouldSellResponse parsed = gson.fromJson(body, ShouldSellResponse.class);
+            return parsed != null && parsed.getDecisions() != null ? parsed.getDecisions() : Collections.emptyList();
+        } catch (JsonSyntaxException e) {
+            log.error("FlipperStar: failed to parse should-sell response - {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    /** Request-body shape for POST /should-sell - field names match data/service/main.py's PositionQuery exactly. */
+    private static class PositionQueryBody {
+        @SerializedName("item_id")
+        private final int itemId;
+        @SerializedName("quantity_held")
+        private final int quantityHeld;
+        @SerializedName("average_cost_per_unit")
+        private final double averageCostPerUnit;
+        @SerializedName("purchase_timestamp")
+        private final double purchaseTimestamp;
+
+        PositionQueryBody(OpenPosition position) {
+            this.itemId = position.getItemId();
+            this.quantityHeld = position.getQuantityHeld();
+            this.averageCostPerUnit = position.getAverageCost();
+            // GeStarPortfolio tracks acquisition time in epoch millis; the scoring service's
+            // PositionQuery.purchase_timestamp is unix seconds (matching Python's time.time()).
+            this.purchaseTimestamp = position.getPurchaseTimestampMillis() / 1000.0;
+        }
+    }
+
+    /** Request-body shape for POST /should-sell - matches data/service/main.py's ShouldSellRequest. */
+    private static class ShouldSellRequestBody {
+        private final List<PositionQueryBody> positions;
+
+        ShouldSellRequestBody(List<PositionQueryBody> positions) {
+            this.positions = positions;
         }
     }
 }
