@@ -98,18 +98,18 @@ public interface GeStarV2Config extends Config {
         keyName = "maxBaseValueDeviationPercent",
         name = "Max deviation from base item value (%)",
         description = "Refuse a BUY if its price is more than this % above the item's static base value (the " +
-            "client's own item definition price, e.g. an onion seed's base value of 3gp - independent of live " +
-            "trading, so this catches cases the live-price guardrail above can't: a thin/cheap item's live price " +
-            "itself drifting absurdly far from what the item is normally worth, not just a stale queued price. " +
-            "Default 150% (i.e. rejects paying more than 2.5x base value) is intentionally generous - many items " +
-            "legitimately trade well above their base value even under normal conditions, this is a last-resort " +
-            "sanity check for extreme cases, not a primary pricing signal. Only applies to BUY orders - there's no " +
-            "equivalent risk selling for more than base value. 0 = disabled.",
+            "client's own item definition price - Jagex's internal alch/store-price number, NOT the live insta-buy/" +
+            "insta-sell price shown in the GE offer screen, and not displayed anywhere in the normal GE UI). Off by " +
+            "default (0) - checked against real live candidates and this number turned out to be a bad reference for " +
+            "cheap items: completely ordinary flips (common herbs, ammo, seeds) routinely trade 10-100x+ their base " +
+            "value with no correlation to anything actually wrong, so no threshold here reliably separates a real " +
+            "problem from normal market behavior. Left available in case a specific use case calls for it, but not " +
+            "recommended as a general-purpose guardrail. Only applies to BUY orders.",
         position = 4,
         section = guardrailsSection
     )
     default int maxBaseValueDeviationPercent() {
-        return 150;
+        return 0;
     }
 
     @ConfigItem(
