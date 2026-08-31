@@ -217,6 +217,7 @@ public class FlipperStarEngine {
 
         int sold = 0;
         int skippedAlreadyPending = 0;
+        int skippedStalePosition = 0;
         for (SellDecision decision : decisions) {
             if (!decision.isSell()) continue;
 
@@ -228,24 +229,40 @@ public class FlipperStarEngine {
             OpenPosition position = findPosition(positions, decision.getItemId());
             if (position == null || position.getQuantityHeld() <= 0) continue;
 
+            // GeStarPortfolio's cost-basis ledger only updates via a tracked GE Star V2 fill
+            // (recordBuy/recordSell) - it has no way to notice an item leaving inventory some
+            // other way (sold manually, banked, traded, lost). Cap the sell quantity to what's
+            // actually in live inventory right now, not just what the ledger thinks is held -
+            // without this, a fully-stale position (0 actually held) would still get queued as
+            // a SELL that the unconditional sell-quantity guardrail then rejects every scan,
+            // forever, since nothing here ever clears or corrects the stale ledger entry.
+            int actuallyHeld = geStarBridge.getHeldQuantity(position.getItemName());
+            int sellQuantity = Math.min(position.getQuantityHeld(), actuallyHeld);
+            if (sellQuantity <= 0) {
+                skippedStalePosition++;
+                log.info("FlipperStar: skipping SELL for {} - ledger shows {}x held but inventory has none",
+                    position.getItemName(), position.getQuantityHeld());
+                continue;
+            }
+
             // A reasonable starting ask - GE Star V2's clampToLivePrice floors any SELL up to
             // the true live insta-sell rate before submission regardless, so this doesn't need
             // to be precise, just in the right neighborhood.
             int price = (int) Math.floor(decision.getCurrentSellPrice());
             long orderId = geStarBridge.addOrder(
-                GrandExchangeAction.SELL, position.getItemName(), position.getQuantityHeld(), price);
+                GrandExchangeAction.SELL, position.getItemName(), sellQuantity, price);
             if (orderId >= 0) {
                 pendingSellOrderIdsByItemId.put(decision.getItemId(), orderId);
                 sold++;
                 log.info("FlipperStar: queued SELL {}x {} @ {} ({})",
-                    position.getQuantityHeld(), position.getItemName(), price, decision);
+                    sellQuantity, position.getItemName(), price, decision);
             }
         }
 
         lastExitScanTimestamp = System.currentTimeMillis();
         lastExitScanSummary = String.format(
-            "%d positions, %d SELL decisions queued, %d already pending",
-            positions.size(), sold, skippedAlreadyPending);
+            "%d positions, %d SELL decisions queued, %d already pending, %d stale (not actually held)",
+            positions.size(), sold, skippedAlreadyPending, skippedStalePosition);
         log.info("FlipperStar: exit scan complete - {}", lastExitScanSummary);
     }
 

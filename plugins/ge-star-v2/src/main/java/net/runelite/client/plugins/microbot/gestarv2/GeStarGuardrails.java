@@ -49,7 +49,7 @@ public class GeStarGuardrails {
             int held = portfolio.getHeldQuantity(order.getItemName());
             if (order.getQuantity() > held) {
                 return String.format(
-                    "sell quantity %d exceeds what's held (%d across bank + inventory)",
+                    "sell quantity %d exceeds what's held (%d in inventory)",
                     order.getQuantity(), held);
             }
         }

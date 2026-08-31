@@ -57,10 +57,18 @@ into the queue.
    position from `GeStarPortfolio` (item, quantity held, average cost,
    holding duration) via the bridge, sends them in one batched call to the
    scoring service's `POST /should-sell`, and for anything it returns as
-   `SELL`, queues a full-quantity SELL order into GE Star V2's queue at the
-   live insta-sell reference price. Runs as the last step of the same Scan
-   action (manual or auto), not a separate button/timer - see
-   `FlipperStarConfig`'s "Exit (sell) scanning" section.
+   `SELL`, queues a SELL order into GE Star V2's queue at the live
+   insta-sell reference price - sized to the *smaller* of the ledger's
+   tracked quantity and what's actually in live inventory right now (see
+   "Portfolio & cost basis" in [GE Star V2's docs](../../../gestarv2/docs/README.md)
+   for why: the ledger only updates via a tracked GE Star V2 fill, so it
+   can't notice an item leaving inventory some other way - manually sold,
+   banked, traded). A position with nothing actually held is skipped
+   entirely (logged, counted in the scan summary) rather than queuing a
+   SELL that GE Star V2's guardrail would just reject every cycle forever.
+   Runs as the last step of the same Scan action (manual or auto), not a
+   separate button/timer - see `FlipperStarConfig`'s "Exit (sell) scanning"
+   section.
 
 The exit decision comes from a dedicated model (`data/models/exit_model.txt`,
 trained via `data/pipeline/train_exit_model.py`) - not a repurposed version
