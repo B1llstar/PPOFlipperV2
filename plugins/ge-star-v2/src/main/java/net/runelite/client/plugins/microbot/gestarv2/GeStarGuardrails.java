@@ -4,8 +4,6 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
-import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
-import net.runelite.client.plugins.microbot.util.grandexchange.models.WikiPrice;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 /**
@@ -19,6 +17,7 @@ public class GeStarGuardrails {
     private final GeStarV2Config config;
     private final GeStarPortfolio portfolio;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
+    private final GeStarWikiPriceClient wikiPriceClient = new GeStarWikiPriceClient();
 
     @Getter
     private long gpSpentThisSession = 0;
@@ -89,22 +88,23 @@ public class GeStarGuardrails {
             return null;
         }
 
-        // Rs2GrandExchange.getPrice(int) hits ge-tracker.com's derived "overall" price, which
-        // can drift badly from the real market on low-volume items (seen: 103gp reported for
-        // an item that actually buys/sells around 27gp). getRealTimePrices backs onto the
-        // OSRS Wiki's real-time price API (the same data source the wiki itself and most
-        // price checkers use) and only falls back to ge-tracker if the wiki has no data for
-        // this item, so it's the more trustworthy number to guardrail against.
-        WikiPrice wikiPrice = Rs2GrandExchange.getRealTimePrices(itemId);
-        if (wikiPrice == null) {
+        // Uses GeStarWikiPriceClient (a direct call to the OSRS Wiki's real-time API), not
+        // Rs2GrandExchange.getRealTimePrices - that Microbot Hub utility calls getPrice/
+        // getSellPrice first, which hit ge-tracker.com's API (a third-party aggregator, not
+        // the wiki) and only fall back to the wiki if that call fails outright (verified
+        // against its bytecode - see GeStarWikiPriceClient's javadoc, added after this exact
+        // mistake caused a live bad price clamp elsewhere in this plugin). ge-tracker's price
+        // can drift badly from the real market on low-volume items.
+        GeStarWikiPriceClient.Price price = wikiPriceClient.getLatestPrice(itemId);
+        if (price == null) {
             return null;
         }
 
         // Compare against the side of the book this order actually competes with - a buy
-        // order competes with other buyers (recent buyPrice), a sell order with other
-        // sellers (recent sellPrice). Comparing against the wrong side doubles the apparent
-        // "deviation" for any item with a real buy/sell spread.
-        int guidePrice = order.getAction() == GrandExchangeAction.BUY ? wikiPrice.buyPrice : wikiPrice.sellPrice;
+        // order competes with other buyers (recent insta-buy price), a sell order with other
+        // sellers (recent insta-sell price). Comparing against the wrong side doubles the
+        // apparent "deviation" for any item with a real buy/sell spread.
+        int guidePrice = order.getAction() == GrandExchangeAction.BUY ? price.instaBuyPrice : price.instaSellPrice;
         if (guidePrice <= 0) {
             return null;
         }
