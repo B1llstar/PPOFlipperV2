@@ -30,6 +30,8 @@ public class FlipperStarPlugin extends Plugin {
 
     static final String version = "1.0.0";
 
+    private static final String CONFIG_GROUP = "flipperstar";
+
     @Inject
     private FlipperStarConfig config;
 
@@ -38,6 +40,9 @@ public class FlipperStarPlugin extends Plugin {
 
     @Inject
     private GeStarBridge geStarBridge;
+
+    @Inject
+    private ConfigManager configManager;
 
     @Inject
     private ClientToolbar clientToolbar;
@@ -55,7 +60,9 @@ public class FlipperStarPlugin extends Plugin {
         geStarBridge.reset();
         addPanel();
 
-        if (config.autoScanEnabled()) {
+        if (config.automateEnabled()) {
+            applyAutomate();
+        } else if (config.autoScanEnabled()) {
             engine.startAutoScan(config);
         }
     }
@@ -98,7 +105,22 @@ public class FlipperStarPlugin extends Plugin {
 
     @Subscribe
     public void onConfigChanged(ConfigChanged event) {
-        if (!event.getGroup().equals("flipperstar")) return;
+        if (!event.getGroup().equals(CONFIG_GROUP)) return;
+
+        if (event.getKey().equals("automateEnabled")) {
+            if (config.automateEnabled()) {
+                applyAutomate();
+            } else {
+                // Only stops FlipperStar's own scanning - deliberately does not touch GE Star
+                // V2's running state or its "Stop script when queue is empty" setting, so
+                // toggling Automate off doesn't yank anything out from under an in-progress
+                // trade. See FlipperStarConfig's automateEnabled description.
+                engine.stopAutoScan();
+            }
+            if (panel != null) panel.refresh();
+            return;
+        }
+
         if (!event.getKey().equals("autoScanEnabled") && !event.getKey().equals("autoScanIntervalMinutes")) return;
 
         if (config.autoScanEnabled()) {
@@ -107,5 +129,25 @@ public class FlipperStarPlugin extends Plugin {
             engine.stopAutoScan();
         }
         if (panel != null) panel.refresh();
+    }
+
+    /**
+     * Turns Automate into its individual effects: makes sure GE Star V2's script is running
+     * and won't stop itself once its queue drains, turns on both auto-scan and exit-scan in
+     * config (which - via the autoScanEnabled/exitScanEnabled ConfigChanged handling above and
+     * FlipperStarEngine.scanAndQueue's internal gating - actually starts continuous buy+sell
+     * automation), and starts the auto-scan timer directly here too, since setConfiguration
+     * calls below may not always fire a ConfigChanged event synchronously before this method
+     * returns.
+     */
+    private void applyAutomate() {
+        geStarBridge.startScriptIfNotRunning();
+        geStarBridge.disableGeStarStopWhenOrdersComplete();
+
+        configManager.setConfiguration(CONFIG_GROUP, "autoScanEnabled", true);
+        configManager.setConfiguration(CONFIG_GROUP, "exitScanEnabled", true);
+
+        engine.startAutoScan(config);
+        log.info("FlipperStar: Automate enabled - GE Star V2 running, auto-scan and exit-scan on");
     }
 }

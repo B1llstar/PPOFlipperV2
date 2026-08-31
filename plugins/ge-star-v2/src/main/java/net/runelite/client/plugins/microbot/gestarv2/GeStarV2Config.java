@@ -114,7 +114,7 @@ public interface GeStarV2Config extends Config {
         section = behaviorSection
     )
     default int maxActiveOffers() {
-        return 4;
+        return 8;
     }
 
     @ConfigItem(
@@ -131,7 +131,9 @@ public interface GeStarV2Config extends Config {
     @ConfigItem(
         keyName = "stopWhenOrdersComplete",
         name = "Stop script when queue is empty",
-        description = "Shuts the script down once every queued order has been filled and collected",
+        description = "Shuts the script down once every queued order has been filled and collected. Turn this OFF if " +
+            "you want FlipperStar's auto-scan to run unattended - with this on, the script fully stops once the queue " +
+            "drains and won't notice new orders FlipperStar queues later, requiring Execute to be clicked again.",
         position = 2,
         section = behaviorSection
     )
