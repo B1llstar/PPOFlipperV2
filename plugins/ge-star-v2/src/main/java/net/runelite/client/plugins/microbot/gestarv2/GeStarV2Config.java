@@ -27,12 +27,16 @@ public interface GeStarV2Config extends Config {
     @ConfigItem(
         keyName = "withdrawFromBank",
         name = "Withdraw from bank if needed",
-        description = "If a sell item or GP shortfall isn't in your inventory, withdraw it from the bank before offering",
+        description = "If a sell item or GP shortfall isn't in your inventory, withdraw it from the bank before " +
+            "offering. Off by default - keeps the script operating purely on what's already in inventory, since " +
+            "GeStarPortfolio's held-quantity reporting is inventory-only too (bank contents are only visible to the " +
+            "client when the bank has actually been opened, so counting on bank data risks acting on stale/incomplete " +
+            "info). An order that can't be covered by inventory alone is skipped rather than triggering a bank trip.",
         position = 0,
         section = ordersSection
     )
     default boolean withdrawFromBank() {
-        return true;
+        return false;
     }
 
     @ConfigSection(

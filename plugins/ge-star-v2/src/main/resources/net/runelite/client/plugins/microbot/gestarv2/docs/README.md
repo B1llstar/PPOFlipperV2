@@ -49,8 +49,11 @@ queue; that's what the panel buttons are for.
    were swapped) - see the comment at the call site in
    `GeStarV2Script.java` before touching this.
 5. Withdraws coins (for buys) or the sale item (for sells) from the bank if
-   the inventory doesn't already have enough, when "Withdraw from bank if
-   needed" is enabled.
+   the inventory doesn't already have enough, **only if** "Withdraw from
+   bank if needed" is turned on (off by default - see "Portfolio & cost
+   basis" below for why inventory-only is the default). With it off, an
+   order that can't be covered by inventory alone is marked `SKIPPED`
+   rather than triggering a bank trip.
 6. Monitors active offers every tick via `Rs2GrandExchange.getOfferDetails`,
    `getItemsBoughtFromOffer` / `getItemsSoldFromOffer`, and the offer's
    `GrandExchangeOfferState` to detect completed/cancelled fills — this is
@@ -143,10 +146,11 @@ project, not just this collection.
   `Status` (`QUEUED`/`SUBMITTED`/`DONE`/`SKIPPED`/`FAILED`) and fill count.
 - `GeStarV2Overlay.java` — in-game overlay showing state, queued-order
   count, active offers, GP spent this session.
-- `portfolio/GeStarPortfolio.java` — tracks live holdings (bank + inventory,
-  read fresh on every call) and a persisted weighted-average cost-basis
+- `portfolio/GeStarPortfolio.java` — tracks live holdings (inventory-only,
+  read fresh on every call - see "Portfolio & cost basis" below for why
+  not bank + inventory) and a persisted weighted-average cost-basis
   ledger, updated from every completed fill in `GeStarV2Script`. Shared
-  across GE Star V2's guardrails and the planned GE Flipper plugin - see
+  across GE Star V2's guardrails and FlipperStar - see
   "Portfolio & cost basis" below.
 - `portfolio/CostBasisEntry.java` — one item's running average cost,
   quantity held, and realized profit/loss.
@@ -157,8 +161,18 @@ project, not just this collection.
 everywhere) answers two different kinds of question:
 
 - **Holdings** (`getHeldQuantity`, `getAllHoldings`) — read live from
-  `Rs2Bank.bankItems()` + `Rs2Inventory.all()` on every call. Always
-  current, nothing to keep in sync.
+  `Rs2Inventory.all()` on every call, **deliberately inventory-only, not
+  bank + inventory**. `Rs2Bank.bankItems()` (tried initially) reads a
+  client-side cache that's only populated reactively when the bank is
+  actually open, not a true live read - if the bank hasn't been opened
+  this session, or was opened once and its contents changed since, that
+  cache silently under/over-reports what's actually held. Inventory has
+  no such gap. Kept simple on purpose: `withdrawFromBank` (Orders section,
+  off by default) matches this - with it off, the script never tops up
+  from the bank either, so what it can see and what it can act on stay
+  the same thing. Turn `withdrawFromBank` on if you want it to reach into
+  the bank when inventory alone falls short of a queued order; holdings
+  reporting stays inventory-only either way.
 - **Cost basis** (`getAverageCost`, `getRealizedProfit`,
   `getTotalRealizedProfit`, `getOpenPositions`) — the client has no concept
   of "what did I pay for this," so `GeStarV2Script` records every completed
@@ -185,11 +199,12 @@ render more detail (a future flipper panel, most likely).
 | Stop script on guardrail breach | off | If on, any rejected order stops the script instead of just being skipped |
 
 Sell orders are also checked against `GeStarPortfolio.getHeldQuantity()`
-(bank + inventory combined) - a sell order for more than you actually own
-anywhere is rejected up front, rather than sitting forever failing the
-bank-withdrawal step. This check always runs regardless of the guardrails
-master switch, since it's catching an order that can never succeed rather
-than a risk/safety tradeoff.
+(inventory only, see "Portfolio & cost basis" above) - a sell order for
+more than you actually hold is rejected up front, rather than sitting
+forever failing (with `withdrawFromBank` off, its default) or attempting
+a bank withdrawal (with it on). This check always runs regardless of the
+guardrails master switch, since it's catching an order that can never
+succeed rather than a risk/safety tradeoff.
 
 "Max concurrent offers" (default 8, how many of the 8 GE slots to use at
 once) lives in the **Behavior** section instead — it's a throttle, not a

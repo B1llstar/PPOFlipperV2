@@ -6,7 +6,6 @@ import com.google.gson.reflect.TypeToken;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ItemComposition;
 import net.runelite.client.config.ConfigManager;
-import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
@@ -18,7 +17,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /**
  * Tracks what's actually held (bank + inventory, live from the client) and the cost basis
@@ -84,10 +82,20 @@ public class GeStarPortfolio {
         configManager.setConfiguration(CONFIG_GROUP, LEDGER_KEY, gson.toJson(ledger, LEDGER_TYPE));
     }
 
-    /** Total quantity of an item held across bank + inventory right now. */
+    /**
+     * Total quantity of an item held in inventory right now. Deliberately inventory-only, not
+     * bank + inventory: {@code Rs2Bank.bankItems()} reads a client-side cache
+     * ({@code Rs2BankData}) that's only populated reactively when the bank is actually open,
+     * not a true live read - if the bank hasn't been opened this session (or was opened long
+     * ago and its contents changed since, e.g. via another script or manually), that cache can
+     * be stale or empty, silently under/over-reporting what's actually held. Inventory, by
+     * contrast, is always live. Keeping this simple and trustworthy matters more than the
+     * (usually small) extra reach bank inclusion would give - see GeStarV2Script's
+     * PREPARING_FUNDS_OR_ITEMS, which for the same reason no longer withdraws from the bank to
+     * cover a shortfall either.
+     */
     public int getHeldQuantity(int itemId) {
-        return Rs2Inventory.all(i -> i.getId() == itemId).stream().mapToInt(Rs2ItemModel::getQuantity).sum()
-            + Rs2Bank.bankItems().stream().filter(i -> i.getId() == itemId).mapToInt(Rs2ItemModel::getQuantity).sum();
+        return Rs2Inventory.all(i -> i.getId() == itemId).stream().mapToInt(Rs2ItemModel::getQuantity).sum();
     }
 
     public int getHeldQuantity(String itemName) {
@@ -95,11 +103,10 @@ public class GeStarPortfolio {
         return itemId > 0 ? getHeldQuantity(itemId) : 0;
     }
 
-    /** Snapshot of every item currently held (bank + inventory combined), keyed by item id. */
+    /** Snapshot of every item currently held in inventory, keyed by item id - see getHeldQuantity's javadoc for why inventory-only. */
     public Map<Integer, Integer> getAllHoldings() {
         Map<Integer, Integer> holdings = new HashMap<>();
-        Stream.concat(Rs2Inventory.all().stream(), Rs2Bank.bankItems().stream())
-            .forEach(item -> holdings.merge(item.getId(), item.getQuantity(), Integer::sum));
+        Rs2Inventory.all().forEach(item -> holdings.merge(item.getId(), item.getQuantity(), Integer::sum));
         return holdings;
     }
 
