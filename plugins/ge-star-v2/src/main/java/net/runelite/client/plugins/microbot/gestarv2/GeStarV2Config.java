@@ -82,8 +82,11 @@ public interface GeStarV2Config extends Config {
 
     @ConfigItem(
         keyName = "maxPriceDeviationPercent",
-        name = "Max price deviation from guide price (%)",
-        description = "Refuse an order if its price is more than this % away from the GE guide price. 0 = disabled.",
+        name = "Max price deviation from live price (%)",
+        description = "Refuse an order if its price is more than this % away from the OSRS Wiki's current live " +
+            "insta-buy/insta-sell price. Catches an order priced worse than the live market itself (e.g. a stale " +
+            "queued price). 0 = disabled. Does NOT catch the live market itself having drifted far from an item's " +
+            "normal value on a thin/cheap item - see \"Max deviation from base item value\" below for that.",
         position = 3,
         section = guardrailsSection
     )
@@ -92,10 +95,28 @@ public interface GeStarV2Config extends Config {
     }
 
     @ConfigItem(
+        keyName = "maxBaseValueDeviationPercent",
+        name = "Max deviation from base item value (%)",
+        description = "Refuse a BUY if its price is more than this % above the item's static base value (the " +
+            "client's own item definition price, e.g. an onion seed's base value of 3gp - independent of live " +
+            "trading, so this catches cases the live-price guardrail above can't: a thin/cheap item's live price " +
+            "itself drifting absurdly far from what the item is normally worth, not just a stale queued price. " +
+            "Default 150% (i.e. rejects paying more than 2.5x base value) is intentionally generous - many items " +
+            "legitimately trade well above their base value even under normal conditions, this is a last-resort " +
+            "sanity check for extreme cases, not a primary pricing signal. Only applies to BUY orders - there's no " +
+            "equivalent risk selling for more than base value. 0 = disabled.",
+        position = 4,
+        section = guardrailsSection
+    )
+    default int maxBaseValueDeviationPercent() {
+        return 150;
+    }
+
+    @ConfigItem(
         keyName = "stopOnGuardrailBreach",
         name = "Stop script on guardrail breach",
         description = "If off, a rejected order is just skipped and the script moves to the next one. If on, the whole script stops. No effect while guardrails are disabled.",
-        position = 4,
+        position = 5,
         section = guardrailsSection
     )
     default boolean stopOnGuardrailBreach() {

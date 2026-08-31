@@ -200,7 +200,8 @@ render more detail (a future flipper panel, most likely).
 | Guardrails enabled | on | Master switch. Off submits every order as-is, skipping every check below entirely |
 | Max GP to spend (session) | 0 (off) | Hard cap on total coins spent on buys |
 | Max quantity per item | 0 (off) | Rejects any single order above this qty |
-| Max price deviation from guide price | 25% | Rejects orders priced too far from the live guide price |
+| Max price deviation from live price | 25% | Rejects orders priced too far from the OSRS Wiki's current live insta-buy/insta-sell price |
+| Max deviation from base item value | 150% | BUY-only. Rejects paying more than 2.5x the item's static base value (`ItemComposition.getPrice()`) - catches a thin/cheap item's *live* price itself having drifted far from normal, which the live-price guardrail above structurally can't (see "Portfolio & cost basis" - live-reported case: onion seed, base value 3gp, bought at 10gp, a legitimate live price at the time but 233% over base value) |
 | Stop script on guardrail breach | off | If on, any rejected order stops the script instead of just being skipped |
 
 Sell orders are also checked against `GeStarPortfolio.getHeldQuantity()`

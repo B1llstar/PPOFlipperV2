@@ -2,6 +2,7 @@ package net.runelite.client.plugins.microbot.gestarv2;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.ItemComposition;
 import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
@@ -75,6 +76,52 @@ public class GeStarGuardrails {
         if (maxDeviation > 0) {
             String reason = checkPriceDeviation(order, maxDeviation);
             if (reason != null) return reason;
+        }
+
+        if (order.getAction() == GrandExchangeAction.BUY) {
+            int maxBaseValueDeviation = config.maxBaseValueDeviationPercent();
+            if (maxBaseValueDeviation > 0) {
+                String reason = checkBaseValueDeviation(order, maxBaseValueDeviation);
+                if (reason != null) return reason;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Catches what {@link #checkPriceDeviation} structurally cannot: the live market price
+     * itself having drifted far from what an item is normally worth, not just an order priced
+     * worse than a (possibly also-distorted) live price. Compares against
+     * {@link ItemComposition#getPrice()} - the client's own static item-definition price,
+     * read locally with no network call, completely independent of live trading - so a thin,
+     * cheap item whose live insta-buy has been pushed way up by one or two trades still gets
+     * caught here even though the live-price guardrail would see the order as right in line
+     * with (an already-bad) live price. Live-reported case this was added for: onion seed
+     * (base value 3gp) bought at 10gp - a legitimate live insta-buy price at the time, but
+     * over 3x the item's normal value.
+     */
+    private String checkBaseValueDeviation(GeStarOrder order, int maxDeviationPercent) {
+        int itemId = itemManager.getItemId(order.getItemName());
+        if (itemId <= 0) {
+            return null;
+        }
+
+        ItemComposition composition = itemManager.getItemComposition(itemId);
+        if (composition == null) {
+            return null;
+        }
+
+        int baseValue = composition.getPrice();
+        if (baseValue <= 0) {
+            return null;
+        }
+
+        double deviation = (order.getPrice() - baseValue) / (double) baseValue * 100.0;
+        if (deviation > maxDeviationPercent) {
+            return String.format(
+                "price %d gp is %.1f%% above base item value %d gp (max allowed: %d%%)",
+                order.getPrice(), deviation, baseValue, maxDeviationPercent);
         }
 
         return null;
