@@ -52,9 +52,13 @@ EXIT_FEATURE_ORDER = FEATURE_ORDER + ["unrealized_pnl_pct", "holding_duration_ho
 EXIT_SELL_THRESHOLD_PCT = 0.01
 
 # Same liquidity bar used to build the training data (see
-# pipeline/prepare_training_data.py's defaults) - scoring items the model
-# never saw anything like during training would just be noise in the ranking.
-MIN_PRICE = 10.0
+# prepare_training_data.py's --min-price/--min-volume-1h defaults, which this must stay in
+# sync with) - scoring items the model never saw anything like during training would just be
+# noise in the ranking. MIN_PRICE lowered from 10 to 1 alongside that script's default change -
+# checked against real data that a price floor above ~1gp was excluding some of the single
+# highest-volume items in the game (Air rune, Feather, etc) purely for being cheap, not
+# illiquid; volume_1h is the real liquidity signal.
+MIN_PRICE = 1.0
 MIN_VOLUME_1H = 5000.0
 
 # Minimum combined train+validation rows an item needed to be considered a real training

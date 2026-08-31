@@ -117,9 +117,36 @@ between the two periods so no training row's label reaches into validation
 data at all - verified on the actual output (`train.timestamp.max()` to
 `validation.timestamp.min()` is exactly 4.0h).
 
-Defaults (`--min-price 10 --min-qty 5 --min-volume-1h 5000 --clip-percentile 0.995`)
-keep ~30% of rows and clip label_margin_pct to roughly [-10%, 200%] - down
-from a raw max of 432,000%. Resulting train set: 3.87M rows, no nulls.
+Defaults (`--min-price 1 --min-qty 5 --min-volume-1h 5000 --clip-percentile 0.995`)
+keep ~25% of rows and clip label_margin_pct to roughly [-1.5%, 100%]. Resulting
+train set: 4.11M rows, no nulls.
+
+**`--min-price` lowered from 10 to 1** after checking real data against the
+`tradableItems` allowlist (see "Scoring service" below): `--min-price 10` was
+excluding some of the single highest-volume items in the entire game - Air
+rune, Feather, Fire rune, Water rune, Pure essence (all 2-6gp, tens of
+thousands of raw rows each, essentially 0% excluded by the volume filter) -
+purely for being cheap per unit, not because they're actually illiquid.
+Checked whether this reintroduces the near-worthless-item outlier problem
+`--min-price 10` was originally added to prevent: with `--min-qty`/
+`--min-volume-1h` already enforced, the outlier rate barely moves across the
+whole price range (0.023% of rows with |label|>200% at min-price=10 vs
+0.042% at min-price=1 - both negligible) - volume/achievable-qty are the
+real liquidity signals here, price alone isn't a good proxy for it.
+Verified the fix worked: of the `tradableItems` allowlist's 100 items,
+training coverage (`>=200` combined train+validation rows) went from
+79/100 to 93/100 after retraining, including several of the single
+highest-rank items on the list (Air rune, Feather, Fire rune, Water rune,
+Earth rune, Mind rune). The remaining low-coverage items (Pure essence,
+Arrow shaft, Amethyst dart tip/arrowtips, Sunfire rune, Sandworms,
+Forester's ration) have plenty of raw liquid data but lose most of it to
+`dropna(subset=FEATURE_COLUMNS)` - `volatility_6h`/`volatility_24h`
+specifically need a minimum count of *populated* rolling-window blocks
+(see `build_features.py`'s `min_periods`), which a handful of items don't
+reliably clear even with strong recent volume. The scoring service's
+training-row-count filter (see "Scoring service" below) correctly excludes
+these from being recommended either way, so this doesn't need a separate
+fix right now.
 
 **`--min-volume-1h` matters more than it looks:** the achievable-qty filter
 alone only checks the two specific 5-minute blocks a trade actually used,

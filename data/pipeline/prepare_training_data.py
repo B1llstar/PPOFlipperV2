@@ -193,8 +193,8 @@ def stream_filter_clip_split(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--min-price", type=float, default=10.0,
-                         help="Minimum avg_low_price to keep a row (default: 10gp) - filters out near-worthless items whose margins are technically-correct but not meaningfully tradeable")
+    parser.add_argument("--min-price", type=float, default=1.0,
+                         help="Minimum avg_low_price to keep a row (default: 1gp, i.e. only excludes literal free/zero-price rows) - lowered from an earlier default of 10gp after checking real data: with --min-qty and --min-volume-1h already enforced, the price floor barely affects the outlier rate (0.023%% of rows with |label|>200%% at min-price=10 vs 0.042%% at min-price=1 - both negligible), but a price>=10 floor was excluding some of the single highest-volume items in the game (Air rune, Feather, Fire rune, Water rune, Pure essence - all 2-6gp, tens of thousands of raw training rows each, essentially 0%% excluded by the volume filter) purely for being cheap per unit, not because they're actually illiquid. Volume/achievable-qty are the real liquidity signals here, not price.")
     parser.add_argument("--min-qty", type=float, default=5.0,
                          help="Minimum label_achievable_qty to keep a row (default: 5) - filters out single-unit trades that produce noisy, unrepresentative margins")
     parser.add_argument("--min-volume-1h", type=float, default=5000.0,
