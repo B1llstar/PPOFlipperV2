@@ -17,6 +17,7 @@ Everything binds to 127.0.0.1 only - this is a local sidecar process for the
 plugin running on the same machine, not a public API.
 """
 
+import json
 import pathlib
 import time
 from contextlib import asynccontextmanager
@@ -31,6 +32,7 @@ from wiki_client import get_with_retry, make_client
 
 MODEL_PATH = pathlib.Path(__file__).parent.parent / "models" / "margin_model.txt"
 EXIT_MODEL_PATH = pathlib.Path(__file__).parent.parent / "models" / "exit_model.txt"
+TRAINING_ROW_COUNTS_PATH = pathlib.Path(__file__).parent.parent / "models" / "margin_model_training_row_counts.json"
 
 FEATURE_ORDER = [
     "spread_pct",
@@ -52,6 +54,17 @@ EXIT_SELL_THRESHOLD_PCT = 0.01
 # never saw anything like during training would just be noise in the ranking.
 MIN_PRICE = 10.0
 MIN_VOLUME_1H = 5000.0
+
+# Minimum combined train+validation rows an item needed to be considered a real training
+# example, not noise - matches build_features.py's own --min-rows default (200 traded blocks),
+# the same bar used to decide whether an item's history was substantial enough to compute
+# meaningful rolling features from in the first place. Live-reported case this responds to: an
+# item with genuine live trading volume right now (passing MIN_PRICE/MIN_VOLUME_1H above) but
+# so thin *on average* over the training window that it never survived
+# prepare_training_data.py's liquidity filter - the model had zero real examples of it, so its
+# prediction for it is pure cross-item extrapolation, not anything actually learned. Live
+# liquidity and training-time liquidity are different questions; both need to pass.
+MIN_TRAINING_ROWS = 200
 
 @dataclass
 class ItemMeta:
@@ -76,6 +89,17 @@ async def lifespan(app: FastAPI):
     else:
         print(f"WARNING: {EXIT_MODEL_PATH} not found - /should-sell will return 503 until "
               f"pipeline/train_exit_model.py has been run")
+
+    # Optional, like the exit model above - falls back to "no coverage data, don't filter on
+    # it" rather than crashing, so an older model trained before this file existed still works
+    # (just without this particular safeguard) until retrained.
+    if TRAINING_ROW_COUNTS_PATH.exists():
+        raw_counts = json.loads(TRAINING_ROW_COUNTS_PATH.read_text())
+        model_state["training_row_counts"] = {int(k): v for k, v in raw_counts.items()}
+    else:
+        print(f"WARNING: {TRAINING_ROW_COUNTS_PATH} not found - candidates won't be filtered "
+              f"by training coverage until pipeline/train_model.py is re-run")
+        model_state["training_row_counts"] = {}
 
     with make_client() as client:
         mapping_payload = get_with_retry(client, "/mapping")
@@ -106,11 +130,13 @@ class CandidatesResponse(BaseModel):
     candidates: list[Candidate]
     items_scored: int
     items_skipped_insufficient_data: int
+    items_skipped_low_training_coverage: int
 
 
-def score_all_candidates() -> tuple[list[Candidate], int, int]:
+def score_all_candidates() -> tuple[list[Candidate], int, int, int]:
     booster: lgb.Booster = model_state["booster"]
     item_meta: dict[int, ItemMeta] = model_state["item_meta"]
+    training_row_counts: dict[int, int] = model_state["training_row_counts"]
 
     with make_client() as client:
         windows = fetch_all_windows(client)
@@ -122,6 +148,7 @@ def score_all_candidates() -> tuple[list[Candidate], int, int]:
 
     item_features: list[ItemFeatures] = []
     skipped = 0
+    skipped_low_coverage = 0
     for item_id in candidate_ids:
         result = compute_live_features(item_id, windows)
         if result is None:
@@ -130,10 +157,20 @@ def score_all_candidates() -> tuple[list[Candidate], int, int]:
         if result.current_buy_price < MIN_PRICE or result.features["volume_1h"] < MIN_VOLUME_1H:
             skipped += 1
             continue
+        # Live liquidity (checked above) and training-time liquidity are different questions -
+        # an item can have real volume trading right now while having been too thin *on
+        # average* over the training window to survive prepare_training_data.py's filter, in
+        # which case the model has no real examples of it and its prediction is pure
+        # cross-item extrapolation. See MIN_TRAINING_ROWS's comment for the live case this
+        # responds to. Missing entirely from training_row_counts (0 via .get default) means
+        # zero rows, the most extreme case of this.
+        if training_row_counts.get(item_id, 0) < MIN_TRAINING_ROWS:
+            skipped_low_coverage += 1
+            continue
         item_features.append(result)
 
     if not item_features:
-        return [], 0, skipped
+        return [], 0, skipped, skipped_low_coverage
 
     feature_matrix = [[f.features[col] for col in FEATURE_ORDER] for f in item_features]
     predictions = booster.predict(feature_matrix)
@@ -156,16 +193,17 @@ def score_all_candidates() -> tuple[list[Candidate], int, int]:
         ))
     candidates.sort(key=lambda c: -c.predicted_margin_pct)
 
-    return candidates, len(item_features), skipped
+    return candidates, len(item_features), skipped, skipped_low_coverage
 
 
 @app.get("/candidates", response_model=CandidatesResponse)
 def get_candidates(limit: int = Query(default=20, ge=1, le=200)) -> CandidatesResponse:
-    candidates, scored, skipped = score_all_candidates()
+    candidates, scored, skipped, skipped_low_coverage = score_all_candidates()
     return CandidatesResponse(
         candidates=candidates[:limit],
         items_scored=scored,
         items_skipped_insufficient_data=skipped,
+        items_skipped_low_training_coverage=skipped_low_coverage,
     )
 
 

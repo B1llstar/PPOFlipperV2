@@ -15,4 +15,7 @@ public class CandidatesResponse {
 
     @SerializedName("items_skipped_insufficient_data")
     private int itemsSkippedInsufficientData;
+
+    @SerializedName("items_skipped_low_training_coverage")
+    private int itemsSkippedLowTrainingCoverage;
 }

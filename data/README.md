@@ -154,10 +154,27 @@ Trains a LightGBM regressor (`objective=regression`, target `label_margin_pct`)
 on the 13 rolling spread/volatility/volume/momentum features, with early
 stopping against the validation split. Saves `models/margin_model.txt`
 (LightGBM's native text format - loadable via `lgb.Booster(model_file=...)`,
-no pickle/version coupling to this exact sklearn/lightgbm install) and
+no pickle/version coupling to this exact sklearn/lightgbm install),
 `models/margin_model_metrics.json` (RMSE/MAE, ranking quality, feature
 importance, and the params used - so a later run can be compared against
-what came before it).
+what came before it), and `models/margin_model_training_row_counts.json`
+(per-item combined train+validation row counts).
+
+**Why the row-counts file matters:** the scoring service scans a broad live
+item universe (see "Scoring service" below), and live liquidity (checked at
+scan time) and training-time liquidity (whether an item survived
+`prepare_training_data.py`'s filter over the full 6-month window) are
+different questions - an item can have real volume trading right now while
+having been too thin *on average* historically to produce enough usable rows.
+Live-reported case: a candidate the model confidently recommended (Yanillian
+seed) turned out to have **zero** rows in the training set at all - it never
+survived the liquidity filter, so every prediction for it was pure
+cross-item extrapolation, not anything the model actually learned. Checking
+current live candidates found 10% with zero training rows and 36% with
+under 100. The scoring service now skips any candidate with fewer than
+`MIN_TRAINING_ROWS` (200, matching `build_features.py`'s own `--min-rows`
+liquidity bar) combined rows - see `items_skipped_low_training_coverage` in
+`/candidates`' response.
 
 Beyond RMSE/MAE, `train_model.py` reports a ranking-quality metric that
 matters more for how this model actually gets used: of the top-K items by

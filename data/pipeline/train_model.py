@@ -52,6 +52,17 @@ def load_split(name: str) -> tuple[pd.DataFrame, pd.Series]:
     return df[FEATURE_COLUMNS], df[LABEL_COLUMN]
 
 
+def compute_training_row_counts(name: str) -> dict[int, int]:
+    """Per-item row counts in a split, keyed by item_id - used to flag at serving time when
+    the model is being asked to score an item it saw few or no examples of during training.
+    Read as a separate pass (item_id isn't one of the model's own FEATURE_COLUMNS) rather than
+    folded into load_split, so that function stays a clean, minimal "exactly what the model
+    trains on" view."""
+    path = PROCESSED_DIR / f"{name}.parquet"
+    df = pd.read_parquet(path, columns=["item_id"])
+    return df["item_id"].value_counts().to_dict()
+
+
 def evaluate_ranking(y_true: np.ndarray, y_pred: np.ndarray, top_k: int) -> dict:
     """Since the flipper cares about *which* items look best right now, not
     just precise margin regression, this reports how good the model's
@@ -147,6 +158,26 @@ def main() -> None:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model_path = MODEL_DIR / "margin_model.txt"
     booster.save_model(str(model_path))
+
+    # Saved alongside the model so the scoring service can flag/skip candidates the model
+    # barely or never saw during training - live-reported case: an item with ZERO training
+    # rows (too illiquid on average over the 6-month training window to survive
+    # prepare_training_data.py's liquidity filter, despite passing the scoring service's own
+    # live liquidity check on a given scan - live volume can transiently spike even for a
+    # generally-thin item) still got confidently scored and recommended, with predictions that
+    # were pure cross-item extrapolation, not anything the model actually learned about that
+    # item. Combines train + validation counts since both splits reflect the model having real
+    # examples of the item's behavior.
+    train_counts = compute_training_row_counts("train")
+    validation_counts = compute_training_row_counts("validation")
+    all_item_ids = set(train_counts) | set(validation_counts)
+    training_row_counts = {
+        str(item_id): train_counts.get(item_id, 0) + validation_counts.get(item_id, 0)
+        for item_id in all_item_ids
+    }
+    counts_path = MODEL_DIR / "margin_model_training_row_counts.json"
+    counts_path.write_text(json.dumps(training_row_counts))
+    print(f"Saved per-item training row counts for {len(training_row_counts):,} items to {counts_path}")
 
     metrics = {
         "trained_at": pd.Timestamp.now(tz="UTC").isoformat(),
