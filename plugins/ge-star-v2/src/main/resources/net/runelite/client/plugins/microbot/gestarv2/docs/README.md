@@ -60,7 +60,12 @@ queue; that's what the panel buttons are for.
    the same live state the client's `GrandExchangeOfferChanged` event fires
    on, which the plugin also subscribes to directly for real-time logging.
    Completed offers are auto-collected (to bank or inventory, per config)
-   and marked `DONE`.
+   and marked `DONE` **only if the collect actually succeeds**
+   (`Rs2GrandExchange.collectOffer`'s return value is checked) - if it
+   fails (e.g. the GE offer widget wasn't interactable that tick), the
+   order stays `SUBMITTED` and tracked so the next tick retries, instead
+   of the order being marked done (and cost-basis recorded) while the
+   GP/items are still actually sitting uncollected in the GE slot.
 7. With **"Stop script when queue is empty"** off, the script stays running
    once the queue drains instead of shutting down - it idles on the same
    tick loop and re-checks the queue every tick, so an order queued later

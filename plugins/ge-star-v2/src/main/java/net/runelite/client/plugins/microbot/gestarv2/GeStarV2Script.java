@@ -428,10 +428,25 @@ public class GeStarV2Script extends Script {
 
             if (finished) {
                 log.info("GE Star V2: offer complete in slot {} - {} ({} filled)", slot, order, filled);
-                recordCostBasis(order, details, filled);
-                Rs2GrandExchange.collectOffer(slot, config.collectToBank());
-                order.setStatus(GeStarOrder.Status.DONE);
-                activeOrders.remove(slot);
+                boolean collected = Rs2GrandExchange.collectOffer(slot, config.collectToBank());
+                if (collected) {
+                    // Cost-basis is only recorded once the GP/items have actually landed in
+                    // inventory (or bank) - recording it before a successful collect would
+                    // credit the ledger (and therefore getHeldQuantity, now inventory-only)
+                    // for something not actually held yet.
+                    recordCostBasis(order, details, filled);
+                    order.setStatus(GeStarOrder.Status.DONE);
+                    activeOrders.remove(slot);
+                } else {
+                    // Collection failed (GE widget not ready/interactable this tick, a
+                    // transient timing issue, etc - see Rs2GrandExchange.collectOffer's own
+                    // internal retries/timeout). Leave the order SUBMITTED and in activeOrders
+                    // so the next tick's monitorOffers pass retries it, instead of silently
+                    // treating a still-uncollected offer as done and moving on - that
+                    // previously left real GP/items sitting in the GE slot while the script
+                    // freed the slot for something else or went idle.
+                    log.warn("GE Star V2: collectOffer failed for slot {} - {}, will retry next tick", slot, order);
+                }
             }
             queue.notifyChanged();
         }
