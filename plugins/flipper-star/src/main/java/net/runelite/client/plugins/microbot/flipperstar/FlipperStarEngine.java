@@ -3,6 +3,7 @@ package net.runelite.client.plugins.microbot.flipperstar;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -90,6 +91,23 @@ public class FlipperStarEngine {
         }
 
         reconcileOrders(openOrderIds);
+
+        // Buying is inventory-only now (see GeStarPortfolio/withdrawFromBank) - a BUY that
+        // fills with nowhere for the items to land would just fail to collect, so skip queuing
+        // new buys entirely once inventory has no free slots rather than queuing orders that
+        // can't actually be received. Doesn't skip the exit scan below - a full inventory is
+        // exactly when freeing space via a model-approved sell matters most, and this never
+        // forces a sell the exit model wouldn't otherwise recommend on its own.
+        if (Rs2Inventory.isFull()) {
+            lastScanSummary = "Inventory full - skipping buy scan this cycle";
+            log.info("FlipperStar: {}", lastScanSummary);
+            lastScanCandidates = List.of();
+            lastScanTimestamp = System.currentTimeMillis();
+            if (config.exitScanEnabled()) {
+                scanPositionsForExit(config);
+            }
+            return;
+        }
 
         List<Candidate> candidates = scoringServiceClient.getCandidates(config.serviceUrl(), config.candidateLimit());
         lastScanCandidates = candidates;

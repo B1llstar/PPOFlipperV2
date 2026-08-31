@@ -29,6 +29,15 @@ into the queue.
 
 ## How it works
 
+0. **Inventory check**: if inventory has no free slots
+   (`Rs2Inventory.isFull()`), the buy scan is skipped entirely for that
+   cycle - buying is inventory-only now (see
+   [GE Star V2's docs](../../../gestarv2/docs/README.md)'s "Portfolio &
+   cost basis" section), so a BUY that filled with nowhere for the items
+   to land would just fail. The exit scan (step 5) still runs regardless -
+   a full inventory is exactly when freeing space via a model-approved
+   sell matters most, and this never forces a sell the exit model
+   wouldn't otherwise recommend on its own.
 1. **Scan**: calls the scoring service's `GET /candidates`, which scans
    currently-liquid items and returns them ranked by predicted round-trip
    margin (see `data/service/main.py`).
