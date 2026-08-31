@@ -122,6 +122,17 @@ public class FlipperStarEngine {
         int skippedMargin = 0;
         int skippedExposure = 0;
         int skippedAlreadyHeld = 0;
+        int skippedNoSlots = 0;
+
+        // Reserves one free inventory slot per new item this scan queues a BUY for, on top of
+        // whatever's already committed to prior scans' still-open buys (openOrderIds - GE Star
+        // V2 may have several of those actively submitted/queued at once, up to
+        // maxActiveOffers, each landing in its own slot on fill). isFull() alone (checked
+        // above) only catches an already-full inventory at the start of this scan - it doesn't
+        // account for this same scan queuing more buys than there's room left for once earlier
+        // orders in the loop have "claimed" a slot, which is exactly how active buy orders can
+        // end up outnumbering free inventory slots.
+        int projectedFreeSlots = Rs2Inventory.getEmptySlots() - openOrderIds.size();
 
         for (Candidate candidate : candidates) {
             if (openOrderIds.size() >= config.maxOpenFlips()) {
@@ -141,6 +152,11 @@ public class FlipperStarEngine {
                 continue;
             }
 
+            if (projectedFreeSlots <= 0) {
+                skippedNoSlots++;
+                continue;
+            }
+
             int quantity = sizeOrder(candidate, config.gpPerFlip());
             if (quantity <= 0) continue;
 
@@ -149,6 +165,7 @@ public class FlipperStarEngine {
             if (orderId >= 0) {
                 openOrderIds.add(orderId);
                 queued++;
+                projectedFreeSlots--;
                 log.info("FlipperStar: queued BUY {}x {} @ {} (predicted margin {}%)",
                     quantity, candidate.getItemName(), price, candidate.getPredictedMarginPct() * 100);
             }
@@ -156,8 +173,8 @@ public class FlipperStarEngine {
 
         lastScanTimestamp = System.currentTimeMillis();
         lastScanSummary = String.format(
-            "%d candidates, %d queued, %d below margin threshold, %d at exposure cap, %d already held",
-            candidates.size(), queued, skippedMargin, skippedExposure, skippedAlreadyHeld);
+            "%d candidates, %d queued, %d below margin threshold, %d at exposure cap, %d already held, %d no free slots",
+            candidates.size(), queued, skippedMargin, skippedExposure, skippedAlreadyHeld, skippedNoSlots);
         log.info("FlipperStar: scan complete - {}", lastScanSummary);
 
         if (config.exitScanEnabled()) {
