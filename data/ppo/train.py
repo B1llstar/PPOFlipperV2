@@ -98,10 +98,20 @@ def push_trained_items_to_firestore(dataset: MarketDataset, git_commit: str) -> 
         print(f"Warning: failed to push trained-item list to Firestore - {e}")
 
 
-def get_git_commit() -> str:
+def get_git_commit(override: str | None = None) -> str:
     """Tags a checkpoint with the git commit of the env/reward code that
     produced it, per PROPOSAL.md 3.4's "agent versioning" requirement - reward/
-    env changes make checkpoints from different code versions non-comparable."""
+    env changes make checkpoints from different code versions non-comparable.
+
+    override: pass the real local commit hash explicitly (--git-commit) when running
+    against a plain file copy with no .git directory present - e.g. code deployed to a
+    rented training instance via scp/tarball rather than a git clone. Without this, a
+    remote run silently tagged every checkpoint and its Firestore modelTrainedItems
+    push as commit "unknown", discovered live during the first real GPU training run
+    when /workspace/botstar/data/ppo had no .git anywhere up to the filesystem root.
+    """
+    if override:
+        return override
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=pathlib.Path(__file__).parent, text=True
@@ -172,6 +182,7 @@ class CheckpointAndEvalCallback(BaseCallback):
     def __init__(
         self, dataset: MarketDataset, checkpoint_freq: int, watchlist_size: int,
         episode_length: int, keep_last_n: int = 3, n_eval_episodes: int = 5, verbose: int = 1,
+        git_commit_override: str | None = None,
     ):
         super().__init__(verbose)
         self.dataset = dataset
@@ -180,7 +191,7 @@ class CheckpointAndEvalCallback(BaseCallback):
         self.episode_length = episode_length
         self.keep_last_n = keep_last_n
         self.n_eval_episodes = n_eval_episodes
-        self.git_commit = get_git_commit()
+        self.git_commit = get_git_commit(git_commit_override)
         self.best_val_reward = -np.inf
         self._run_checkpoints: list[pathlib.Path] = []
         self._last_checkpoint_step = 0
@@ -293,13 +304,19 @@ def main() -> None:
     parser.add_argument("--min-rows", type=int, default=500, help="Skip items with fewer than this many traded blocks.")
     parser.add_argument("--n-eval-episodes", type=int, default=5, help="Validation episodes rolled out per checkpoint.")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--git-commit", type=str, default=None,
+                         help="Override the git commit checkpoints/Firestore are tagged with - required when running "
+                              "against a plain file copy with no .git directory (e.g. code deployed via scp/tarball "
+                              "to a rented GPU instance rather than a git clone), otherwise every checkpoint silently "
+                              "gets tagged 'unknown'. Pass the local machine's `git rev-parse HEAD` output.")
     args = parser.parse_args()
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    git_commit = get_git_commit(args.git_commit)
 
     print("Loading market dataset into RAM...")
     dataset = load_market_dataset(max_items=args.max_items, min_rows=args.min_rows)
-    push_trained_items_to_firestore(dataset, get_git_commit())
+    push_trained_items_to_firestore(dataset, git_commit)
 
     env_fns = [
         make_env_fn(dataset, "train", args.watchlist_size, args.episode_length, args.seed + i)
@@ -360,6 +377,7 @@ def main() -> None:
         episode_length=args.episode_length,
         keep_last_n=args.keep_last_n,
         n_eval_episodes=args.n_eval_episodes,
+        git_commit_override=args.git_commit,
     )
 
     print(f"Starting training for {args.timesteps:,} timesteps "
