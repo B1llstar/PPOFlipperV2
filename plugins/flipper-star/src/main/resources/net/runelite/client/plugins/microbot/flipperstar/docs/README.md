@@ -115,10 +115,14 @@ their own if you want, e.g., buy automation without sell automation.
 - **Manual** (`Scan now` button in the panel) - for a single supervised
   pass, or while you're still trusting the model's picks.
 - **Auto-scan** (config, off by default, or via **Automate** above) - scans
-  and queues automatically on an interval (`Auto-scan interval (minutes)`).
-  This means real GP moves based purely on model output with no human step
-  in between - only turn it on once you trust the model's picks from
-  watching manual scans for a while.
+  and queues automatically on an interval (`Auto-scan interval (seconds)`,
+  30s by default). Kept short so GE slots freed up by a fill/cancel/skip get
+  refilled promptly instead of sitting idle until the next scan - each scan
+  is cheap when there's nothing to do (buy pass skips outright once
+  maxOpenFlips/inventory is exhausted, sell pass only acts on positions the
+  exit model flags). This means real GP moves based purely on model output
+  with no human step in between - only turn it on once you trust the
+  model's picks from watching manual scans for a while.
 
 ## Files
 

@@ -132,14 +132,18 @@ public interface FlipperStarConfig extends Config {
     }
 
     @ConfigItem(
-        keyName = "autoScanIntervalMinutes",
-        name = "Auto-scan interval (minutes)",
-        description = "How often to scan and queue automatically, when auto-scan is enabled",
+        keyName = "autoScanIntervalSeconds",
+        name = "Auto-scan interval (seconds)",
+        description = "How often to scan and queue automatically, when auto-scan is enabled. Kept short by default " +
+            "so GE slots freed up by a fill/cancel get refilled promptly instead of sitting idle until the next " +
+            "scan - each scan itself already skips work it doesn't need (e.g. skips the buy pass entirely once " +
+            "maxOpenFlips/inventory is exhausted), so a short interval mainly costs one HTTP call to the local " +
+            "scoring service per cycle, not GE activity.",
         position = 1,
         section = automationSection
     )
-    default int autoScanIntervalMinutes() {
-        return 15;
+    default int autoScanIntervalSeconds() {
+        return 30;
     }
 
     @ConfigSection(

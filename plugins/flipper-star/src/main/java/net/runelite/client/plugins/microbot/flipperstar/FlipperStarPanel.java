@@ -186,7 +186,7 @@ public class FlipperStarPanel extends PluginPanel {
         statusValueLabel.setForeground(geStarAvailable ? GREEN : Color.LIGHT_GRAY);
 
         boolean autoScan = config.autoScanEnabled();
-        autoScanValueLabel.setText(autoScan ? "On (every " + config.autoScanIntervalMinutes() + "m)" : "Off");
+        autoScanValueLabel.setText(autoScan ? "On (every " + config.autoScanIntervalSeconds() + "s)" : "Off");
         autoScanValueLabel.setForeground(autoScan ? GREEN : Color.LIGHT_GRAY);
 
         openFlipsValueLabel.setText(engine.getOpenFlipCount() + " / " + config.maxOpenFlips());

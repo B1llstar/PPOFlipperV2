@@ -317,10 +317,10 @@ public class FlipperStarEngine {
             t.setDaemon(true);
             return t;
         });
-        long intervalMinutes = Math.max(1, config.autoScanIntervalMinutes());
+        long intervalSeconds = Math.max(1, config.autoScanIntervalSeconds());
         autoScanTask = executor.scheduleWithFixedDelay(
-            () -> scanAndQueue(config), 0, intervalMinutes, TimeUnit.MINUTES);
-        log.info("FlipperStar: auto-scan started, every {} minute(s)", intervalMinutes);
+            () -> scanAndQueue(config), 0, intervalSeconds, TimeUnit.SECONDS);
+        log.info("FlipperStar: auto-scan started, every {} second(s)", intervalSeconds);
     }
 
     public synchronized void stopAutoScan() {

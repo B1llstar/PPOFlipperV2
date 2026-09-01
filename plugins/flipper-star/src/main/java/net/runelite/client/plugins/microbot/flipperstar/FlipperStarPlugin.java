@@ -121,7 +121,7 @@ public class FlipperStarPlugin extends Plugin {
             return;
         }
 
-        if (!event.getKey().equals("autoScanEnabled") && !event.getKey().equals("autoScanIntervalMinutes")) return;
+        if (!event.getKey().equals("autoScanEnabled") && !event.getKey().equals("autoScanIntervalSeconds")) return;
 
         if (config.autoScanEnabled()) {
             engine.startAutoScan(config);
