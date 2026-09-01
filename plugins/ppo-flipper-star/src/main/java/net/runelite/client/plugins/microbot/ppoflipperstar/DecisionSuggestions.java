@@ -6,21 +6,25 @@ import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * Shared holder for the model's latest actionable proposed actions (PROPOSAL.md §3.6/§3.7's
- * shadow mode), between {@link PPOFlipperStarScript}'s DECIDE phase (writer, its own
- * scheduled-executor thread) and {@link PPOFlipperStarPanel}'s "Model suggestions" section
- * (reader/mutator, EDT). Mirrors {@link OrderQueue}'s shape/threading model deliberately -
- * same {@link CopyOnWriteArrayList}-backed, listener-notified pattern - since this is the same
- * kind of "one background thread writes, EDT reads and mutates on click" shared state.
+ * Shared holder for the model's latest actionable proposed actions (PROPOSAL.md §3.6/§3.7), between
+ * {@link PPOFlipperStarScript}'s DECIDE phase (writer, its own scheduled-executor thread) and
+ * {@link PPOFlipperStarPanel}'s "Model suggestions" section (reader/mutator, EDT). Mirrors
+ * {@link OrderQueue}'s shape/threading model deliberately - same {@link CopyOnWriteArrayList}-backed,
+ * listener-notified pattern - since this is the same kind of "one background thread writes, EDT
+ * reads and mutates on click" shared state.
  *
  * <p>HOLD suggestions and any suggestion below the configured confidence threshold are not
- * stored here at all (see {@code PPOFlipperStarScript.applySuggestions}) - only actionable
- * proposals a human might actually want to confirm ever show up in this list.
+ * stored here at all (see {@code PPOFlipperStarScript.runDecideTick}) - only actionable
+ * proposals ever show up in this list, always populated regardless of whether autonomous mode is
+ * on, so the panel always reflects what the model most recently proposed as an audit trail.
  *
  * <p><b>Confirming or dismissing a suggestion removes it from this list</b> - a stale suggestion
  * from an earlier tick is replaced wholesale by {@link #replaceAll} every time a new
  * decision/response lands, so nothing here is ever acted on twice or left dangling once its
- * tick has passed.
+ * tick has passed. When {@code config.autonomousModeEnabled()} is on, a suggestion is also
+ * removed the instant it's autonomously submitted ({@code PPOFlipperStarScript#autonomouslySubmit})
+ * - the same "no longer pending" transition a manual Confirm click performs - so the panel never
+ * shows a Confirm button for something already queued.
  */
 @Singleton
 public class DecisionSuggestions {

@@ -406,19 +406,32 @@ public class PPOFlipperStarScript extends Script {
      * SUBMITTING_ORDERS/MONITORING_OFFERS states above, which keep driving {@link OrderQueue} for
      * manual orders exactly as milestone 1 did.
      *
-     * <p><b>SHADOW MODE IS UNCONDITIONAL IN THIS MILESTONE.</b> Every actionable proposal this
-     * method receives is only ever handed to {@link DecisionSuggestions} for display in the
-     * panel's "Model suggestions" section - it is never, under any config value (including
-     * {@code config.shadowMode() == false}), pushed onto {@link OrderQueue} directly. Converting
-     * a suggestion into a real order happens exactly one way: a human clicking Confirm in the
-     * panel (see {@code PPOFlipperStarPanel}'s suggestion-row Confirm button), which then goes
-     * through {@link OrderQueue#add} and {@link Guardrails#check} exactly like a manual
-     * right-click/panel order - no special-cased bypass exists anywhere in this path. Wiring
-     * {@code shadowMode() == false} to genuine autonomous execution (skipping the Confirm click)
-     * is explicit future-milestone work per PROPOSAL.md §3.7's staged rollout - this build does
-     * not read {@code config.shadowMode()} at all in this method, specifically so there is no
-     * dormant "if shadow mode is off, submit directly" branch sitting in the code for a future
-     * change to accidentally enable without deliberate new work.
+     * <p><b>Autonomous execution is gated by {@code config.autonomousModeEnabled()}, a dedicated
+     * switch independent of {@code config.shadowMode()} (which stays inert - see its own
+     * javadoc/config description).</b> The confidence filter is applied exactly once, up front,
+     * to the raw actions from {@code decision/response} - the resulting {@code suggestions} list
+     * is what both the panel display and (when enabled) autonomous submission operate on, so
+     * there is exactly one confidence-checking code path, never two that could drift apart.
+     *
+     * <p>When autonomous mode is OFF (the default), behavior is unchanged from before this
+     * method existed: {@code suggestions} is only ever handed to {@link DecisionSuggestions} for
+     * display in the panel's "Model suggestions" section, and converting a suggestion into a real
+     * order happens exactly one way - a human clicking Confirm (see
+     * {@code PPOFlipperStarPanel#onConfirmSuggestionClicked}), which pushes onto
+     * {@link OrderQueue} via {@link OrderQueue#add}.
+     *
+     * <p>When autonomous mode is ON, every surviving suggestion is submitted the same way a
+     * manual Confirm click would: a brand-new {@link PPOFlipperOrder} built with the exact same
+     * constructor-argument shape {@code onConfirmSuggestionClicked} uses, pushed onto
+     * {@link OrderQueue} via {@link OrderQueue#add}. There is no second, different
+     * order-construction path - autonomous and manual orders are indistinguishable to
+     * {@link OrderQueue}/{@link Guardrails}/{@link PPOFlipperStarScript#submitNextOrder} from this
+     * point on, so {@link Guardrails#check} applies identically regardless of origin. An
+     * autonomously-submitted suggestion is removed from {@link DecisionSuggestions} immediately
+     * (not left for the panel to render a Confirm button for something already queued) so the
+     * panel accurately reflects "already submitted" vs. "awaiting your decision." Every
+     * autonomous submission gets its own distinct, clearly-labeled log line for audit purposes,
+     * separate from the manual-confirm log path.
      */
     private void runDecideTick(PPOFlipperStarConfig configSnapshot) {
         long timeoutMillis = Math.max(0, configSnapshot.decisionResponseTimeoutSeconds()) * 1000L;
@@ -433,6 +446,10 @@ public class PPOFlipperStarScript extends Script {
         }
 
         DecisionEngine.DecisionResult decision = result.get();
+        // Applied exactly once, before anything else - both the panel's "Model suggestions"
+        // display and (when autonomousModeEnabled) autonomous submission below operate on this
+        // same already-filtered `suggestions` list, so there is exactly one confidence-checking
+        // code path for both purposes.
         double confidenceThreshold = Math.max(0.0, configSnapshot.modelConfidenceThreshold());
 
         List<PPOFlipperDecision> suggestions = decision.actions.stream()
@@ -441,10 +458,41 @@ public class PPOFlipperStarScript extends Script {
             .filter(PPOFlipperDecision::isActionable)
             .collect(Collectors.toList());
 
+        // Always populate DecisionSuggestions first, regardless of autonomous mode, so the panel
+        // always shows what the model most recently proposed - an audit trail of the tick's
+        // output whether or not it went on to auto-execute below.
         decisionSuggestions.replaceAll(decision.tickId, suggestions);
         if (!suggestions.isEmpty()) {
             log.info("PPOFlipperStar: DECIDE tick {} produced {} actionable suggestion(s) for review.",
                 decision.tickId, suggestions.size());
+        }
+
+        if (configSnapshot.autonomousModeEnabled()) {
+            autonomouslySubmit(suggestions);
+        }
+    }
+
+    /**
+     * Submits every suggestion in {@code suggestions} directly onto {@link OrderQueue}, mirroring
+     * {@code PPOFlipperStarPanel#onConfirmSuggestionClicked}'s exact
+     * {@code new PPOFlipperOrder(...)} construction byte-for-byte - deliberately not a second,
+     * independently-maintained order-construction path that could diverge from the manual one.
+     * Only called when {@code config.autonomousModeEnabled()} is true (checked by the caller,
+     * {@link #runDecideTick}). Every order built here still passes through
+     * {@link Guardrails#check} exactly like a manual order once {@link #submitNextOrder} reaches
+     * it - this method only ever calls {@link OrderQueue#add}, the same single entry point manual
+     * orders use; there is no bypass of that check anywhere in this path.
+     *
+     * <p>Removes each submitted suggestion from {@link DecisionSuggestions} immediately (the same
+     * "confirmed, no longer pending" transition {@code onConfirmSuggestionClicked} performs) so
+     * the panel never shows a Confirm button for something that has already been queued.
+     */
+    private void autonomouslySubmit(List<PPOFlipperDecision> suggestions) {
+        for (PPOFlipperDecision decision : suggestions) {
+            queue.add(new PPOFlipperOrder(decision.getGeAction(), decision.getItemId(), decision.getItemName(),
+                decision.getQuantity(), decision.getPrice()));
+            decisionSuggestions.remove(decision.getId());
+            log.info("PPOFlipperStar: AUTONOMOUS submit - {} (confidence {})", decision, decision.getConfidence());
         }
     }
 

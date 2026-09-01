@@ -13,10 +13,12 @@ import net.runelite.client.config.ConfigSection;
     " spend/price guardrails.<br /><br />" +
     "Manual ordering always works by hand, exactly as before. A PPO policy (trained offline," +
     " served by a separate Python Firestore-listening worker - see PROPOSAL.md §3.6) is now" +
-    " consulted every decision tick for every watchlisted item, in shadow mode: its proposed" +
-    " actions appear in the panel's \"Model suggestions\" section and require an explicit" +
-    " Confirm click before ever reaching the order queue - the model can never submit an order" +
-    " on its own in this build.<br /><br />" +
+    " consulted every decision tick for every watchlisted item. By default its proposed" +
+    " actions only appear in the panel's \"Model suggestions\" section and require an explicit" +
+    " Confirm click before ever reaching the order queue. The PPO section's \"Autonomous mode" +
+    " (LIVE TRADING)\" setting, OFF by default, is the one switch that changes this - when on," +
+    " suggestions above the confidence threshold submit automatically with no confirmation." +
+    " Every order, autonomous or manual, still passes through the same Guardrails checks.<br /><br />" +
     "Start at (or near) the Grand Exchange with the items or coins already in your inventory or bank.<br /><br />" +
     "made by billstar"
 )
@@ -112,23 +114,28 @@ public interface PPOFlipperStarConfig extends Config {
     @ConfigItem(
         keyName = "maxGpToSpend",
         name = "Max GP to spend (session)",
-        description = "Hard cap on total coins spent on buy orders this session. 0 = no cap.",
+        description = "Hard cap on total coins spent on buy orders this session. Defaults to a conservative 5,000,000 " +
+            "gp now that autonomous mode (see the PPO section below) can submit orders with no human confirmation - " +
+            "this is the main brake on how much real GP an unattended run can lose before it stops itself. 0 = no cap, " +
+            "if you deliberately want uncapped spending.",
         position = 1,
         section = guardrailsSection
     )
     default int maxGpToSpend() {
-        return 0;
+        return 5_000_000;
     }
 
     @ConfigItem(
         keyName = "maxQuantityPerItem",
         name = "Max quantity per item",
-        description = "Refuse to place any single order above this quantity, regardless of what the order list says. 0 = no cap.",
+        description = "Refuse to place any single order above this quantity, regardless of what the order list says. " +
+            "Defaults to a conservative 50,000 units now that autonomous mode (see the PPO section below) can submit " +
+            "orders with no human confirmation. 0 = no cap, if you deliberately want uncapped quantity.",
         position = 2,
         section = guardrailsSection
     )
     default int maxQuantityPerItem() {
-        return 0;
+        return 50_000;
     }
 
     @ConfigItem(
@@ -200,10 +207,11 @@ public interface PPOFlipperStarConfig extends Config {
 
     @ConfigSection(
         name = "PPO",
-        description = "The autonomous PPO policy, consulted every decision tick over Firestore (PROPOSAL.md §3.6) " +
-            "in shadow mode - the model proposes actions in the panel's \"Model suggestions\" section, but nothing " +
-            "is submitted to the order queue without an explicit manual Confirm click. Wiring shadow mode off to " +
-            "real unattended execution is an explicit future milestone, not something any setting here enables.",
+        description = "The PPO policy, consulted every decision tick over Firestore (PROPOSAL.md §3.6). By " +
+            "default the model only proposes actions in the panel's \"Model suggestions\" section, requiring an " +
+            "explicit manual Confirm click before anything reaches the order queue. \"Autonomous mode (LIVE " +
+            "TRADING)\" below is the one setting that changes this - read its description carefully before " +
+            "enabling it with real GP at stake.",
         position = 3,
         closedByDefault = true
     )
@@ -228,28 +236,51 @@ public interface PPOFlipperStarConfig extends Config {
         name = "Model confidence threshold",
         description = "A proposed action whose confidence (from the response's per-action \"confidence\" field) " +
             "is below this is forced to HOLD before it's even shown as a suggestion, regardless of what the model " +
-            "proposed. 0 disables this filter.",
+            "proposed. This same filter also gates autonomous execution below - a suggestion never auto-submits " +
+            "unless it also clears this threshold, identically to how it's decided whether to show it as a manual " +
+            "suggestion. Defaults to 0.5 (raised from 0.0) so a low-confidence proposal is neither displayed nor " +
+            "auto-executed by default. 0 disables this filter entirely.",
         position = 1,
         section = ppoSection
     )
     default double modelConfidenceThreshold() {
-        return 0.0;
+        return 0.5;
     }
 
     @ConfigItem(
         keyName = "shadowMode",
         name = "Shadow mode",
-        description = "The model only proposes actions for manual confirmation in the panel's \"Model " +
-            "suggestions\" section - nothing is ever submitted to the order queue without an explicit Confirm " +
-            "click, regardless of this setting's value. Wiring this to real unattended execution is an explicit " +
-            "future milestone; this toggle exists now so the config shape is stable when that milestone lands, " +
-            "but this build enforces manual confirmation unconditionally - see PPOFlipperStarScript's DECIDE " +
-            "phase javadoc.",
+        description = "Documentation of the staged-rollout design (see PROPOSAL.md §3.7) - this setting itself " +
+            "does not change plugin behavior and is not read anywhere. The real on/off switch for autonomous " +
+            "execution is \"Autonomous mode (LIVE TRADING)\" below; whether or not a suggestion requires a manual " +
+            "Confirm click is controlled entirely by that setting, independent of this one.",
         position = 2,
         section = ppoSection
     )
     default boolean shadowMode() {
         return true;
+    }
+
+    @ConfigItem(
+        keyName = "autonomousModeEnabled",
+        name = "Autonomous mode (LIVE TRADING)",
+        description = "DANGER - when ON, every model suggestion that clears the confidence threshold above is " +
+            "submitted straight to the order queue with NO manual confirmation - real GP is at risk unattended, " +
+            "exactly as if you had clicked Confirm yourself on every proposal the model makes. When OFF (the " +
+            "default), behavior is unchanged from today: every suggestion only ever becomes an order via an " +
+            "explicit Confirm click in the panel's \"Model suggestions\" section. This is independent of the " +
+            "Shadow mode setting above (that one is inert documentation of the staged-rollout design in " +
+            "PROPOSAL.md §3.7 - this flag is the actual switch). Every autonomously-submitted order still passes " +
+            "through the exact same Guardrails checks (max GP/session, max quantity/item, price deviation, buy " +
+            "limits, held-quantity checks) as a manual order - guardrails are never bypassed for autonomous orders. " +
+            "Turning this off immediately stops any NEW autonomous order from being submitted, but does not cancel " +
+            "offers already live on the GE - use \"Cancel all offers\" for that. Read PROPOSAL.md §3.7's staged " +
+            "rollout recommendation before ever turning this on with real GP.",
+        position = 3,
+        section = ppoSection
+    )
+    default boolean autonomousModeEnabled() {
+        return false;
     }
 
     @ConfigSection(

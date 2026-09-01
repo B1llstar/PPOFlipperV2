@@ -188,6 +188,80 @@ public class PPOFlipperStarFirestoreClient {
     }
 
     // ---------------------------------------------------------------------------------------
+    // modelTrainedItems/{gitCommit} - NOT under accounts/{accountHash}/, deliberately: this is
+    // project-wide metadata describing which ~300 items a given trained checkpoint actually
+    // learned to trade (produced by the offline Python training pipeline, keyed by the git commit
+    // of the env/reward code that produced the checkpoint - see PROPOSAL.md §3.4's "Agent
+    // versioning" note), not per-account state. Same non-account-scoped precedent as
+    // marketHistory/{itemId} above: admin-only, no explicit firestore.rules block needed (falls
+    // through to the file's default-deny catch-all) since nothing but this plugin's own
+    // service-account credential and the training pipeline ever need to touch it.
+    // ---------------------------------------------------------------------------------------
+
+    private String modelTrainedItemsDoc(String gitCommit) {
+        return documentsRootUrl + "/modelTrainedItems/" + gitCommit;
+    }
+
+    /** One item entry from a {@code modelTrainedItems/{gitCommit}} document's {@code items} array. */
+    public static final class TrainedItem {
+        public final int itemId;
+        public final String name;
+        public final int buyLimit;
+
+        public TrainedItem(int itemId, String name, int buyLimit) {
+            this.itemId = itemId;
+            this.name = name;
+            this.buyLimit = buyLimit;
+        }
+    }
+
+    /**
+     * Pulls the full list of items the checkpoint identified by {@code gitCommit} was trained on,
+     * or {@link Optional#empty()} if no such document exists (a 404 - not an error condition, same
+     * "collection/document doesn't exist yet" stance {@link #getMarketHistory} takes for its own
+     * not-found case). Used by the panel's explicit "Seed watchlist from trained items" action -
+     * never called automatically, see {@code WatchlistManager}/{@code PPOFlipperStarPanel} for
+     * where this is wired in.
+     */
+    public Optional<List<TrainedItem>> getModelTrainedItems(String gitCommit) throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(modelTrainedItemsDoc(gitCommit)))
+            .header("Authorization", "Bearer " + auth.getAccessToken())
+            .timeout(Duration.ofSeconds(10))
+            .GET()
+            .build();
+
+        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() == 404) {
+            return Optional.empty();
+        }
+        if (response.statusCode() != 200) {
+            throw new IOException("get modelTrainedItems failed: HTTP " + response.statusCode() + " - " + response.body());
+        }
+
+        JsonObject document = new JsonParser().parse(response.body()).getAsJsonObject();
+        JsonObject fields = document.getAsJsonObject("fields");
+        if (fields == null) {
+            return Optional.empty();
+        }
+
+        List<TrainedItem> items = new ArrayList<>();
+        for (JsonElement el : readArrayValues(fields, "items")) {
+            try {
+                JsonObject itemFields = el.getAsJsonObject().getAsJsonObject("mapValue").getAsJsonObject("fields");
+                int itemId = getInt(itemFields, "itemId");
+                String name = itemFields.has("name") ? itemFields.getAsJsonObject("name").get("stringValue").getAsString() : ("item " + itemId);
+                int buyLimit = getInt(itemFields, "buyLimit");
+                items.add(new TrainedItem(itemId, name, buyLimit));
+            } catch (Exception e) {
+                log.warn("PPOFlipperStar: skipping malformed modelTrainedItems entry - {}", e.getMessage());
+            }
+        }
+
+        return Optional.of(items);
+    }
+
+    // ---------------------------------------------------------------------------------------
     // portfolio/{itemId}
     // ---------------------------------------------------------------------------------------
 

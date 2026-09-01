@@ -7,14 +7,16 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * One model-proposed action from a {@code decision/response} document, held in memory for the
- * panel's "Model suggestions" section until a human either confirms or dismisses it.
+ * panel's "Model suggestions" section until it is either confirmed/dismissed by a human, or (only
+ * when {@code config.autonomousModeEnabled()} is on - see {@code PPOFlipperStarScript}'s DECIDE-phase
+ * javadoc) submitted automatically.
  *
- * <p><b>This class never causes an order to be submitted by itself.</b> Confirming a suggestion
- * (see {@code PPOFlipperStarPanel}'s confirm-button handler) converts it into a brand-new
- * {@link PPOFlipperOrder} pushed onto {@link OrderQueue} exactly the way a manual right-click/
- * panel add-order does - it passes through {@link Guardrails#check} identically, with no
- * special-cased bypass. See {@code PPOFlipperStarScript}'s DECIDE-phase javadoc for why shadow
- * mode is unconditional in this milestone.
+ * <p><b>This class never causes an order to be submitted by itself.</b> Either a human clicking
+ * Confirm ({@code PPOFlipperStarPanel#onConfirmSuggestionClicked}) or, when autonomous mode is
+ * enabled, {@code PPOFlipperStarScript#autonomouslySubmit} converts it into a brand-new
+ * {@link PPOFlipperOrder} pushed onto {@link OrderQueue} via the exact same constructor-argument
+ * shape and {@link OrderQueue#add} call - it passes through {@link Guardrails#check} identically
+ * either way, with no special-cased bypass for either origin.
  */
 @Getter
 public class PPOFlipperDecision {

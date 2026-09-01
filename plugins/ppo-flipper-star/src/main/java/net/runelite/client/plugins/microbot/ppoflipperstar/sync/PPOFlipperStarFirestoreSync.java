@@ -362,6 +362,31 @@ public class PPOFlipperStarFirestoreSync {
     }
 
     // ---------------------------------------------------------------------------------------
+    // modelTrainedItems/{gitCommit} - shared, NOT account-scoped, same reasoning as
+    // marketHistory/{itemId} above. Read-only from the plugin's side; the training pipeline is
+    // what writes it (out of scope for this plugin).
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Blocking pull of the trained-item list for one checkpoint's git commit - backs the panel's
+     * explicit "Seed watchlist from trained items" button (never called automatically on startup,
+     * see {@code PPOFlipperStarPanel}). Returns {@link Optional#empty()} (never throws) if sync is
+     * disabled, no such document exists, or the read fails - the caller should show the user a
+     * clear "couldn't load trained items" message rather than silently doing nothing.
+     */
+    public Optional<List<PPOFlipperStarFirestoreClient.TrainedItem>> pullModelTrainedItems(String gitCommit) {
+        PPOFlipperStarFirestoreClient clientRef = client;
+        if (clientRef == null) return Optional.empty();
+
+        try {
+            return clientRef.getModelTrainedItems(gitCommit);
+        } catch (Exception e) {
+            log.warn("PPOFlipperStar: failed to pull modelTrainedItems for commit {} - {}", gitCommit, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
     // decision/request, decision/response - model<->plugin transport (PROPOSAL.md §3.6)
     // ---------------------------------------------------------------------------------------
     //

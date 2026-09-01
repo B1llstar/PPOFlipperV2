@@ -2,6 +2,8 @@ package net.runelite.client.plugins.microbot.ppoflipperstar;
 
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.CostBasisEntry;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreClient;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
@@ -41,6 +43,7 @@ import java.awt.Insets;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Sidebar control panel: an add-order form feeds the shared {@link OrderQueue}, a live list
@@ -62,6 +65,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
     private final GoldManager goldManager;
     private final WatchlistManager watchlistManager;
     private final DecisionSuggestions decisionSuggestions;
+    private final PPOFlipperStarFirestoreSync firestoreSync;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
 
     private JButton executeButton;
@@ -89,7 +93,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
     @Inject
     public PPOFlipperStarPanel(PPOFlipperStarPlugin plugin, PPOFlipperStarScript script, OrderQueue queue,
                                 PortfolioManager portfolio, GoldManager goldManager, WatchlistManager watchlistManager,
-                                DecisionSuggestions decisionSuggestions) {
+                                DecisionSuggestions decisionSuggestions, PPOFlipperStarFirestoreSync firestoreSync) {
         super();
         this.plugin = plugin;
         this.script = script;
@@ -98,6 +102,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
         this.goldManager = goldManager;
         this.watchlistManager = watchlistManager;
         this.decisionSuggestions = decisionSuggestions;
+        this.firestoreSync = firestoreSync;
 
         setBorder(new EmptyBorder(10, 10, 10, 10));
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
@@ -115,6 +120,9 @@ public class PPOFlipperStarPanel extends PluginPanel {
         suggestionsListPanel = new JPanel();
         suggestionsListPanel.setLayout(new BoxLayout(suggestionsListPanel, BoxLayout.Y_AXIS));
         add(suggestionsListPanel);
+
+        add(Box.createRigidArea(new Dimension(0, 10)));
+        add(buildSeedWatchlistButton());
 
         add(Box.createRigidArea(new Dimension(0, 10)));
         add(buildAddOrderForm());
@@ -151,23 +159,28 @@ public class PPOFlipperStarPanel extends PluginPanel {
     }
 
     /**
-     * Model suggestions section (PROPOSAL.md §2.5/§3.6/§3.7's shadow mode): every actionable
-     * proposal from the PPO policy's most recent decision tick, each with its own Confirm/Dismiss
-     * buttons. Confirming pushes a brand-new {@link PPOFlipperOrder} onto {@link #queue} through
-     * the exact same {@link OrderQueue#add} path a manual right-click/add-order-form order takes
-     * (see {@link #onConfirmSuggestionClicked}) - it is never submitted directly by this panel or
-     * by the script, and it passes through {@link Guardrails#check} identically to any other
-     * order once the script's SUBMITTING_ORDERS state reaches it. There is no code path anywhere
-     * in this plugin that converts a suggestion into a live GE offer without this exact button
-     * click - see {@code PPOFlipperStarScript.runDecideTick}'s javadoc for the same guarantee
-     * stated from the writer side.
+     * Model suggestions section (PROPOSAL.md §2.5/§3.6/§3.7): every actionable proposal from the
+     * PPO policy's most recent decision tick still awaiting a human decision, each with its own
+     * Confirm/Dismiss buttons. Confirming pushes a brand-new {@link PPOFlipperOrder} onto
+     * {@link #queue} through the exact same {@link OrderQueue#add} path a manual right-click/
+     * add-order-form order takes (see {@link #onConfirmSuggestionClicked}) - it passes through
+     * {@link Guardrails#check} identically to any other order once the script's SUBMITTING_ORDERS
+     * state reaches it.
+     *
+     * <p>When {@code config.autonomousModeEnabled()} is on, a suggestion that clears the
+     * confidence threshold is submitted automatically by the script
+     * ({@code PPOFlipperStarScript#autonomouslySubmit}, via the identical {@link OrderQueue#add}
+     * call) and removed from this list before this panel ever renders it - so a row only ever
+     * shows up here when it is genuinely still awaiting a manual decision, whether because
+     * autonomous mode is off or because the suggestion didn't clear the confidence threshold.
      */
     private JLabel buildSuggestionsHeader() {
-        JLabel header = new JLabel("Model suggestions (shadow mode)");
+        JLabel header = new JLabel("Model suggestions");
         header.setFont(FontManager.getRunescapeBoldFont());
         header.setForeground(Color.WHITE);
-        header.setToolTipText("Proposed actions from the PPO policy's most recent decision tick. Nothing here " +
-            "is ever submitted automatically - click Confirm to queue it exactly like a manual order.");
+        header.setToolTipText("Proposed actions from the PPO policy's most recent decision tick, awaiting a " +
+            "manual decision. Click Confirm to queue one exactly like a manual order. If autonomous mode is " +
+            "enabled, suggestions above the confidence threshold submit automatically and never appear here.");
         return header;
     }
 
@@ -346,6 +359,93 @@ public class PPOFlipperStarPanel extends PluginPanel {
         header.setFont(FontManager.getRunescapeBoldFont());
         header.setForeground(Color.WHITE);
         return header;
+    }
+
+    /**
+     * The current deployed checkpoint's git commit, used to look up its
+     * {@code modelTrainedItems/{gitCommit}} document (PROPOSAL.md's model-versioning note, §3.4).
+     * Hardcoded rather than read from {@code data/models/ppo/best.json} at runtime - this plugin
+     * has no established, non-fragile way to locate/read a file from the Python-side data
+     * directory at a fixed path from inside a sideloaded RuneLite plugin jar (unlike Firestore,
+     * which it already talks to for everything else). Update this constant whenever a new
+     * checkpoint is deployed; a cleaner long-term fix (reading best.json directly, or a Firestore
+     * "current deployed checkpoint" pointer doc) is future work, deliberately not built here to
+     * avoid over-engineering a general checkpoint-version-discovery system for this one button.
+     */
+    private static final String DEPLOYED_CHECKPOINT_GIT_COMMIT = "698392b0ed9101d471a8d7b426fcc57a8a315437";
+
+    /**
+     * "Seed watchlist from trained items" (task requirement, not in the original PROPOSAL.md):
+     * a deliberate, explicit, one-click bulk action that adds every item id from the currently
+     * deployed checkpoint's {@code modelTrainedItems/{gitCommit}} Firestore document (see
+     * {@link PPOFlipperStarFirestoreClient#getModelTrainedItems}) to {@link #watchlistManager},
+     * skipping ids already present. Deliberately NOT run automatically on plugin startup - doing
+     * so would silently and repeatedly change the user's own curated watchlist without them
+     * asking, every time the plugin starts. A confirmation dialog gates it since it's a bulk,
+     * hard-to-quickly-undo action (up to ~300 items, each would need removing one at a time via
+     * right-click/Unwatch otherwise).
+     */
+    private JButton buildSeedWatchlistButton() {
+        JButton button = new JButton("Seed watchlist from trained items");
+        button.setFont(FontManager.getRunescapeSmallFont());
+        button.setBackground(ColorScheme.MEDIUM_GRAY_COLOR);
+        button.setForeground(Color.WHITE);
+        button.setFocusPainted(false);
+        button.setAlignmentX(Component.CENTER_ALIGNMENT);
+        button.setToolTipText("Adds every item the current deployed model checkpoint was trained on to your " +
+            "watchlist (up to ~300 items) - the model can only autonomously act on watchlisted items, so this " +
+            "widens its universe. Manual add/remove via right-click still works on top of this.");
+        button.addActionListener(e -> onSeedWatchlistClicked(button));
+        return button;
+    }
+
+    private void onSeedWatchlistClicked(JButton button) {
+        int confirm = JOptionPane.showConfirmDialog(this,
+            "This will add up to 300 items to your watchlist. Continue?",
+            "Seed watchlist from trained items", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (confirm != JOptionPane.YES_OPTION) return;
+
+        button.setEnabled(false);
+        button.setText("Seeding...");
+
+        // Firestore reads block on network I/O - never run on the EDT (this click handler).
+        Thread seedThread = new Thread(() -> {
+            Optional<List<PPOFlipperStarFirestoreClient.TrainedItem>> trainedItems =
+                firestoreSync.pullModelTrainedItems(DEPLOYED_CHECKPOINT_GIT_COMMIT);
+
+            int added = 0;
+            int total = 0;
+            if (trainedItems.isPresent()) {
+                total = trainedItems.get().size();
+                for (PPOFlipperStarFirestoreClient.TrainedItem item : trainedItems.get()) {
+                    if (!watchlistManager.contains(item.itemId)) {
+                        watchlistManager.add(item.itemId);
+                        added++;
+                    }
+                }
+            }
+
+            final int addedCount = added;
+            final int totalCount = total;
+            final boolean found = trainedItems.isPresent();
+            SwingUtilities.invokeLater(() -> {
+                button.setEnabled(true);
+                button.setText("Seed watchlist from trained items");
+                if (!found) {
+                    JOptionPane.showMessageDialog(this,
+                        "Could not load trained items for checkpoint " + DEPLOYED_CHECKPOINT_GIT_COMMIT
+                            + " - cloud sync may be disabled/unreachable, or no such document exists yet.",
+                        "Seed watchlist failed", JOptionPane.ERROR_MESSAGE);
+                } else {
+                    JOptionPane.showMessageDialog(this,
+                        String.format("Added %d new item(s) to the watchlist (%d already watched, %d total in checkpoint).",
+                            addedCount, totalCount - addedCount, totalCount),
+                        "Seed watchlist complete", JOptionPane.INFORMATION_MESSAGE);
+                }
+            });
+        }, "PPOFlipperStar-SeedWatchlist");
+        seedThread.setDaemon(true);
+        seedThread.start();
     }
 
     /**
