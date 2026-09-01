@@ -146,16 +146,31 @@ public class PPOFlipperStarFirestoreSync {
      * Refreshes this account's presence heartbeat (see {@link PPOFlipperStarFirestoreClient#putPresence})
      * so the Python inference worker's account-discovery scan finds it - see PROPOSAL.md's
      * "auto-detects the account on login" design: the worker never needs an account hash passed
-     * in manually, it lists {@code accounts/*} for documents with a recent heartbeat. A no-op
-     * (logged at debug, not warn - a not-yet-logged-in session with no account hash yet is the
-     * expected steady state on every plugin startup, not a failure) until
-     * {@link AccountIdentity#getAccountHash} has something to report.
+     * in manually, it lists {@code accounts/*} for documents with a recent heartbeat.
+     *
+     * <p>Deliberately uses {@link AccountIdentity#resolveBlocking} here, not the plain
+     * non-blocking {@link AccountIdentity#getAccountHash} every other push method in this class
+     * uses - found via live testing that they behave differently in a case that matters
+     * specifically for this scheduled/repeating call: {@code AccountIdentity} is a Guice
+     * singleton scoped to this plugin's own injector, which RuneLite recreates fresh every time
+     * the plugin is disabled and re-enabled. {@code getAccountHash()} only ever has something to
+     * report once {@code onGameStateChanged} has fired with {@code LOGGED_IN} on THIS instance -
+     * but that event only fires on an actual login transition, never on plugin
+     * re-registration while already logged in. A disable/re-enable cycle with no intervening
+     * logout therefore left every scheduled heartbeat silently skipping forever (logged only at
+     * debug, easy to miss), with no way to recover short of actually logging out and back in.
+     * {@code resolveBlocking()} checks the client's real current login state directly (bounded to
+     * a couple of seconds, never hangs) when the cache is empty, which correctly recovers from
+     * exactly this case without needing a fresh transition event. The other {@code pushXAsync}
+     * methods in this class don't need this fix: they only fire in response to a live local
+     * mutation (a buy/sell recorded, a watchlist change) that can only happen after a real login
+     * has already occurred in the current plugin instance's lifetime.
      */
     private void pushPresenceHeartbeat() {
         PPOFlipperStarFirestoreClient clientRef = client;
         if (clientRef == null) return;
 
-        Optional<Long> accountHash = accountIdentity.getAccountHash();
+        Optional<Long> accountHash = accountIdentity.resolveBlocking();
         if (!accountHash.isPresent()) {
             log.debug("PPOFlipperStar: skipping presence heartbeat, no account hash resolved yet.");
             return;

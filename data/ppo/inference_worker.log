@@ -1,0 +1,5 @@
+2026-09-01 08:39:06,038 [INFO] ppo.inference_worker: Loading checkpoint from /Users/b1llstar/Documents/GitHub/BotStar/data/models/ppo/best.pth ...
+2026-09-01 08:39:06,827 [INFO] ppo.inference_worker: Checkpoint loaded (step=400000;commit=585dbc0de26879e1711d18ce31cb0de1cb755113). Worker git commit: 1c4c71a2430194ac69ed3439109f56f21dc8e263
+2026-09-01 08:39:06,923 [INFO] ppo.inference_worker: No --account-hash given - auto-discovering accounts via presence heartbeat (scanning every 30s, treating a heartbeat stale after 150s).
+2026-09-01 08:39:07,835 [INFO] ppo.inference_worker: Account -9087201911088608679 presence detected, starting inference worker for it.
+2026-09-01 08:39:07,836 [INFO] ppo.inference_worker: Watching accounts/-9087201911088608679/decision/request (checkpoint step=400000;commit=585dbc0de26879e1711d18ce31cb0de1cb755113)
