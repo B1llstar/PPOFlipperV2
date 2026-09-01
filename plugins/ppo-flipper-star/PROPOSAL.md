@@ -180,7 +180,7 @@ All singletons via Guice `@Inject`, same DI pattern every plugin in this repo us
 | `PortfolioManager` | Holdings (inventory **+** bank, unlike the old inventory-only design — see §2.3), weighted cost basis, realized/unrealized P&L per item | Own ledger, persisted via `ConfigManager` (JSON, hand-rolled Gson — see the pitfall the old code hit, avoided the same way: `ConfigManager`'s generic object serialization only special-cases a few types and silently stringifies a `Map` into non-JSON) |
 | `GoldManager` | Coins in inventory + bank, session net-worth delta (start-of-session snapshot vs. now, across gold + at-cost-basis holdings value) | `Rs2Inventory`/`Rs2Bank` coin counts |
 | `BuyLimitLedger` | Rolling 4h GE buy-limit window per item, persisted across restarts | Own ledger + `Rs2GrandExchange.getItemMappingData` for the limit itself |
-| `OrderQueue` | Pending/submitted/done orders, one source of truth the panel and script both read | In-memory + `ConfigManager` persistence for crash recovery |
+| `OrderQueue` | Pending/submitted/done orders, one source of truth the panel and script both read | In-memory, plus `ConfigManager` persistence of QUEUED/SUBMITTED orders only (same hand-rolled Gson pattern as `PortfolioManager`) — terminal orders aren't persisted, see the note below the build-order checklist for why |
 | `Guardrails` | Hard caps independent of the RL policy: max GP/session, max qty/item, max price deviation from live Wiki price, "never sell more than held", "never exceed buy limit" | Pure logic, same structure as `GeStarGuardrails` — checked on *every* order regardless of whether it came from the model or a human click |
 | `WikiPriceClient` + `WikiHistoryBuffer` | Live insta-buy/insta-sell per item (`WikiPriceClient`, not a third-party aggregator — see §2.3) plus a real rolling 24h price/volume history per item (`WikiHistoryBuffer`, polling the wiki's bulk `/5m` endpoint), used to compute genuine volatility/mean-price/volume/momentum features for the DECIDE phase (§3.6) rather than approximating them from a single snapshot. Originally sketched as one `MarketStateProvider` class; built as two once the rolling-history requirement became concrete. | Wiki real-time-prices API (`/latest` and `/5m`) |
 
@@ -555,19 +555,20 @@ New Gradle module, following `ge-star-v2`'s exact shape:
    (small-stakes live run, guardrail loosening) are not started and
    shouldn't be until shadow-mode output has actually been reviewed.
 
-**Known gaps against this document, not yet closed:**
-- `OrderQueue` (§2.2's table) is in-memory only — no `ConfigManager`
-  persistence exists despite the table saying so. A client crash while
-  orders are `QUEUED` (not yet submitted to the GE) loses them; a
-  `SUBMITTED` order is recovered via `reconcileSubmittedOrders`' live-offer
-  adoption regardless. Worth fixing before relying on unattended operation
-  across restarts, not blocking for supervised shadow-mode testing.
+**Gaps this document once flagged, now closed:**
+- `OrderQueue` (§2.2's table) now persists `QUEUED`/`SUBMITTED` orders via
+  the same hand-rolled Gson/`ConfigManager` pattern as
+  `PortfolioManager`/`BuyLimitLedger` - a client crash while an order is
+  `QUEUED` no longer silently loses it. Terminal orders (`DONE`/`SKIPPED`/
+  `FAILED`) are deliberately not persisted (no lost-work risk - the real
+  record lives in `PortfolioManager`/Firestore's `tradeHistory`).
+
+**Doc-drift-only, not functional gaps:**
 - §2.2's `MarketStateProvider` and §2.1's inline code sample (which still
   shows the pre-fix `WidgetIndices.ResizableModernViewport.INVENTORY_CONTAINER`
   check) describe an earlier state of the code, superseded by
   `WikiPriceClient`/`WikiHistoryBuffer` and the layout-agnostic
-  `getItemId() != -1` check respectively - naming/doc drift, not a
-  functional gap.
+  `getItemId() != -1` check respectively.
 
 ---
 
