@@ -71,6 +71,18 @@ public class PPOFlipperOrder {
         this.price = price;
     }
 
+    /**
+     * Advances {@link #NEXT_ID} to at least {@code minimumNextId} if it isn't already there -
+     * never moves it backwards. Called by {@link OrderQueue} after restoring persisted orders
+     * from a previous session: Gson deserialization sets {@link #id} directly via reflection,
+     * bypassing this class's constructor entirely, so without this call a freshly-created order
+     * in the new process could collide with a restored order's id (the in-process counter has no
+     * way to know what ids a previous JVM run already used otherwise).
+     */
+    static void ensureNextIdAtLeast(long minimumNextId) {
+        NEXT_ID.updateAndGet(current -> Math.max(current, minimumNextId));
+    }
+
     public long totalValue() {
         return (long) quantity * price;
     }
