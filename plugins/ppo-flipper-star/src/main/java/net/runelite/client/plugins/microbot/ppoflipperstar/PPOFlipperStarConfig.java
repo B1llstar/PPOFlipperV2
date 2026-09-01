@@ -49,14 +49,15 @@ public interface PPOFlipperStarConfig extends Config {
         description = "When a BUY order needs more coins than are currently in inventory and a bank trip happens " +
             "(withdrawFromBank above), top inventory coins up to this amount instead of withdrawing just enough " +
             "for that one order - later orders this session can then draw from the reserve already in inventory " +
-            "without triggering another bank visit each time. 0 falls back to the old behavior: withdraw exactly " +
-            "what the current order needs, every time. Has no effect if inventory coins already meet or exceed " +
-            "this target (nothing is deposited back - this only ever tops up, never trims down).",
+            "without triggering another bank visit each time. Defaults to 1,000,000gp; 0 withdraws exactly what " +
+            "the current order needs every time instead, with no standing reserve. Has no effect if inventory " +
+            "coins already meet or exceed this target (nothing is deposited back - this only ever tops up, never " +
+            "trims down).",
         position = 1,
         section = ordersSection
     )
     default int goldReserveTarget() {
-        return 0;
+        return 1_000_000;
     }
 
     @ConfigItem(
