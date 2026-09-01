@@ -102,6 +102,28 @@ public class GeStarFirestoreSync {
         return executor != null && !executor.isShutdown();
     }
 
+    /**
+     * Fire-and-forget mirror of one buy fill to Firestore's {@code buyLimits} collection, for
+     * cross-machine visibility into this agent's rolling-window buy-limit usage. A no-op if web
+     * sync isn't running - local enforcement (BuyLimitLedger, checked by GeStarGuardrails) never
+     * depends on this succeeding or even being enabled. Submitted onto this class's own polling
+     * executor so a slow/failed network call never blocks the caller (the game-tick script
+     * thread).
+     */
+    public synchronized void pushBuyEventAsync(String agentId, int itemId, int quantity, long timestampMillis) {
+        GeStarFirestoreClient clientRef = client;
+        ScheduledExecutorService executorRef = executor;
+        if (clientRef == null || executorRef == null || executorRef.isShutdown()) return;
+
+        executorRef.execute(() -> {
+            try {
+                clientRef.recordBuyEvent(agentId, itemId, quantity, timestampMillis);
+            } catch (Exception e) {
+                log.warn("GE Star V2: failed to mirror buy event to Firestore - {}", e.getMessage());
+            }
+        });
+    }
+
     private void pollOnce() {
         if (client == null) return;
         try {

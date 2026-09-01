@@ -45,10 +45,19 @@ into the queue.
    that would exceed `Max open flips` (FlipperStar-originated orders still
    QUEUED/SUBMITTED in GE Star V2), and items already held from a prior
    flip that hasn't sold yet.
-3. **Size**: quantity is capped by both `Max GP per flip` and the item's GE
-   buy limit (from the scoring service's response) - never overspends the
-   budget, never asks for more than could actually be bought in one 4-hour
-   window.
+3. **Size**: quantity is capped by `Max GP per flip`, the item's GE buy
+   limit (preferring the live client-side lookup via GE Star V2's bridge -
+   `Rs2GrandExchange.getItemMappingData()` - falling back to the scoring
+   service response's own value if that's unavailable), and however much
+   of that limit is left in the current rolling 4h window per GE Star V2's
+   `BuyLimitLedger` (persisted across sessions - see
+   [GE Star V2's docs](../../../gestarv2/docs/README.md)'s "Guardrails"
+   section) - never overspends the budget, never asks for more than could
+   actually still be bought this window. `GeStarGuardrails` enforces the
+   same rolling-window cap again right before submission regardless, so
+   this sizing step is a proactive optimization (skip a doomed order
+   before it's even queued), not the only thing standing between a scan
+   and an over-limit buy.
 4. **Queue**: adds a BUY order into GE Star V2's queue at the item's
    current buy price. From there, GE Star V2's own guardrails and execution
    take over completely - FlipperStar has no further say in what happens to

@@ -273,15 +273,37 @@ public class FlipperStarEngine {
         return null;
     }
 
-    /** Quantity capped by both the GP budget and the item's GE limit (if known) - never overspend the budget, never exceed what could actually be bought in one 4h window. */
+    /**
+     * Quantity capped by the GP budget, the item's GE limit, and however much of that limit is
+     * left in the current rolling 4h window - never overspend the budget, never queue more than
+     * could actually still be bought this window. The remaining-limit cap matters even though
+     * GeStarGuardrails.check enforces the same thing again right before submission: without it
+     * here, a doomed order (or the doomed remainder of one) gets queued anyway and only
+     * discovered at submission time, when a proactive skip/downsize is just as easy and avoids
+     * the wasted queue slot. Prefers the live client-side GE limit
+     * (Rs2GrandExchange.getItemMappingData via the bridge) over the scoring service's own
+     * ge_limit field when both are available - the client's wiki-sourced value can't go stale
+     * the way a value baked into a scoring-service response snapshot could.
+     */
     private int sizeOrder(Candidate candidate, int gpBudget) {
         if (candidate.getCurrentBuyPrice() <= 0) return 0;
 
         int byBudget = (int) (gpBudget / candidate.getCurrentBuyPrice());
         int quantity = byBudget;
 
-        if (candidate.getGeLimit() != null && candidate.getGeLimit() > 0) {
-            quantity = Math.min(quantity, candidate.getGeLimit());
+        int itemId = geStarBridge.resolveItemId(candidate.getItemName());
+        Integer geLimit = itemId > 0 ? geStarBridge.getBuyLimit(itemId) : 0;
+        if (geLimit == null || geLimit <= 0) {
+            geLimit = candidate.getGeLimit();
+        }
+
+        if (geLimit != null && geLimit > 0) {
+            quantity = Math.min(quantity, geLimit);
+            if (itemId > 0) {
+                int alreadyBought = geStarBridge.getQuantityBoughtInWindow(itemId);
+                int remaining = geLimit - alreadyBought;
+                quantity = Math.min(quantity, Math.max(remaining, 0));
+            }
         }
 
         return Math.max(quantity, 0);

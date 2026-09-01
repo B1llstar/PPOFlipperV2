@@ -12,6 +12,16 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Per-agent buy-fill history (GE Star V2's BuyLimitLedger, mirrored for cross-machine
+    // visibility into rolling-4h buy-limit usage - see
+    // plugins/ge-star-v2/.../GeStarFirestoreClient.java's recordBuyEvent). Written directly by
+    // the plugin's service-account credentials (bypassing these rules the same way Cloud
+    // Functions do), not through any client SDK - admin-only like tradableItems, no client
+    // read/write path exists or is needed yet.
+    match /buyLimits/{agentId}/events/{eventId} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

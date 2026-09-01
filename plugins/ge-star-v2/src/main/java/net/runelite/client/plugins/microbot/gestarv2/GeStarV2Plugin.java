@@ -9,6 +9,7 @@ import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.grandexchange.GrandExchangePlugin;
+import net.runelite.client.plugins.microbot.gestarv2.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
@@ -52,6 +53,9 @@ public class GeStarV2Plugin extends Plugin {
     private GeStarPortfolio portfolio;
 
     @Inject
+    private BuyLimitLedger buyLimitLedger;
+
+    @Inject
     private GeStarFirestoreSync firestoreSync;
 
     @Inject
@@ -86,7 +90,7 @@ public class GeStarV2Plugin extends Plugin {
     }
 
     private void addPanel() {
-        panel = new GeStarV2Panel(this, script, queue, portfolio);
+        panel = new GeStarV2Panel(this, script, queue, portfolio, buyLimitLedger);
 
         // Reuse the client's own Grand Exchange icon (bundled in the client jar) instead of
         // shipping a duplicate image asset.

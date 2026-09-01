@@ -16,6 +16,7 @@ import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.grandexchange.models.GrandExchangeOfferDetails;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
+import net.runelite.client.plugins.microbot.gestarv2.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 
 import javax.inject.Inject;
@@ -48,6 +49,8 @@ public class GeStarV2Script extends Script {
 
     private final GeStarOrderQueue queue;
     private final GeStarPortfolio portfolio;
+    private final BuyLimitLedger buyLimitLedger;
+    private final GeStarFirestoreSync firestoreSync;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final GeStarWikiPriceClient wikiPriceClient = new GeStarWikiPriceClient();
 
@@ -69,14 +72,17 @@ public class GeStarV2Script extends Script {
     private boolean needsReconcile = false;
 
     @Inject
-    public GeStarV2Script(GeStarOrderQueue queue, GeStarPortfolio portfolio) {
+    public GeStarV2Script(GeStarOrderQueue queue, GeStarPortfolio portfolio, BuyLimitLedger buyLimitLedger,
+                           GeStarFirestoreSync firestoreSync) {
         this.queue = queue;
         this.portfolio = portfolio;
+        this.buyLimitLedger = buyLimitLedger;
+        this.firestoreSync = firestoreSync;
     }
 
     public boolean run(GeStarV2Config config) {
         this.config = config;
-        this.guardrails = new GeStarGuardrails(config, portfolio);
+        this.guardrails = new GeStarGuardrails(config, portfolio, buyLimitLedger);
         this.guardrails.reset();
         this.state = State.GOING_TO_GE;
         this.activeOrders.clear();
@@ -468,7 +474,10 @@ public class GeStarV2Script extends Script {
         if (filled <= 0) return;
         int itemId = details.getItemId();
         if (order.getAction() == GrandExchangeAction.BUY) {
-            portfolio.recordBuy(itemId, filled, details.getSpent(), System.currentTimeMillis());
+            long now = System.currentTimeMillis();
+            portfolio.recordBuy(itemId, filled, details.getSpent(), now);
+            buyLimitLedger.recordBuy(itemId, filled, now);
+            firestoreSync.pushBuyEventAsync(buyLimitLedger.getAgentId(), itemId, filled, now);
         } else {
             portfolio.recordSell(itemId, filled, details.getSpent());
         }

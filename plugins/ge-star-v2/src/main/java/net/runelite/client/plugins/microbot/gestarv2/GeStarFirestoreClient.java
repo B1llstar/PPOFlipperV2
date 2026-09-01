@@ -27,17 +27,20 @@ import java.util.List;
 class GeStarFirestoreClient {
 
     private static final String ORDERS_COLLECTION = "orders";
+    private static final String BUY_LIMITS_COLLECTION = "buyLimits";
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
         .build();
 
     private final GoogleServiceAccountAuth auth;
     private final String baseUrl;
+    private final String documentsRootUrl;
 
     GeStarFirestoreClient(GoogleServiceAccountAuth auth) {
         this.auth = auth;
-        this.baseUrl = "https://firestore.googleapis.com/v1/projects/" + auth.projectId
-            + "/databases/(default)/documents/" + ORDERS_COLLECTION;
+        this.documentsRootUrl = "https://firestore.googleapis.com/v1/projects/" + auth.projectId
+            + "/databases/(default)/documents";
+        this.baseUrl = documentsRootUrl + "/" + ORDERS_COLLECTION;
     }
 
     static final class RemoteOrder {
@@ -80,10 +83,8 @@ class GeStarFirestoreClient {
         JsonObject body = new JsonObject();
         body.add("structuredQuery", structuredQuery);
 
-        String parent = "https://firestore.googleapis.com/v1/projects/" + auth.projectId
-            + "/databases/(default)/documents";
         HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(parent + ":runQuery"))
+            .uri(URI.create(documentsRootUrl + ":runQuery"))
             .header("Authorization", "Bearer " + auth.getAccessToken())
             .header("Content-Type", "application/json")
             .timeout(Duration.ofSeconds(10))
@@ -158,6 +159,39 @@ class GeStarFirestoreClient {
         }
     }
 
+    /**
+     * Appends one buy-fill event to {@code buyLimits/{agentId}/events} - an auto-ID document per
+     * fill, mirroring {@link net.runelite.client.plugins.microbot.gestarv2.portfolio.BuyLimitLedger}'s
+     * local per-fill event log (not a per-item aggregate the way {@code orders} documents are
+     * per-order) so the cloud copy has the same fidelity: a rolling-window query can sum exactly
+     * the events within the window, the same way the local ledger does. Best-effort - a failed
+     * push doesn't affect local enforcement, which never depends on Firestore being reachable.
+     */
+    void recordBuyEvent(String agentId, int itemId, int quantity, long timestampMillis) throws IOException, InterruptedException {
+        JsonObject fields = new JsonObject();
+        fields.add("itemId", integerValue(itemId));
+        fields.add("quantity", integerValue(quantity));
+        fields.add("timestampMillis", integerValue(timestampMillis));
+        fields.add("recordedAt", timestampValueNow());
+
+        JsonObject body = new JsonObject();
+        body.add("fields", fields);
+
+        String url = documentsRootUrl + "/" + BUY_LIMITS_COLLECTION + "/" + agentId + "/events";
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header("Authorization", "Bearer " + auth.getAccessToken())
+            .header("Content-Type", "application/json")
+            .timeout(Duration.ofSeconds(10))
+            .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
+            .build();
+
+        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IOException("record buy event failed: HTTP " + response.statusCode() + " - " + response.body());
+        }
+    }
+
     private static JsonObject stringValue(String s) {
         JsonObject v = new JsonObject();
         v.addProperty("stringValue", s);
@@ -165,6 +199,12 @@ class GeStarFirestoreClient {
     }
 
     private static JsonObject integerValue(int i) {
+        JsonObject v = new JsonObject();
+        v.addProperty("integerValue", i);
+        return v;
+    }
+
+    private static JsonObject integerValue(long i) {
         JsonObject v = new JsonObject();
         v.addProperty("integerValue", i);
         return v;

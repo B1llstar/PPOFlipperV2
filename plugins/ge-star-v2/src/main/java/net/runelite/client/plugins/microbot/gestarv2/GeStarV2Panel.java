@@ -1,7 +1,11 @@
 package net.runelite.client.plugins.microbot.gestarv2;
 
+import net.runelite.client.plugins.microbot.gestarv2.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
+import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
+import net.runelite.client.plugins.microbot.util.grandexchange.models.ItemMappingData;
+import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
@@ -47,6 +51,8 @@ public class GeStarV2Panel extends PluginPanel {
     private final GeStarV2Script script;
     private final GeStarOrderQueue queue;
     private final GeStarPortfolio portfolio;
+    private final BuyLimitLedger buyLimitLedger;
+    private final Rs2ItemManager itemManager = new Rs2ItemManager();
 
     private JButton executeButton;
     private JButton stopButton;
@@ -66,12 +72,13 @@ public class GeStarV2Panel extends PluginPanel {
     private final Timer refreshTimer;
 
     @Inject
-    public GeStarV2Panel(GeStarV2Plugin plugin, GeStarV2Script script, GeStarOrderQueue queue, GeStarPortfolio portfolio) {
+    public GeStarV2Panel(GeStarV2Plugin plugin, GeStarV2Script script, GeStarOrderQueue queue, GeStarPortfolio portfolio, BuyLimitLedger buyLimitLedger) {
         super();
         this.plugin = plugin;
         this.script = script;
         this.queue = queue;
         this.portfolio = portfolio;
+        this.buyLimitLedger = buyLimitLedger;
 
         setBorder(new EmptyBorder(10, 10, 10, 10));
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
@@ -273,6 +280,26 @@ public class GeStarV2Panel extends PluginPanel {
             if (quantity > held) {
                 addOrderErrorLabel.setText("Only " + held + "x " + name + " held, can't sell " + quantity);
                 return;
+            }
+        }
+
+        // Same reasoning as the SELL check above, mirrored for BUY: reject at entry rather than
+        // let a doomed order sit in the queue until GeStarGuardrails.check rejects it at
+        // submission. Uses the same rolling-window ledger the guardrail checks, so the two can
+        // never disagree.
+        if (action == GrandExchangeAction.BUY) {
+            int itemId = itemManager.getItemId(name);
+            if (itemId > 0) {
+                ItemMappingData mapping = Rs2GrandExchange.getItemMappingData(itemId);
+                if (mapping != null && mapping.hasTradeLimit()) {
+                    int limit = mapping.getEffectiveTradeLimit();
+                    int alreadyBought = buyLimitLedger.quantityBoughtInWindow(itemId, System.currentTimeMillis());
+                    if (alreadyBought + quantity > limit) {
+                        addOrderErrorLabel.setText(String.format(
+                            "%d already bought in last 4h (limit %d), can't buy %d more", alreadyBought, limit, quantity));
+                        return;
+                    }
+                }
             }
         }
 

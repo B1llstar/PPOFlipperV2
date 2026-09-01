@@ -3,8 +3,11 @@ package net.runelite.client.plugins.microbot.gestarv2;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ItemComposition;
+import net.runelite.client.plugins.microbot.gestarv2.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.gestarv2.portfolio.GeStarPortfolio;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
+import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
+import net.runelite.client.plugins.microbot.util.grandexchange.models.ItemMappingData;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 /**
@@ -17,15 +20,17 @@ public class GeStarGuardrails {
 
     private final GeStarV2Config config;
     private final GeStarPortfolio portfolio;
+    private final BuyLimitLedger buyLimitLedger;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final GeStarWikiPriceClient wikiPriceClient = new GeStarWikiPriceClient();
 
     @Getter
     private long gpSpentThisSession = 0;
 
-    public GeStarGuardrails(GeStarV2Config config, GeStarPortfolio portfolio) {
+    public GeStarGuardrails(GeStarV2Config config, GeStarPortfolio portfolio, BuyLimitLedger buyLimitLedger) {
         this.config = config;
         this.portfolio = portfolio;
+        this.buyLimitLedger = buyLimitLedger;
     }
 
     public void reset() {
@@ -52,6 +57,17 @@ public class GeStarGuardrails {
                     "sell quantity %d exceeds what's held (%d in inventory)",
                     order.getQuantity(), held);
             }
+        }
+
+        // Same reasoning as the SELL-vs-held check above: exceeding an item's GE buy limit can
+        // never succeed (the offer would just sit un-fillable past the limit), it's not a risk/
+        // safety tradeoff - always rejected regardless of the guardrails master switch. Checked
+        // against BuyLimitLedger's rolling 4h window (persisted across sessions), not just this
+        // order in isolation - a single order under the limit can still be rejected here if
+        // enough was already bought recently.
+        if (order.getAction() == GrandExchangeAction.BUY) {
+            String reason = checkBuyLimit(order);
+            if (reason != null) return reason;
         }
 
         if (!config.guardrailsEnabled()) {
@@ -84,6 +100,36 @@ public class GeStarGuardrails {
                 String reason = checkBaseValueDeviation(order, maxBaseValueDeviation);
                 if (reason != null) return reason;
             }
+        }
+
+        return null;
+    }
+
+    /**
+     * Rejects a BUY that would push this session's (and prior sessions', via
+     * {@link BuyLimitLedger}'s persisted rolling window) tracked purchases of this item past its
+     * GE buy limit. The limit itself comes from {@link Rs2GrandExchange#getItemMappingData},
+     * the OSRS Wiki's item-mapping data (cached after first lookup, see that method's own
+     * behavior) - if the item can't be resolved there, nothing is enforced (matches
+     * {@link #checkPriceDeviation}'s same can't-resolve-so-don't-block stance).
+     */
+    private String checkBuyLimit(GeStarOrder order) {
+        int itemId = itemManager.getItemId(order.getItemName());
+        if (itemId <= 0) {
+            return null;
+        }
+
+        ItemMappingData mapping = Rs2GrandExchange.getItemMappingData(itemId);
+        if (mapping == null || !mapping.hasTradeLimit()) {
+            return null;
+        }
+
+        int limit = mapping.getEffectiveTradeLimit();
+        int alreadyBought = buyLimitLedger.quantityBoughtInWindow(itemId, System.currentTimeMillis());
+        if (alreadyBought + order.getQuantity() > limit) {
+            return String.format(
+                "buy quantity %d would exceed the GE limit (%d already bought in the last 4h, limit %d)",
+                order.getQuantity(), alreadyBought, limit);
         }
 
         return null;

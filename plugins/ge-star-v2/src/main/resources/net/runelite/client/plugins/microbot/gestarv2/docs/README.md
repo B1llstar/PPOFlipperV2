@@ -108,6 +108,14 @@ Orders added locally through the panel and orders pulled from the web share
 one queue and go through the same guardrails — the web UI is just another
 way to add to the queue, not a separate execution path.
 
+When web sync is running, every detected BUY fill is also mirrored
+(fire-and-forget, best-effort) to Firestore's `buyLimits/{agentId}/events`
+collection, alongside the local `BuyLimitLedger` write that actually
+enforces the buy-limit guardrail (see "Guardrails" above) - this is purely
+for cross-machine visibility/audit of an agent's rolling-window buy
+history; enforcement itself never depends on Firestore being reachable
+or web sync being enabled at all.
+
 **Auth model:** the plugin authenticates to Firestore using the Firebase
 service-account JSON (`ppoflipperopus-firebase-adminsdk-*.json` at the repo
 root, gitignored — see `firestoreServiceAccountPath` in config) via plain
@@ -159,6 +167,10 @@ project, not just this collection.
   "Portfolio & cost basis" below.
 - `portfolio/CostBasisEntry.java` — one item's running average cost,
   quantity held, and realized profit/loss.
+- `portfolio/BuyLimitLedger.java` — per-item, timestamped log of buy fills,
+  persisted the same way as the cost-basis ledger, used to enforce the GE's
+  rolling 4h buy-limit window across sessions (see "Guardrails" below).
+  Also owns this installation's locally-generated agent id.
 
 ## Portfolio & cost basis
 
@@ -211,6 +223,29 @@ forever failing (with `withdrawFromBank` off, its default) or attempting
 a bank withdrawal (with it on). This check always runs regardless of the
 guardrails master switch, since it's catching an order that can never
 succeed rather than a risk/safety tradeoff.
+
+Buy orders are checked the same unconditional way against
+`BuyLimitLedger` - a per-item, timestamped log of actual buy fills,
+persisted via `ConfigManager` (same pattern as the cost-basis ledger
+above) so it survives restarts and correctly enforces the GE's real
+rolling 4-hour buy-limit window across sessions, not just within a
+single order or a single script run. The item's limit itself comes from
+`Rs2GrandExchange.getItemMappingData()` (the OSRS Wiki's item-mapping
+data, cached client-side after first lookup) - if the item isn't
+resolvable there, nothing is enforced. A BUY that would push this
+window's total past the limit is rejected before submission, the same
+way an over-sized SELL is. FlipperStar's own sizing
+(`FlipperStarEngine.sizeOrder`) also subtracts what's already been
+bought this window before queuing, so it doesn't even queue a doomed
+order in the first place - this guardrail is the backstop that always
+applies regardless of caller.
+
+Each installation gets a stable, locally-generated agent id
+(`BuyLimitLedger.getAgentId()`, a UUID persisted the same way) used only
+to key its buy history if mirrored to Firestore's `buyLimits` collection
+when web sync is enabled (see "Web sync" below) - purely for
+cross-machine visibility/audit, never required for the guardrail itself,
+which only ever reads the local ledger.
 
 "Max concurrent offers" (default 8, how many of the 8 GE slots to use at
 once) lives in the **Behavior** section instead — it's a throttle, not a

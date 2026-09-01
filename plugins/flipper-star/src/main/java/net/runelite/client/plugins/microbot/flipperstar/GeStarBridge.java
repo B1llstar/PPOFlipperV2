@@ -6,6 +6,9 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
+import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
+import net.runelite.client.plugins.microbot.util.grandexchange.models.ItemMappingData;
+import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -57,6 +60,7 @@ public class GeStarBridge {
 
     private final Gson gson = new Gson();
     private final ConfigManager configManager;
+    private final Rs2ItemManager itemManager = new Rs2ItemManager();
 
     @Inject
     public GeStarBridge(ConfigManager configManager) {
@@ -66,6 +70,7 @@ public class GeStarBridge {
     private Plugin geStarPlugin;
     private Object orderQueue;
     private Object portfolio;
+    private Object buyLimitLedger;
     private Object script;
 
     /** Returns true if GE Star V2 is running and both its order queue and portfolio were reached. */
@@ -202,6 +207,41 @@ public class GeStarBridge {
         }
     }
 
+    /**
+     * Quantity of an item already bought within its rolling 4h GE-limit window, via GE Star
+     * V2's BuyLimitLedger (persisted across sessions - see that class). 0 if unreachable or
+     * nothing bought recently.
+     */
+    public int getQuantityBoughtInWindow(int itemId) {
+        Object ledger = findBuyLimitLedger();
+        if (ledger == null) return 0;
+
+        try {
+            Method method = ledger.getClass().getMethod("quantityBoughtInWindow", int.class, long.class);
+            return (Integer) method.invoke(ledger, itemId, System.currentTimeMillis());
+        } catch (Exception e) {
+            log.error("FlipperStar: failed to read buy-limit usage for item {} - {}", itemId, e.getMessage(), e);
+            return 0;
+        }
+    }
+
+    /**
+     * This item's GE buy limit (units per 4h), via the OSRS Wiki item-mapping data - a shared
+     * Microbot client-jar API, not a GE Star V2-defined type, so called directly rather than
+     * reflectively (same reasoning as the classloader note on this class's javadoc: only a
+     * plugin-defined type needs reflection to cross the boundary). Falls back to 0 (meaning
+     * "unknown, don't enforce") if the item isn't in the wiki mapping.
+     */
+    public int getBuyLimit(int itemId) {
+        ItemMappingData mapping = Rs2GrandExchange.getItemMappingData(itemId);
+        return (mapping != null && mapping.hasTradeLimit()) ? mapping.getEffectiveTradeLimit() : 0;
+    }
+
+    /** Resolves an item name to its id via the shared Rs2ItemManager (a Microbot client-jar type, no reflection needed). 0/negative if not found. */
+    public int resolveItemId(String itemName) {
+        return itemManager.getItemId(itemName);
+    }
+
     /** Weighted-average cost per unit for an item id, via GE Star V2's GeStarPortfolio. 0 if unreachable or never bought. */
     public int getAverageCost(int itemId) {
         Object portfolioObj = findPortfolio();
@@ -248,6 +288,16 @@ public class GeStarBridge {
         return portfolio;
     }
 
+    private Object findBuyLimitLedger() {
+        if (buyLimitLedger != null) return buyLimitLedger;
+
+        Plugin plugin = findGeStarPlugin();
+        if (plugin == null) return null;
+
+        buyLimitLedger = getFieldValue(plugin, "buyLimitLedger");
+        return buyLimitLedger;
+    }
+
     private Object findScript() {
         if (script != null) return script;
 
@@ -274,6 +324,7 @@ public class GeStarBridge {
         geStarPlugin = null;
         orderQueue = null;
         portfolio = null;
+        buyLimitLedger = null;
         script = null;
     }
 }
