@@ -67,6 +67,127 @@ public class PPOFlipperStarFirestoreClient {
     }
 
     // ---------------------------------------------------------------------------------------
+    // marketHistory/{itemId} - NOT under accounts/{accountHash}/, deliberately: this is public
+    // OSRS Wiki market data (5-minute price/volume candles), not per-account state, so it's
+    // shared across every account/machine that ever runs this plugin against the same Firebase
+    // project - see WikiHistoryBuffer's javadoc for the full design (local ConfigManager cache
+    // is the hot per-tick read path; this collection exists purely so a second machine, or the
+    // same machine after wiping its local cache, can seed itself instantly instead of needing
+    // real wall-clock hours to rebuild rolling-window history from nothing). Admin-only, no
+    // explicit firestore.rules block needed (falls through to the file's default-deny catch-all,
+    // same as tradableItems) since nothing but this plugin's own service-account credential and
+    // the Python inference worker's equivalent ever need to touch it.
+    // ---------------------------------------------------------------------------------------
+
+    private String marketHistoryDoc(int itemId) {
+        return documentsRootUrl + "/marketHistory/" + itemId;
+    }
+
+    /** One item's full buffered candle history, as parallel arrays - see WikiHistoryBuffer.Candle for what each index across the five lists represents together. */
+    public static final class RemoteMarketHistory {
+        public final List<Long> timestamps;
+        public final List<Double> avgHighPrices;
+        public final List<Double> highPriceVolumes;
+        public final List<Double> avgLowPrices;
+        public final List<Double> lowPriceVolumes;
+
+        /** Public, unlike RemotePortfolioEntry/RemoteBuyLimitEntry above (only ever built internally when parsing a read response) - WikiHistoryBuffer, in a different package, constructs one of these itself to push via putMarketHistory, same reasoning as DecisionRequestItem's public constructor below. */
+        public RemoteMarketHistory(List<Long> timestamps, List<Double> avgHighPrices, List<Double> highPriceVolumes,
+                             List<Double> avgLowPrices, List<Double> lowPriceVolumes) {
+            this.timestamps = timestamps;
+            this.avgHighPrices = avgHighPrices;
+            this.highPriceVolumes = highPriceVolumes;
+            this.avgLowPrices = avgLowPrices;
+            this.lowPriceVolumes = lowPriceVolumes;
+        }
+    }
+
+    /**
+     * Pulls one item's shared candle history, or {@code null} if nothing has ever been pushed for
+     * it (a brand new item nobody's watchlisted before, or the very first machine to ever run
+     * this plugin). Used once at startup per item to seed {@link WikiHistoryBuffer}'s in-memory
+     * buffer before its own local ConfigManager cache and live polling take over.
+     */
+    public RemoteMarketHistory getMarketHistory(int itemId) throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(marketHistoryDoc(itemId)))
+            .header("Authorization", "Bearer " + auth.getAccessToken())
+            .timeout(Duration.ofSeconds(10))
+            .GET()
+            .build();
+
+        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() == 404) {
+            return null;
+        }
+        if (response.statusCode() != 200) {
+            throw new IOException("get marketHistory failed: HTTP " + response.statusCode() + " - " + response.body());
+        }
+
+        JsonObject document = new JsonParser().parse(response.body()).getAsJsonObject();
+        JsonObject fields = document.getAsJsonObject("fields");
+        if (fields == null) {
+            return null;
+        }
+
+        List<Long> timestamps = new ArrayList<>();
+        for (JsonElement el : readArrayValues(fields, "timestamps")) {
+            timestamps.add(Long.parseLong(el.getAsJsonObject().get("integerValue").getAsString()));
+        }
+        List<Double> avgHighPrices = new ArrayList<>();
+        for (JsonElement el : readArrayValues(fields, "avgHighPrices")) {
+            avgHighPrices.add(el.getAsJsonObject().get("doubleValue").getAsDouble());
+        }
+        List<Double> highPriceVolumes = new ArrayList<>();
+        for (JsonElement el : readArrayValues(fields, "highPriceVolumes")) {
+            highPriceVolumes.add(el.getAsJsonObject().get("doubleValue").getAsDouble());
+        }
+        List<Double> avgLowPrices = new ArrayList<>();
+        for (JsonElement el : readArrayValues(fields, "avgLowPrices")) {
+            avgLowPrices.add(el.getAsJsonObject().get("doubleValue").getAsDouble());
+        }
+        List<Double> lowPriceVolumes = new ArrayList<>();
+        for (JsonElement el : readArrayValues(fields, "lowPriceVolumes")) {
+            lowPriceVolumes.add(el.getAsJsonObject().get("doubleValue").getAsDouble());
+        }
+
+        return new RemoteMarketHistory(timestamps, avgHighPrices, highPriceVolumes, avgLowPrices, lowPriceVolumes);
+    }
+
+    /**
+     * Overwrites one item's full candle history snapshot. Called periodically (not on every
+     * poll - see WikiHistoryBuffer's push cadence) with whatever's currently buffered locally, so
+     * this is always a full-replace, never an append - simpler than trying to reconcile partial
+     * updates across machines, and cheap enough at a few-times-an-hour cadence for a handful of
+     * watchlisted items.
+     */
+    public void putMarketHistory(int itemId, RemoteMarketHistory history) throws IOException, InterruptedException {
+        JsonObject fields = new JsonObject();
+        fields.add("timestamps", arrayOfLongValues(history.timestamps));
+        fields.add("avgHighPrices", arrayOfDoubleValues(history.avgHighPrices));
+        fields.add("highPriceVolumes", arrayOfDoubleValues(history.highPriceVolumes));
+        fields.add("avgLowPrices", arrayOfDoubleValues(history.avgLowPrices));
+        fields.add("lowPriceVolumes", arrayOfDoubleValues(history.lowPriceVolumes));
+        fields.add("updatedAt", timestampValueNow());
+
+        JsonObject body = new JsonObject();
+        body.add("fields", fields);
+
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(marketHistoryDoc(itemId)))
+            .header("Authorization", "Bearer " + auth.getAccessToken())
+            .header("Content-Type", "application/json")
+            .timeout(Duration.ofSeconds(10))
+            .method("PATCH", HttpRequest.BodyPublishers.ofString(body.toString()))
+            .build();
+
+        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IOException("putMarketHistory failed: HTTP " + response.statusCode() + " - " + response.body());
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
     // portfolio/{itemId}
     // ---------------------------------------------------------------------------------------
 
@@ -653,6 +774,16 @@ public class PPOFlipperStarFirestoreClient {
         JsonArray array = new JsonArray();
         for (long value : values) {
             array.add(integerValue(value));
+        }
+        JsonObject wrapper = new JsonObject();
+        wrapper.add("arrayValue", wrapArrayValues(array));
+        return wrapper;
+    }
+
+    private static JsonObject arrayOfDoubleValues(List<Double> values) {
+        JsonArray array = new JsonArray();
+        for (double value : values) {
+            array.add(doubleValue(value));
         }
         JsonObject wrapper = new JsonObject();
         wrapper.add("arrayValue", wrapArrayValues(array));

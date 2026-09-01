@@ -309,6 +309,59 @@ public class PPOFlipperStarFirestoreSync {
     }
 
     // ---------------------------------------------------------------------------------------
+    // marketHistory/{itemId} - shared, NOT account-scoped (see PPOFlipperStarFirestoreClient's
+    // marketHistory section for the full "why" - this is public wiki data, not per-account
+    // state). Unlike every other method in this class, these don't need an account hash at all,
+    // so they don't go through submit()/getDecisionResponse()'s account-hash-gated pattern.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Blocking pull of one item's shared candle history - called once by {@link
+     * net.runelite.client.plugins.microbot.ppoflipperstar.WikiHistoryBuffer} the first time it
+     * needs history for an item it has no local cache for (a fresh local install, or a newly
+     * watchlisted item), so it can seed itself instantly instead of needing real wall-clock hours
+     * to rebuild rolling-window history from nothing. Returns {@link Optional#empty()} (never
+     * throws) if sync is disabled or the read fails - the caller falls back to cold-starting from
+     * zero exactly as if this method didn't exist, since Firestore being unreachable must never
+     * block the plugin's own polling from working locally.
+     */
+    public Optional<PPOFlipperStarFirestoreClient.RemoteMarketHistory> pullMarketHistory(int itemId) {
+        PPOFlipperStarFirestoreClient clientRef = client;
+        if (clientRef == null) return Optional.empty();
+
+        try {
+            PPOFlipperStarFirestoreClient.RemoteMarketHistory history = clientRef.getMarketHistory(itemId);
+            return Optional.ofNullable(history);
+        } catch (Exception e) {
+            log.debug("PPOFlipperStar: failed to pull shared market history for item {} - {}", itemId, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Fire-and-forget push of one item's full current candle buffer, replacing whatever was
+     * there. Called periodically (not on every poll) by {@code WikiHistoryBuffer} - best-effort,
+     * same failure handling as every other async push in this class.
+     */
+    public void pushMarketHistoryAsync(int itemId, PPOFlipperStarFirestoreClient.RemoteMarketHistory history) {
+        PPOFlipperStarFirestoreClient clientRef = client;
+        ExecutorService executorRef = executor;
+        if (clientRef == null || executorRef == null || executorRef.isShutdown()) return;
+
+        try {
+            executorRef.execute(() -> {
+                try {
+                    clientRef.putMarketHistory(itemId, history);
+                } catch (Exception e) {
+                    log.warn("PPOFlipperStar: failed to push shared market history for item {} - {}", itemId, e.getMessage());
+                }
+            });
+        } catch (Exception e) {
+            log.debug("PPOFlipperStar: could not schedule market history push for item {} - {}", itemId, e.getMessage());
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
     // decision/request, decision/response - model<->plugin transport (PROPOSAL.md §3.6)
     // ---------------------------------------------------------------------------------------
     //

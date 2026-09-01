@@ -1,19 +1,30 @@
 package net.runelite.client.plugins.microbot.ppoflipperstar;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonSyntaxException;
+import com.google.gson.reflect.TypeToken;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.config.ConfigManager;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreClient;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 
+import javax.inject.Inject;
 import javax.inject.Singleton;
+import java.lang.reflect.Type;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.OptionalDouble;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -43,6 +54,33 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * block) and lags one block behind "now" the same way {@code fetch_5m_history.py}'s
  * {@code latest_complete_block} does, since the most-recent block is sometimes still filling in
  * server-side.
+ *
+ * <p><b>Persistence, added after a real bug found during live shadow-mode testing:</b> this
+ * class used to be in-memory only. Since it's a Guice singleton scoped to the plugin's own
+ * injector (which RuneLite recreates fresh on every disable/re-enable, not just a genuine client
+ * restart), every re-enable silently wiped accumulated history back to empty - and because real
+ * volatility/momentum/volume signal needs real elapsed wall-clock hours to build (see
+ * {@link #computeRollingFeatures}'s cold-start note), a buffer that never survives more than a
+ * few minutes at a time in practice NEVER accumulates real signal, no matter how long it's left
+ * running in total. Confirmed live: a model fed all-zero volatility/momentum on every item
+ * (because the buffer kept resetting) produced a badly-mispriced SELL suggestion that a guardrail
+ * correctly rejected - the guardrail did its job, but the underlying cause was this class
+ * silently losing its work. Two persistence layers now guard against that:
+ * <ul>
+ *   <li><b>Local {@code ConfigManager} cache</b> - the buffer's full state is persisted on every
+ *   successful poll and restored on construction, so a same-machine plugin restart (disable/
+ *   re-enable, or a client restart) resumes exactly where it left off instead of cold-starting.</li>
+ *   <li><b>Shared Firestore {@code marketHistory/{itemId}}</b> - deliberately NOT under
+ *   {@code accounts/{accountHash}/}, since this is public wiki market data, not per-account
+ *   state (see {@link PPOFlipperStarFirestoreClient}'s marketHistory section). The first time
+ *   this buffer needs history for an item it has no local cache for at all (a fresh install, or
+ *   a newly-watchlisted item nobody's ever tracked on this machine), it pulls whatever's already
+ *   there to seed itself instantly - useful today as a second line of defense if the local cache
+ *   is ever lost, and becomes genuinely load-bearing once a second machine/account starts running
+ *   this plugin against the same Firebase project, since it won't need to cold-start for hours
+ *   either. Pushed periodically (not every poll), full-replace, best-effort - Firestore being
+ *   unreachable never blocks local polling from working.</li>
+ * </ul>
  */
 @Slf4j
 @Singleton
@@ -60,11 +98,22 @@ public class WikiHistoryBuffer {
     private static final int WINDOW_6H_BLOCKS = 72;
     private static final int WINDOW_24H_BLOCKS = 288;
 
+    private static final String CONFIG_GROUP = "ppoflipperstar";
+    private static final String HISTORY_KEY = "wikiHistoryBuffer";
+    private static final Type HISTORY_TYPE = new TypeToken<Map<Integer, List<Candle>>>() {}.getType();
+
+    // How often to push the current buffer to the shared Firestore cache - not every poll (that
+    // would be a write per watchlisted item every single minute, unnecessary for data that's
+    // only ever read back at cold-start). Local ConfigManager persistence (every poll) is the
+    // thing actually protecting against losing recent candles; this is just keeping the shared
+    // cross-machine copy reasonably current.
+    private static final long FIRESTORE_PUSH_INTERVAL_MINUTES = 10;
+
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
         .build();
 
-    /** One 5-minute candle, matching fetch_5m_history.py's fetch_block row shape exactly. */
+    /** One 5-minute candle, matching fetch_5m_history.py's fetch_block row shape exactly. Plain fields (no lombok) so Gson's default reflective (de)serialization round-trips it directly, same convention as PPOFlipperOrder - see OrderQueue's persistence javadoc for why that's safe for a final-field class with no no-args constructor. */
     private static final class Candle {
         final long timestamp;
         final double avgHighPrice;
@@ -100,11 +149,26 @@ public class WikiHistoryBuffer {
         }
     }
 
-    private final Map<Integer, Deque<Candle>> history = new ConcurrentHashMap<>();
+    private final ConfigManager configManager;
+    private final PPOFlipperStarFirestoreSync firestoreSync;
+    private final Gson gson = new Gson();
+
+    private final Map<Integer, Deque<Candle>> history;
+    // Items already checked against the shared Firestore cache (seeded from it or confirmed to
+    // have their own local/live history already) - each item id is only ever seed-checked once
+    // per plugin instance, on first need, not on every poll. See maybeSeedFromFirestore.
+    private final Set<Integer> firestoreSeedChecked = ConcurrentHashMap.newKeySet();
     private volatile long lastFetchedBlockTimestamp = -1;
 
     private ScheduledExecutorService scheduler;
     private final AtomicBoolean started = new AtomicBoolean(false);
+
+    @Inject
+    public WikiHistoryBuffer(ConfigManager configManager, PPOFlipperStarFirestoreSync firestoreSync) {
+        this.configManager = configManager;
+        this.firestoreSync = firestoreSync;
+        this.history = new ConcurrentHashMap<>(loadPersistedHistory());
+    }
 
     /**
      * Starts polling in the background if not already running. Safe to call repeatedly (e.g.
@@ -122,7 +186,10 @@ public class WikiHistoryBuffer {
             return t;
         });
         scheduler.scheduleWithFixedDelay(this::pollOnce, 0, 1, TimeUnit.MINUTES);
-        log.info("PPOFlipperStar: wiki 5m history buffer polling started.");
+        scheduler.scheduleWithFixedDelay(this::pushAllToFirestore,
+            FIRESTORE_PUSH_INTERVAL_MINUTES, FIRESTORE_PUSH_INTERVAL_MINUTES, TimeUnit.MINUTES);
+        log.info("PPOFlipperStar: wiki 5m history buffer polling started ({} item(s) restored from local cache).",
+            history.size());
     }
 
     public void stop() {
@@ -206,6 +273,7 @@ public class WikiHistoryBuffer {
 
             lastFetchedBlockTimestamp = block;
             log.debug("PPOFlipperStar: wiki 5m history poll fetched block {} - {} item candle(s) added.", block, added);
+            persistLocalHistory();
         } catch (Exception e) {
             log.warn("PPOFlipperStar: wiki 5m history poll failed for block {} - {}", block, e.getMessage());
         }
@@ -222,6 +290,123 @@ public class WikiHistoryBuffer {
             while (deque.size() > MAX_HISTORY_BLOCKS) {
                 deque.removeFirst();
             }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Local ConfigManager persistence - see class javadoc's "Persistence" section for why this
+    // exists. Written after every successful poll (addCandle already ran for every item in that
+    // block by the time this is called); loaded once at construction.
+    // ---------------------------------------------------------------------------------------
+
+    private void persistLocalHistory() {
+        Map<Integer, List<Candle>> snapshot = new HashMap<>();
+        for (Map.Entry<Integer, Deque<Candle>> entry : history.entrySet()) {
+            synchronized (entry.getValue()) {
+                snapshot.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+            }
+        }
+        configManager.setConfiguration(CONFIG_GROUP, HISTORY_KEY, gson.toJson(snapshot, HISTORY_TYPE));
+    }
+
+    private Map<Integer, Deque<Candle>> loadPersistedHistory() {
+        String json = configManager.getConfiguration(CONFIG_GROUP, HISTORY_KEY);
+        if (json == null || json.isEmpty()) {
+            return new HashMap<>();
+        }
+
+        Map<Integer, List<Candle>> restored;
+        try {
+            restored = gson.fromJson(json, HISTORY_TYPE);
+        } catch (JsonSyntaxException e) {
+            log.warn("PPOFlipperStar: wiki history buffer config was not valid JSON, starting empty - {}", e.getMessage());
+            return new HashMap<>();
+        }
+        if (restored == null) {
+            return new HashMap<>();
+        }
+
+        Map<Integer, Deque<Candle>> result = new HashMap<>();
+        for (Map.Entry<Integer, List<Candle>> entry : restored.entrySet()) {
+            result.put(entry.getKey(), new ArrayDeque<>(entry.getValue()));
+        }
+        return result;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Shared Firestore marketHistory/{itemId} - see class javadoc's "Persistence" section.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Checks the shared Firestore cache for an item's history the FIRST time this buffer is
+     * asked about it (an item with no local candles at all - a fresh install, or an item just
+     * added to the watchlist that was never tracked on this machine before) and seeds from it if
+     * found. Every subsequent call for the same item id is a no-op (tracked via
+     * {@link #firestoreSeedChecked}) - once this machine has ANY local history for an item
+     * (whether from a seed or its own live polling), there's no reason to keep re-checking
+     * Firestore for it on every decision tick.
+     */
+    private void maybeSeedFromFirestore(int itemId) {
+        if (!firestoreSeedChecked.add(itemId)) {
+            return;
+        }
+        if (history.containsKey(itemId)) {
+            return;
+        }
+
+        firestoreSync.pullMarketHistory(itemId).ifPresent(remote -> {
+            int count = remote.timestamps.size();
+            if (count == 0) return;
+
+            Deque<Candle> deque = new ArrayDeque<>();
+            for (int i = 0; i < count; i++) {
+                deque.addLast(new Candle(
+                    remote.timestamps.get(i),
+                    i < remote.avgHighPrices.size() ? remote.avgHighPrices.get(i) : 0.0,
+                    i < remote.highPriceVolumes.size() ? remote.highPriceVolumes.get(i) : 0.0,
+                    i < remote.avgLowPrices.size() ? remote.avgLowPrices.get(i) : 0.0,
+                    i < remote.lowPriceVolumes.size() ? remote.lowPriceVolumes.get(i) : 0.0));
+            }
+            while (deque.size() > MAX_HISTORY_BLOCKS) {
+                deque.removeFirst();
+            }
+
+            history.put(itemId, deque);
+            persistLocalHistory();
+            log.info("PPOFlipperStar: seeded {} candle(s) for item {} from the shared Firestore market-history cache.",
+                deque.size(), itemId);
+        });
+    }
+
+    /**
+     * Pushes every currently-tracked item's full candle buffer to the shared Firestore cache -
+     * see {@link #FIRESTORE_PUSH_INTERVAL_MINUTES}. Best-effort per item; one failure doesn't
+     * stop the rest from being pushed.
+     */
+    private void pushAllToFirestore() {
+        for (Map.Entry<Integer, Deque<Candle>> entry : new HashMap<>(history).entrySet()) {
+            int itemId = entry.getKey();
+            Candle[] candles;
+            synchronized (entry.getValue()) {
+                candles = entry.getValue().toArray(new Candle[0]);
+            }
+            if (candles.length == 0) continue;
+
+            List<Long> timestamps = new ArrayList<>(candles.length);
+            List<Double> avgHighPrices = new ArrayList<>(candles.length);
+            List<Double> highPriceVolumes = new ArrayList<>(candles.length);
+            List<Double> avgLowPrices = new ArrayList<>(candles.length);
+            List<Double> lowPriceVolumes = new ArrayList<>(candles.length);
+            for (Candle c : candles) {
+                timestamps.add(c.timestamp);
+                avgHighPrices.add(c.avgHighPrice);
+                highPriceVolumes.add(c.highPriceVolume);
+                avgLowPrices.add(c.avgLowPrice);
+                lowPriceVolumes.add(c.lowPriceVolume);
+            }
+
+            firestoreSync.pushMarketHistoryAsync(itemId, new PPOFlipperStarFirestoreClient.RemoteMarketHistory(
+                timestamps, avgHighPrices, highPriceVolumes, avgLowPrices, lowPriceVolumes));
         }
     }
 
@@ -271,6 +456,8 @@ public class WikiHistoryBuffer {
      * behavior for this one specific edge case, while every other case now uses real history).
      */
     public Map<String, RollingFeatures> computeRollingFeatures(int itemId, double fallbackMidPrice) {
+        maybeSeedFromFirestore(itemId);
+
         Deque<Candle> deque = history.get(itemId);
         Candle[] candles = deque != null ? deque.toArray(new Candle[0]) : new Candle[0];
 
