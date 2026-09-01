@@ -44,6 +44,22 @@ public interface PPOFlipperStarConfig extends Config {
     }
 
     @ConfigItem(
+        keyName = "goldReserveTarget",
+        name = "Gold reserve target (session)",
+        description = "When a BUY order needs more coins than are currently in inventory and a bank trip happens " +
+            "(withdrawFromBank above), top inventory coins up to this amount instead of withdrawing just enough " +
+            "for that one order - later orders this session can then draw from the reserve already in inventory " +
+            "without triggering another bank visit each time. 0 falls back to the old behavior: withdraw exactly " +
+            "what the current order needs, every time. Has no effect if inventory coins already meet or exceed " +
+            "this target (nothing is deposited back - this only ever tops up, never trims down).",
+        position = 1,
+        section = ordersSection
+    )
+    default int goldReserveTarget() {
+        return 0;
+    }
+
+    @ConfigItem(
         keyName = "inventoryOnlyMode",
         name = "Inventory-only mode (holdings)",
         description = "When on, PortfolioManager reports held quantities from inventory only, matching ge-star-v2's " +
@@ -51,7 +67,7 @@ public interface PPOFlipperStarConfig extends Config {
             "session, so counting on stale/never-refreshed bank data risks acting on wrong info. When off (the " +
             "default here), holdings are inventory + bank, kept trustworthy by BankManager proactively refreshing " +
             "the bank on the interval below. See PortfolioManager's javadoc for the full reasoning.",
-        position = 1,
+        position = 2,
         section = ordersSection
     )
     default boolean inventoryOnlyMode() {
@@ -64,7 +80,7 @@ public interface PPOFlipperStarConfig extends Config {
         description = "How often PortfolioManager proactively opens/refreshes the bank to keep inventory+bank " +
             "holdings trustworthy. 0 disables proactive refresh (bank data then only updates when something else " +
             "happens to open the bank). No effect while inventory-only mode is on.",
-        position = 2,
+        position = 3,
         section = ordersSection
     )
     default int bankRefreshIntervalSeconds() {

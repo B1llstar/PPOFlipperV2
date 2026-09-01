@@ -490,9 +490,18 @@ public class PPOFlipperStarScript extends Script {
         if (orderAwaitingFunds.getAction() == GrandExchangeAction.BUY) {
             // Coins can never be noted (a game-engine restriction, not a Microbot limitation) -
             // no note-mode handling needed here.
-            long needed = orderAwaitingFunds.totalValue() - Rs2Inventory.itemQuantity(ItemID.COINS);
+            long currentCoins = Rs2Inventory.itemQuantity(ItemID.COINS);
+            long needed = orderAwaitingFunds.totalValue() - currentCoins;
             if (needed > 0) {
-                Rs2Bank.withdrawX(ItemID.COINS, (int) needed);
+                // If a gold reserve target is configured, top up to that level instead of just
+                // this order's exact shortfall - so later orders this session can draw down the
+                // reserve already sitting in inventory without triggering another bank trip each
+                // time. Withdraw whichever is larger: the order's real need (the reserve target
+                // could be set below what a single big order actually costs) or the top-up to
+                // the target. 0 (the default) reproduces the old exact-need-only behavior exactly.
+                long reserveTarget = Math.max(0, config.goldReserveTarget());
+                long topUpAmount = Math.max(needed, reserveTarget - currentCoins);
+                Rs2Bank.withdrawX(ItemID.COINS, (int) topUpAmount);
                 Rs2Inventory.waitForInventoryChanges(5000);
             }
         } else {
