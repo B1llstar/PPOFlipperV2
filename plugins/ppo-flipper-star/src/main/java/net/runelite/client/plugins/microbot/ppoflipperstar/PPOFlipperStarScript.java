@@ -19,6 +19,7 @@ import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeSlot
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.grandexchange.models.GrandExchangeOfferDetails;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Inject;
@@ -487,6 +488,8 @@ public class PPOFlipperStarScript extends Script {
         }
 
         if (orderAwaitingFunds.getAction() == GrandExchangeAction.BUY) {
+            // Coins can never be noted (a game-engine restriction, not a Microbot limitation) -
+            // no note-mode handling needed here.
             long needed = orderAwaitingFunds.totalValue() - Rs2Inventory.itemQuantity(ItemID.COINS);
             if (needed > 0) {
                 Rs2Bank.withdrawX(ItemID.COINS, (int) needed);
@@ -496,7 +499,7 @@ public class PPOFlipperStarScript extends Script {
             int have = Rs2Inventory.itemQuantity(orderAwaitingFunds.getItemName());
             int needed = orderAwaitingFunds.getQuantity() - have;
             if (needed > 0) {
-                Rs2Bank.withdrawX(orderAwaitingFunds.getItemName(), needed);
+                withdrawPreferringNotes(orderAwaitingFunds.getItemId(), orderAwaitingFunds.getItemName(), needed);
                 Rs2Inventory.waitForInventoryChanges(5000);
             }
         }
@@ -505,6 +508,44 @@ public class PPOFlipperStarScript extends Script {
         sleepUntil(() -> !Rs2Bank.isOpen());
         orderAwaitingFunds = null;
         state = State.SUBMITTING_ORDERS;
+    }
+
+    /**
+     * Withdraws a SELL order's item, preferring noted stock when the item actually has a noted
+     * variant - a noted withdrawal takes one inventory slot regardless of quantity instead of
+     * however many unnoted stacks the bank happens to split it into (most tradeable items already
+     * only stack unnoted if they're stackable at all - notes exist specifically for the ones that
+     * don't). The GE accepts noted items for a SELL exactly like unnoted ones, no unnoting step
+     * needed - and {@code Rs2Inventory.itemQuantity(String)}'s pre-withdrawal check above already
+     * sums noted+unnoted quantities together by display name (verified against the client jar's
+     * bytecode - it filters by {@code getName()}, not item id, so it can't tell them apart to
+     * begin with), so switching what actually comes out of the bank doesn't change what that
+     * check already believed was available.
+     *
+     * <p>{@link Rs2ItemModel#getNotedId(int)} returns {@code -1} for an item with no noted
+     * variant (most equipment, and a handful of never-stackable items) - falls back to a normal
+     * unnoted withdrawal in that case, since forcing note-mode on first would just waste a widget
+     * click for nothing. Note-mode is restored back to item-mode afterward regardless of which
+     * path was taken, so it never leaks into an unrelated later bank interaction (a manual
+     * withdrawal via the panel, or a different script) that isn't expecting it.
+     */
+    private void withdrawPreferringNotes(int itemId, String itemName, int quantity) {
+        boolean notable = Rs2ItemModel.getNotedId(itemId) != -1;
+        if (!notable) {
+            Rs2Bank.withdrawX(itemName, quantity);
+            return;
+        }
+
+        Rs2Bank.setWithdrawAsNote();
+        sleep(300, 600);
+        if (!Rs2Bank.hasWithdrawAsNote()) {
+            log.warn("PPOFlipperStar: could not switch bank to note mode for {}, withdrawing unnoted instead.", itemName);
+            Rs2Bank.withdrawX(itemName, quantity);
+            return;
+        }
+
+        Rs2Bank.withdrawX(itemName, quantity);
+        Rs2Bank.setWithdrawAsItem();
     }
 
     private void submitNextOrder() {
