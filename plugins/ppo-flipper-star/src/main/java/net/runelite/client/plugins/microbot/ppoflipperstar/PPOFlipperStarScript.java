@@ -395,6 +395,10 @@ public class PPOFlipperStarScript extends Script {
         }
         lastFundsShortfallOrder = null;
 
+        // Cleared before recomputing so a clamp note from an earlier submit attempt (e.g. before
+        // an orphan-requeue - see reconcileSubmittedOrders) doesn't linger and misdescribe this
+        // attempt if this retry doesn't clamp.
+        order.setStatusDetail(null);
         int submitPrice = clampToLivePrice(order);
 
         // NOTE: Rs2GrandExchange.buyItem and .sellItem have inconsistent parameter order with
@@ -412,6 +416,7 @@ public class PPOFlipperStarScript extends Script {
             }
             GrandExchangeSlots slot = slotBefore != null ? slotBefore : Rs2GrandExchange.findSlotForItem(order.getItemName(), order.getAction() == GrandExchangeAction.BUY);
             order.setSlot(slot);
+            order.setSubmittedPrice(submitPrice);
             order.setStatus(PPOFlipperOrder.Status.SUBMITTED);
             queue.notifyChanged();
             if (slot != null) {
@@ -445,6 +450,11 @@ public class PPOFlipperStarScript extends Script {
             if (capped < order.getPrice()) {
                 log.info("PPOFlipperStar: capped buy price for {} from {} to live insta-buy price {}",
                     order.getItemName(), order.getPrice(), price.instaBuyPrice);
+                // Visible in the panel, not just the log - a human who typed a specific price
+                // (the only source of orders in this milestone) should be able to see why the
+                // fill price didn't match what they asked for without digging into logs.
+                order.setStatusDetail(String.format(
+                    "Price capped to live insta-buy %d gp (requested %d gp)", capped, order.getPrice()));
             }
             return capped;
         } else {
@@ -453,6 +463,8 @@ public class PPOFlipperStarScript extends Script {
             if (floored > order.getPrice()) {
                 log.info("PPOFlipperStar: raised sell price for {} from {} to live insta-sell price {}",
                     order.getItemName(), order.getPrice(), price.instaSellPrice);
+                order.setStatusDetail(String.format(
+                    "Price raised to live insta-sell %d gp (requested %d gp)", floored, order.getPrice()));
             }
             return floored;
         }

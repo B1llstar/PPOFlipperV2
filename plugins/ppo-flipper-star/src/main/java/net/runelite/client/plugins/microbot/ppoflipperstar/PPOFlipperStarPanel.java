@@ -507,7 +507,12 @@ public class PPOFlipperStarPanel extends PluginPanel {
             case QUEUED:
                 return "Queued";
             case SUBMITTED:
-                return String.format("Active - %d%% filled", order.getProgressPercentage());
+                String base = String.format("Active - %d%% filled", order.getProgressPercentage());
+                // statusDetail on a SUBMITTED order (as opposed to SKIPPED/FAILED) means
+                // clampToLivePrice adjusted the price away from what was requested - see
+                // PPOFlipperOrder.submittedPrice's javadoc. Surfaced here so a human who typed a
+                // specific price can see why the fill differs, not just in the debug log.
+                return order.getStatusDetail() != null ? base + " (" + order.getStatusDetail() + ")" : base;
             case DONE:
                 return "Done";
             case SKIPPED:

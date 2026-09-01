@@ -45,7 +45,18 @@ public class PPOFlipperOrder {
     @Setter
     private volatile int quantityFilled = 0;
 
-    /** Set when status is SKIPPED or FAILED, for display in the panel. */
+    /**
+     * The price actually offered to the GE, once submitted - 0 until then. Distinct from
+     * {@link #price} (what was requested) because {@code PPOFlipperStarScript.clampToLivePrice}
+     * can lower a BUY (or raise a SELL) to the live Wiki insta-buy/insta-sell price at submit
+     * time, regardless of whether the order came from a human's typed price or, later, the PPO
+     * policy - see that method's javadoc. The panel shows both so a clamp is visible rather than
+     * silently producing a fill price that doesn't match what was asked for.
+     */
+    @Setter
+    private volatile int submittedPrice = 0;
+
+    /** Set when status is SKIPPED or FAILED, for display in the panel. Also used to note a live-price clamp on an otherwise-normal SUBMITTED order - see {@link #submittedPrice}. */
     @Setter
     private volatile String statusDetail;
 
@@ -71,6 +82,9 @@ public class PPOFlipperOrder {
 
     @Override
     public String toString() {
+        if (submittedPrice > 0 && submittedPrice != price) {
+            return String.format("%s %dx %s @ %d gp (requested %d gp)", action, quantity, itemName, submittedPrice, price);
+        }
         return String.format("%s %dx %s @ %d gp", action, quantity, itemName, price);
     }
 }
