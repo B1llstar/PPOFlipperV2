@@ -124,6 +124,12 @@ public class GeStarV2Plugin extends Plugin {
         if (panel != null) panel.onScriptStateChanged();
     }
 
+    /** Aborts every currently active GE offer and collects whatever comes back to inventory/bank, clears them from the queue's tracking, then leaves the script idling in DONE (still running if Execute-started, so a later Execute click isn't required for it to keep noticing new orders). */
+    public void cancelAllOffers() {
+        script.requestCancelAll(config);
+        if (panel != null) panel.onScriptStateChanged();
+    }
+
     /**
      * Real-time fill detection: the client fires this whenever any GE offer's state or
      * quantity-sold/bought changes, which is how we notice a buy/sell completed (or

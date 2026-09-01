@@ -56,6 +56,7 @@ public class GeStarV2Panel extends PluginPanel {
 
     private JButton executeButton;
     private JButton stopButton;
+    private JButton cancelAllButton;
     private JLabel statusValueLabel;
     private JLabel stateValueLabel;
     private JLabel gpSpentValueLabel;
@@ -86,6 +87,8 @@ public class GeStarV2Panel extends PluginPanel {
         add(buildTitle());
         add(Box.createRigidArea(new Dimension(0, 10)));
         add(buildButtonRow());
+        add(Box.createRigidArea(new Dimension(0, 6)));
+        add(buildCancelAllButton());
         add(Box.createRigidArea(new Dimension(0, 10)));
         add(buildStatusPanel());
         add(Box.createRigidArea(new Dimension(0, 10)));
@@ -137,6 +140,18 @@ public class GeStarV2Panel extends PluginPanel {
         row.add(executeButton);
         row.add(stopButton);
         return row;
+    }
+
+    private JButton buildCancelAllButton() {
+        cancelAllButton = new JButton("Cancel all offers");
+        cancelAllButton.setFont(FontManager.getRunescapeFont());
+        cancelAllButton.setBackground(FAILED_RED);
+        cancelAllButton.setForeground(Color.WHITE);
+        cancelAllButton.setFocusPainted(false);
+        cancelAllButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+        cancelAllButton.setToolTipText("Aborts every active GE offer and collects everything back to inventory/bank");
+        cancelAllButton.addActionListener(e -> onCancelAllClicked());
+        return cancelAllButton;
     }
 
     private JPanel buildStatusPanel() {
@@ -317,15 +332,32 @@ public class GeStarV2Panel extends PluginPanel {
         plugin.stop();
     }
 
+    /**
+     * Clears every still-QUEUED order immediately (no GE interaction needed for those - they
+     * were never submitted) and separately requests the script abort/collect everything
+     * currently live on the exchange. A full stop, not a pause: nothing here gets resubmitted
+     * once cancel-all finishes.
+     */
+    private void onCancelAllClicked() {
+        if (script.isCancellingAll()) return;
+        for (GeStarOrder order : queue.getByStatus(GeStarOrder.Status.QUEUED)) {
+            queue.remove(order.getId());
+        }
+        plugin.cancelAllOffers();
+    }
+
     public void onScriptStateChanged() {
         SwingUtilities.invokeLater(this::refreshFromScriptState);
     }
 
     private void refreshFromScriptState() {
         boolean running = script.isRunning();
+        boolean cancelling = script.isCancellingAll();
 
         executeButton.setEnabled(!running);
         stopButton.setEnabled(running);
+        cancelAllButton.setEnabled(!cancelling);
+        cancelAllButton.setText(cancelling ? "Cancelling..." : "Cancel all offers");
 
         statusValueLabel.setText(running ? "Running" : "Stopped");
         statusValueLabel.setForeground(running ? DONE_GREEN : Color.LIGHT_GRAY);

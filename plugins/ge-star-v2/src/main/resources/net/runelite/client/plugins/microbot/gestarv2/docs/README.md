@@ -24,6 +24,17 @@ that one panel — there's no separate order-list config screen:
   script.
 - **Execute** / **Stop** — start/stop the order-processing script. Stopping
   doesn't clear the queue, so you can pause, add more orders, and resume.
+- **Cancel all offers** — a panic button, separate from Execute/Stop: walks
+  to/opens the GE if needed, aborts every currently active offer in all 8
+  slots via `Rs2GrandExchange.abortAllOffers()`, and collects whatever comes
+  back (unfilled items/GP, and anything already finished) to inventory or
+  bank per **Collect completed offers to bank**. Also clears every still-
+  `QUEUED` order from the queue immediately (no GE interaction needed for
+  those - they were never submitted). A full stop, not a pause: nothing
+  cancelled here gets resubmitted afterward. Works even if Execute was never
+  clicked - it starts the script's own loop if it isn't already running, and
+  once done leaves it idling rather than fully stopping, so it still notices
+  and processes any order added after the fact.
 - A live status block (Running/Stopped, state, GP spent this session)
   refreshes once a second.
 
@@ -148,7 +159,11 @@ project, not just this collection.
 - `GeStarV2Script.java` — the state machine:
   `GOING_TO_GE -> SUBMITTING_ORDERS -> MONITORING_OFFERS -> DONE`, with a
   `PREPARING_FUNDS_OR_ITEMS` side-state for bank withdrawals. Mutates each
-  `GeStarOrder`'s status/fill in place as it progresses.
+  `GeStarOrder`'s status/fill in place as it progresses. A `CANCELLING_ALL`
+  state pre-empts all of the above the tick after `requestCancelAll()` is
+  called (the panel's **Cancel all offers** button) - aborts every active
+  offer and collects everything back, marking any order that was
+  `SUBMITTED` as `FAILED` rather than leaving it looking still-live.
 - `GeStarWikiPriceClient.java` — direct OSRS Wiki `/latest` client used only
   by the hard price clamp (see "Hard price clamp" below for why this exists
   instead of `Rs2GrandExchange.getRealTimePrices()`).

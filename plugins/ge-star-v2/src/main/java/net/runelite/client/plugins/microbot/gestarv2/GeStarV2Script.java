@@ -44,6 +44,7 @@ public class GeStarV2Script extends Script {
         PREPARING_FUNDS_OR_ITEMS,
         SUBMITTING_ORDERS,
         MONITORING_OFFERS,
+        CANCELLING_ALL,
         DONE
     }
 
@@ -70,6 +71,13 @@ public class GeStarV2Script extends Script {
     // SUBMITTED order back to QUEUED on every Execute (the previous behavior) resubmitted
     // orders that were already live, buying/selling the same thing twice.
     private boolean needsReconcile = false;
+
+    // Set by requestCancelAll() (the panel's "Cancel all offers" button), read and cleared at
+    // the top of tick() - checked before the normal state switch so it pre-empts whatever the
+    // script was doing (submitting, monitoring, idling in DONE) rather than waiting for that to
+    // finish first. Volatile since it's set from the EDT (button click) and read from this
+    // script's own scheduled-executor thread.
+    private volatile boolean cancelAllRequested = false;
 
     @Inject
     public GeStarV2Script(GeStarOrderQueue queue, GeStarPortfolio portfolio, BuyLimitLedger buyLimitLedger,
@@ -105,6 +113,29 @@ public class GeStarV2Script extends Script {
         }, 0, SCHEDULE_INTERVAL_MS, TimeUnit.MILLISECONDS);
 
         return true;
+    }
+
+    /**
+     * Requests that every currently active GE offer be aborted and collected back to inventory
+     * on this script's next tick(s), regardless of what it's currently doing - pre-empts normal
+     * order submission/monitoring the same tick it's noticed, and starts the script's own
+     * scheduled loop first if it isn't already running (so this works as a standalone "panic
+     * button" from the panel even with Execute never clicked). Does not touch GeStarOrderQueue
+     * itself - the panel clears QUEUED orders separately once this completes, since whether to
+     * also stop future submissions is a distinct decision from clearing what's live right now.
+     */
+    public void requestCancelAll(GeStarV2Config config) {
+        if (!isRunning()) {
+            run(config);
+        } else {
+            this.config = config;
+        }
+        cancelAllRequested = true;
+    }
+
+    /** True while a cancel-all is in progress (requested but not yet finished) - lets the panel disable the button and show progress instead of queuing a second request. */
+    public boolean isCancellingAll() {
+        return state == State.CANCELLING_ALL;
     }
 
     @Override
@@ -186,9 +217,56 @@ public class GeStarV2Script extends Script {
         queue.notifyChanged();
     }
 
+    /**
+     * Walks to/opens the GE if needed, then aborts every active offer and collects whatever
+     * comes back (unfilled items/GP, and anything that had already finished) to inventory or
+     * bank per {@code collectToBank} - via {@link Rs2GrandExchange#abortAllOffers}, which
+     * already does exactly this sequence (abort every slot, brief settle delay, then collect
+     * all) in one blocking call. Every order this script had SUBMITTED is marked FAILED with an
+     * explanatory reason rather than left SUBMITTED (which would otherwise look like it's still
+     * live) or silently re-queued (a cancelled order was a deliberate stop, not a retry).
+     */
+    private void cancelAllOffers() {
+        if (!Rs2GrandExchange.isOpen()) {
+            Rs2GrandExchange.walkToGrandExchange();
+            if (!Rs2GrandExchange.openExchange()) {
+                return;
+            }
+        }
+
+        List<GeStarOrder> cancelled = new ArrayList<>(activeOrders.values());
+        boolean allEmpty = Rs2GrandExchange.abortAllOffers(config.collectToBank());
+
+        for (GeStarOrder order : cancelled) {
+            order.setStatus(GeStarOrder.Status.FAILED);
+            order.setStatusDetail("Cancelled - all offers pulled from the GE");
+        }
+        activeOrders.clear();
+        orderAwaitingFunds = null;
+        lastFundsShortfallOrder = null;
+        queue.notifyChanged();
+
+        if (!allEmpty) {
+            log.warn("GE Star V2: cancel-all did not leave every GE slot empty, will retry next tick.");
+            return;
+        }
+
+        log.info("GE Star V2: cancel-all complete - {} offer(s) pulled and collected.", cancelled.size());
+        state = State.DONE;
+    }
+
     private void tick() {
+        if (cancelAllRequested && state != State.CANCELLING_ALL) {
+            cancelAllRequested = false;
+            state = State.CANCELLING_ALL;
+        }
+
         switch (state) {
             case IDLE:
+                break;
+
+            case CANCELLING_ALL:
+                cancelAllOffers();
                 break;
 
             case GOING_TO_GE:
