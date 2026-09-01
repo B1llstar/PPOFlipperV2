@@ -5,12 +5,14 @@ import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.lang.reflect.Type;
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -33,14 +35,35 @@ public class WatchlistManager {
     private static final Type WATCHLIST_TYPE = new TypeToken<Set<Integer>>() {}.getType();
 
     private final ConfigManager configManager;
+    private final PPOFlipperStarFirestoreSync firestoreSync;
     private final Gson gson = new Gson();
 
     private final Set<Integer> watchedItemIds;
 
     @Inject
-    public WatchlistManager(ConfigManager configManager) {
+    public WatchlistManager(ConfigManager configManager, PPOFlipperStarFirestoreSync firestoreSync) {
         this.configManager = configManager;
+        this.firestoreSync = firestoreSync;
         this.watchedItemIds = load();
+    }
+
+    /**
+     * Reconciles the local watchlist against a Firestore pull, Firestore winning per this
+     * project's "Firestore is the source of truth" decision - the local set becomes exactly the
+     * union of what was already local and what Firestore returned (a plain union, not a replace:
+     * an item added locally moments before this pull ran, whose push hasn't landed yet, should
+     * not be dropped just because Firestore doesn't know about it yet).
+     */
+    public synchronized void reconcileFromFirestore(List<Integer> remoteItemIds) {
+        if (remoteItemIds == null || remoteItemIds.isEmpty()) return;
+        boolean changed = false;
+        for (int itemId : remoteItemIds) {
+            changed |= watchedItemIds.add(itemId);
+        }
+        if (changed) {
+            persist();
+        }
+        log.info("PPOFlipperStar: reconciled watchlist with {} item(s) from Firestore.", remoteItemIds.size());
     }
 
     private Set<Integer> load() {
@@ -64,12 +87,18 @@ public class WatchlistManager {
     public synchronized void add(int itemId) {
         if (watchedItemIds.add(itemId)) {
             persist();
+            if (firestoreSync.isEnabled()) {
+                firestoreSync.pushWatchlistAddAsync(itemId);
+            }
         }
     }
 
     public synchronized void remove(int itemId) {
         if (watchedItemIds.remove(itemId)) {
             persist();
+            if (firestoreSync.isEnabled()) {
+                firestoreSync.pushWatchlistRemoveAsync(itemId);
+            }
         }
     }
 

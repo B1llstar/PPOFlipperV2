@@ -22,6 +22,30 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // PPOFlipperStar's own per-account state (portfolio/cost-basis, buy-limit ledger, watchlist,
+    // and an append-only trade-history log), keyed by the RuneScape account's stable
+    // Client.getAccountHash() - see
+    // plugins/ppo-flipper-star/.../sync/PPOFlipperStarFirestoreClient.java. Admin-only, same
+    // pattern as buyLimits above: written directly by the plugin's service-account credentials
+    // (bypassing these rules the same way Cloud Functions do), never through a client SDK - no
+    // client read/write path exists or is needed, since this is Firestore-as-durable-cache for
+    // the plugin's own local state, not anything a web UI reads yet.
+    match /accounts/{accountHash}/portfolio/{itemId} {
+      allow read, write: if false;
+    }
+
+    match /accounts/{accountHash}/buyLimitLedger/{itemId} {
+      allow read, write: if false;
+    }
+
+    match /accounts/{accountHash}/watchlist/{itemId} {
+      allow read, write: if false;
+    }
+
+    match /accounts/{accountHash}/tradeHistory/{tradeId} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

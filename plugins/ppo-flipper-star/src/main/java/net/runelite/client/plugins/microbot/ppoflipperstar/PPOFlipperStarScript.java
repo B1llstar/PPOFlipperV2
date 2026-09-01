@@ -8,6 +8,7 @@ import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 import net.runelite.client.plugins.microbot.util.antiban.Rs2Antiban;
 import net.runelite.client.plugins.microbot.util.antiban.Rs2AntibanSettings;
 import net.runelite.client.plugins.microbot.util.antiban.enums.ActivityIntensity;
@@ -60,6 +61,7 @@ public class PPOFlipperStarScript extends Script {
     private final PortfolioManager portfolio;
     private final BuyLimitLedger buyLimitLedger;
     private final GoldManager goldManager;
+    private final PPOFlipperStarFirestoreSync firestoreSync;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
 
@@ -83,11 +85,12 @@ public class PPOFlipperStarScript extends Script {
 
     @Inject
     public PPOFlipperStarScript(OrderQueue queue, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
-                                 GoldManager goldManager) {
+                                 GoldManager goldManager, PPOFlipperStarFirestoreSync firestoreSync) {
         this.queue = queue;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
         this.goldManager = goldManager;
+        this.firestoreSync = firestoreSync;
     }
 
     public boolean run(PPOFlipperStarConfig config) {
@@ -353,6 +356,14 @@ public class PPOFlipperStarScript extends Script {
     }
 
     private void submitNextOrder() {
+        // Holds submission (retried next tick, not a terminal state) while the startup Firestore
+        // reconcile is still in flight - see PPOFlipperStarFirestoreSync.reconcilePending's
+        // javadoc for why trading against not-yet-reconciled local state is unsafe. Bounded by
+        // that pull's own network timeout, not a separate wait here.
+        if (firestoreSync.isReconcilePending()) {
+            return;
+        }
+
         if (!Rs2GrandExchange.isOpen()) {
             Rs2GrandExchange.openExchange();
             return;
@@ -542,13 +553,32 @@ public class PPOFlipperStarScript extends Script {
     private void recordCostBasis(PPOFlipperOrder order, GrandExchangeOfferDetails details, int filled) {
         if (filled <= 0) return;
         int itemId = details.getItemId();
+        long now = System.currentTimeMillis();
         if (order.getAction() == GrandExchangeAction.BUY) {
-            long now = System.currentTimeMillis();
             portfolio.recordBuy(itemId, filled, details.getSpent(), now);
             buyLimitLedger.recordBuy(itemId, filled, now);
         } else {
             portfolio.recordSell(itemId, filled, details.getSpent());
         }
+        recordTradeHistory(order, details, filled, now);
+    }
+
+    /**
+     * Appends one immutable trade-history record to Firestore for this completed fill (see
+     * PROPOSAL.md's Firestore-persistence addendum: a new, additive collection - nothing tracked
+     * this as its own history locally before). Uses {@code order.getSubmittedPrice()} (the
+     * actual price offered to the GE, per-unit) rather than {@code order.getPrice()} (what was
+     * originally requested) for pricePerUnit, and {@code details.getSpent()} (the real GP that
+     * changed hands for this offer, same source {@link #recordCostBasis} itself uses) for
+     * totalGp - a partial fill or a fill at a different clearing price than requested should be
+     * logged at what actually happened, not what was asked for. Best-effort/no-op if cloud sync
+     * is disabled - this never blocks or affects local state.
+     */
+    private void recordTradeHistory(PPOFlipperOrder order, GrandExchangeOfferDetails details, int filled, long timestampMillis) {
+        if (!firestoreSync.isEnabled()) return;
+        int pricePerUnit = order.getSubmittedPrice() > 0 ? order.getSubmittedPrice() : order.getPrice();
+        firestoreSync.pushTradeHistoryAsync(order.getAction().name(), details.getItemId(), order.getItemName(),
+            filled, pricePerUnit, details.getSpent(), timestampMillis);
     }
 
     private void markSkipped(PPOFlipperOrder order, String reason) {

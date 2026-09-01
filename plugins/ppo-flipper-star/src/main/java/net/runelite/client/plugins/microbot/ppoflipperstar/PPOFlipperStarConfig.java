@@ -210,4 +210,41 @@ public interface PPOFlipperStarConfig extends Config {
     default boolean shadowMode() {
         return true;
     }
+
+    @ConfigSection(
+        name = "Cloud sync",
+        description = "Firestore-backed persistence: portfolio, buy-limit ledger, watchlist, and trade history " +
+            "synced under this RuneScape account's own accountHash, so state follows the account across " +
+            "sessions/machines. Local ConfigManager storage always stays as a fast/offline cache - turning this " +
+            "off just means it's never reconciled against a cloud copy.",
+        position = 4,
+        closedByDefault = true
+    )
+    String cloudSyncSection = "cloudSync";
+
+    @ConfigItem(
+        keyName = "firestoreSyncEnabled",
+        name = "Enable Firestore sync",
+        description = "Pull portfolio/buy-limit/watchlist state from Firestore on startup (Firestore wins as " +
+            "source of truth when reachable) and push every local mutation back to it in the background, best-" +
+            "effort. A failed/unreachable Firestore call never blocks local operation - it only logs a warning " +
+            "and this session runs local-only. Off runs purely on local ConfigManager storage, exactly as before " +
+            "this feature existed.",
+        position = 0,
+        section = cloudSyncSection
+    )
+    default boolean firestoreSyncEnabled() {
+        return true;
+    }
+
+    @ConfigItem(
+        keyName = "firestoreServiceAccountPath",
+        name = "Service account JSON path",
+        description = "Absolute path to the Firebase service account key file. Never share this file or commit it to git.",
+        position = 1,
+        section = cloudSyncSection
+    )
+    default String firestoreServiceAccountPath() {
+        return "/Users/b1llstar/Documents/GitHub/BotStar/ppoflipperopus-firebase-adminsdk-fbsvc-4e78117dde.json";
+    }
 }

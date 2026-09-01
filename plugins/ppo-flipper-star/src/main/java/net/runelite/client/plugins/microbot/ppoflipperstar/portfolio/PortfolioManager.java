@@ -9,6 +9,8 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.microbot.ppoflipperstar.BankManager;
 import net.runelite.client.plugins.microbot.ppoflipperstar.InventoryManager;
 import net.runelite.client.plugins.microbot.ppoflipperstar.PPOFlipperStarConfig;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreClient;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Inject;
@@ -59,6 +61,7 @@ public class PortfolioManager {
     private final InventoryManager inventoryManager;
     private final BankManager bankManager;
     private final PPOFlipperStarConfig config;
+    private final PPOFlipperStarFirestoreSync firestoreSync;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final Gson gson = new Gson();
 
@@ -66,12 +69,47 @@ public class PortfolioManager {
 
     @Inject
     public PortfolioManager(ConfigManager configManager, InventoryManager inventoryManager,
-                             BankManager bankManager, PPOFlipperStarConfig config) {
+                             BankManager bankManager, PPOFlipperStarConfig config,
+                             PPOFlipperStarFirestoreSync firestoreSync) {
         this.configManager = configManager;
         this.inventoryManager = inventoryManager;
         this.bankManager = bankManager;
         this.config = config;
+        this.firestoreSync = firestoreSync;
         this.ledger = loadLedger();
+    }
+
+    /**
+     * Reconciles the local ledger against a Firestore pull, Firestore winning per this project's
+     * "Firestore is the source of truth" decision - see {@link PPOFlipperStarFirestoreSync}'s
+     * javadoc for when/how this is called (once at startup, best-effort, never blocking local
+     * operation if the pull itself failed). A remote entry fully replaces the local entry for
+     * that item id; local items with no remote counterpart are left untouched (Firestore not
+     * having seen them yet, e.g. their very first push hasn't completed) rather than deleted.
+     */
+    public synchronized void reconcileFromFirestore(Map<Integer, PPOFlipperStarFirestoreClient.RemotePortfolioEntry> remoteEntries) {
+        if (remoteEntries == null || remoteEntries.isEmpty()) return;
+        for (PPOFlipperStarFirestoreClient.RemotePortfolioEntry remote : remoteEntries.values()) {
+            CostBasisEntry entry = new CostBasisEntry(remote.itemId);
+            if (remote.quantityHeld > 0) {
+                entry.recordBuy(remote.quantityHeld, remote.totalCostBasis, remote.weightedAcquisitionTimestampMillis);
+            }
+            if (remote.realizedProfit != 0) {
+                entry.addRealizedProfit(remote.realizedProfit);
+            }
+            ledger.put(remote.itemId, entry);
+        }
+        persistLedger();
+        log.info("PPOFlipperStar: reconciled {} portfolio entr{} from Firestore.", remoteEntries.size(),
+            remoteEntries.size() == 1 ? "y" : "ies");
+    }
+
+    private void pushToFirestore(int itemId) {
+        if (!firestoreSync.isEnabled()) return;
+        CostBasisEntry entry = ledger.get(itemId);
+        if (entry == null) return;
+        firestoreSync.pushPortfolioEntryAsync(itemId, entry.getQuantityHeld(), entry.getTotalCostBasis(),
+            entry.getRealizedProfit(), entry.getWeightedAcquisitionTimestampMillis());
     }
 
     private Map<Integer, CostBasisEntry> loadLedger() {
@@ -129,6 +167,7 @@ public class PortfolioManager {
         if (quantity <= 0) return;
         ledger.computeIfAbsent(itemId, CostBasisEntry::new).recordBuy(quantity, totalSpent, timestampMillis);
         persistLedger();
+        pushToFirestore(itemId);
     }
 
     /** Records a completed sell fill against the cost-basis ledger and persists it, realizing profit/loss on the sold portion. */
@@ -136,6 +175,7 @@ public class PortfolioManager {
         if (quantity <= 0) return;
         ledger.computeIfAbsent(itemId, CostBasisEntry::new).recordSell(quantity, totalReceived);
         persistLedger();
+        pushToFirestore(itemId);
     }
 
     public long getRealizedProfit(int itemId) {

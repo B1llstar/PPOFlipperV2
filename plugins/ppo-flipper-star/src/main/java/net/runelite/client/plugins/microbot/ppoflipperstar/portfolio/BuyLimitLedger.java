@@ -5,6 +5,8 @@ import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreClient;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -44,6 +46,7 @@ public class BuyLimitLedger {
     public static final long WINDOW_MILLIS = 4L * 60 * 60 * 1000;
 
     private final ConfigManager configManager;
+    private final PPOFlipperStarFirestoreSync firestoreSync;
     private final Gson gson = new Gson();
 
     private final Map<Integer, List<PurchaseEvent>> events;
@@ -59,9 +62,45 @@ public class BuyLimitLedger {
     }
 
     @Inject
-    public BuyLimitLedger(ConfigManager configManager) {
+    public BuyLimitLedger(ConfigManager configManager, PPOFlipperStarFirestoreSync firestoreSync) {
         this.configManager = configManager;
+        this.firestoreSync = firestoreSync;
         this.events = loadEvents();
+    }
+
+    /**
+     * Reconciles the local rolling-window event lists against a Firestore pull, Firestore
+     * winning per this project's "Firestore is the source of truth" decision. A remote entry
+     * fully replaces the local event list for that item id (both are the same kind of raw
+     * per-fill event log, so a straight replace is correct - no merge logic needed). Local items
+     * with no remote counterpart are left untouched.
+     */
+    public synchronized void reconcileFromFirestore(Map<Integer, PPOFlipperStarFirestoreClient.RemoteBuyLimitEntry> remoteEntries) {
+        if (remoteEntries == null || remoteEntries.isEmpty()) return;
+        for (PPOFlipperStarFirestoreClient.RemoteBuyLimitEntry remote : remoteEntries.values()) {
+            List<PurchaseEvent> restored = new ArrayList<>();
+            int count = Math.min(remote.quantities.size(), remote.timestampsMillis.size());
+            for (int i = 0; i < count; i++) {
+                restored.add(new PurchaseEvent(remote.quantities.get(i), remote.timestampsMillis.get(i)));
+            }
+            events.put(remote.itemId, restored);
+        }
+        persistEvents();
+        log.info("PPOFlipperStar: reconciled {} buy-limit-ledger entr{} from Firestore.", remoteEntries.size(),
+            remoteEntries.size() == 1 ? "y" : "ies");
+    }
+
+    private void pushToFirestore(int itemId) {
+        if (!firestoreSync.isEnabled()) return;
+        List<PurchaseEvent> itemEvents = events.get(itemId);
+        if (itemEvents == null) return;
+        List<Integer> quantities = new ArrayList<>();
+        List<Long> timestamps = new ArrayList<>();
+        for (PurchaseEvent event : itemEvents) {
+            quantities.add(event.quantity);
+            timestamps.add(event.timestampMillis);
+        }
+        firestoreSync.pushBuyLimitEntryAsync(itemId, quantities, timestamps);
     }
 
     private Map<Integer, List<PurchaseEvent>> loadEvents() {
@@ -89,6 +128,7 @@ public class BuyLimitLedger {
         itemEvents.add(new PurchaseEvent(quantity, timestampMillis));
         pruneExpired(itemEvents, timestampMillis);
         persistEvents();
+        pushToFirestore(itemId);
     }
 
     /** Total quantity of an item bought within the trailing {@link #WINDOW_MILLIS} of nowMillis - what still counts against its GE buy limit right now. Prunes expired events as a side effect so the ledger doesn't grow unbounded. */

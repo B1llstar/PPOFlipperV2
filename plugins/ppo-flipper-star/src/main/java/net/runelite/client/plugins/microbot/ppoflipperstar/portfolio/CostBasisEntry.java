@@ -78,4 +78,15 @@ public class CostBasisEntry {
         quantityHeld -= soldFromTrackedPosition;
         totalCostBasis -= costOfSoldPortion;
     }
+
+    /**
+     * Adds a realized-profit delta directly, with no quantity/cost-basis change - used only when
+     * reconciling from a Firestore pull (see {@code PortfolioManager#reconcileFromFirestore}),
+     * where the remote document's realizedProfit is the authoritative total and this entry was
+     * just freshly constructed from the remote quantityHeld/totalCostBasis via {@link #recordBuy}
+     * (which does not touch realizedProfit itself, so there's no double-counting to worry about).
+     */
+    public void addRealizedProfit(long delta) {
+        realizedProfit += delta;
+    }
 }

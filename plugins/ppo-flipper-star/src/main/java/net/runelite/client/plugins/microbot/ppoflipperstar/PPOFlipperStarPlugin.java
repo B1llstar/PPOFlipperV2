@@ -6,6 +6,7 @@ import net.runelite.api.MenuEntry;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -13,6 +14,8 @@ import net.runelite.client.plugins.grandexchange.GrandExchangePlugin;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.AccountIdentity;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.ui.ClientToolbar;
@@ -68,6 +71,15 @@ public class PPOFlipperStarPlugin extends Plugin {
     @Inject
     private ClientToolbar clientToolbar;
 
+    @Inject
+    private EventBus eventBus;
+
+    @Inject
+    private AccountIdentity accountIdentity;
+
+    @Inject
+    private PPOFlipperStarFirestoreSync firestoreSync;
+
     private PPOFlipperStarPanel panel;
     private NavigationButton navButton;
 
@@ -83,6 +95,14 @@ public class PPOFlipperStarPlugin extends Plugin {
         // The script only starts when the panel's Execute button is clicked - enabling the
         // plugin just makes the sidebar panel and overlay available, same lifecycle as
         // ge-star-v2.
+
+        // AccountIdentity resolves Client.getAccountHash() reactively off GameStateChanged - it
+        // needs to be registered on the event bus itself (it's a plain helper, not a Plugin
+        // subclass, which RuneLite would otherwise auto-register).
+        eventBus.register(accountIdentity);
+
+        firestoreSync.start(config);
+        startCloudReconcile();
     }
 
     @Override
@@ -90,6 +110,40 @@ public class PPOFlipperStarPlugin extends Plugin {
         script.shutdown();
         removePanel();
         overlayManager.remove(overlay);
+        firestoreSync.stop();
+        eventBus.unregister(accountIdentity);
+    }
+
+    /**
+     * Best-effort, one-shot startup pull of every Firestore collection for this account,
+     * reconciling each manager's local state against it (Firestore wins per this project's
+     * "Firestore is the source of truth" decision - see each manager's
+     * {@code reconcileFromFirestore}). Runs on its own throwaway background thread, never the
+     * EDT or the script's tick thread, since {@link PPOFlipperStarFirestoreSync#pullAndReconcile}
+     * blocks on network I/O (and, before that, on resolving the account hash, which itself may
+     * need to wait for login). A failed/unreachable pull (or no account hash available yet, e.g.
+     * not logged in) is logged and this plugin simply proceeds local-only for the session - never
+     * blocks plugin startup itself, since this thread is fire-and-forget.
+     */
+    private void startCloudReconcile() {
+        if (!firestoreSync.isEnabled()) return;
+
+        firestoreSync.markReconcilePending();
+        Thread reconcileThread = new Thread(() -> {
+            try {
+                firestoreSync.pullAndReconcile().ifPresent(result -> {
+                    portfolio.reconcileFromFirestore(result.portfolio);
+                    buyLimitLedger.reconcileFromFirestore(result.buyLimitLedger);
+                    watchlistManager.reconcileFromFirestore(result.watchlist);
+                });
+            } catch (Exception e) {
+                log.warn("PPOFlipperStar: startup Firestore reconcile failed, continuing local-only - {}", e.getMessage());
+            } finally {
+                firestoreSync.clearReconcilePending();
+            }
+        }, "PPOFlipperStar-StartupReconcile");
+        reconcileThread.setDaemon(true);
+        reconcileThread.start();
     }
 
     private void addPanel() {
