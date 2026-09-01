@@ -3,11 +3,13 @@
 A self-contained Microbot plugin, sitting alongside `ge-star-v2` and `flipper-star`
 under `plugins/`, that owns every mechanical aspect of GE flipping (buy, sell,
 collect, inventory, bank, gold, portfolio) *and* is driven by a PPO reinforcement-
-learning policy trained in Python, served locally, and consulted every decision
-tick. No dependency on `ge-star-v2` or `flipper-star` — this is a new plugin built
-from scratch, using the same underlying Microbot primitives those two already use,
-but with its own execution/state code and a genuinely different brain (PPO, not
-gradient-boosted trees).
+learning policy trained in Python and consulted every decision tick over Firestore
+(§3.6, §4) — not a local server, since one inference process is meant to eventually
+serve multiple RuneLite client instances across different machines, not just the
+one it happens to share a computer with. No dependency on `ge-star-v2` or
+`flipper-star` — this is a new plugin built from scratch, using the same underlying
+Microbot primitives those two already use, but with its own execution/state code
+and a genuinely different brain (PPO, not gradient-boosted trees).
 
 Package: `net.runelite.client.plugins.microbot.ppoflipperstar`
 Gradle module: `plugins/ppo-flipper-star`
@@ -47,7 +49,16 @@ RuneLite gives every sideloaded jar its own `ClassLoader`.
   a partial fill needs correct cost-basis math), same Microbot APIs to solve them
   with, but implemented directly inside PPOFlipperStar so it has zero runtime
   dependency on any other plugin being installed or running.
-- No Firestore/web-sync layer, no old credentials file referenced anywhere.
+
+**Addendum (added after milestone 1+2 shipped): Firestore persistence.**
+Unlike the original "no Firestore" stance above, PPOFlipperStar *does* now use
+Firestore — but as a durable cross-session/cross-account store the plugin owns
+itself, not the old web-UI-sync design. It reuses the existing `ppoflipperopus`
+Firebase project and service-account credential (still gitignored, never
+committed) purely for infrastructure convenience; it does not read or write
+`ge-star-v2`'s `orders`/`buyLimits` collections, and shares nothing but the
+project itself. See §4 for the schema and §3.6 (revised) for how this same
+mechanism doubles as the model↔plugin communication channel.
 
 ---
 
@@ -76,18 +87,20 @@ RuneLite gives every sideloaded jar its own `ClassLoader`.
 │        state machine: IDLE → GOING_TO_GE → OBSERVE → DECIDE →        │
 │        SUBMIT → MONITOR → COLLECT → (loop)                           │
 │        "DECIDE" = builds a state vector from all Managers above,     │
-│        POSTs it to the local Python inference server, gets back      │
-│        one action per tracked item, executes via the other Managers  │
+│        writes it to Firestore, gets back one action per tracked      │
+│        item, executes via the other Managers (see §3.6)              │
 │                                                                       │
 └───────────────────────────┬───────────────────────────────────────────┘
-                             │ localhost HTTP (127.0.0.1:8600), JSON
-                             │ state in, {action, qty, price, confidence} out
+                             │ Firestore: accounts/{accountHash}/decision/
+                             │ request (state) ↔ response (actions) - §3.6
 ┌───────────────────────────▼───────────────────────────────────────────┐
-│  Python inference service (data/service/ppo_server.py)                │
+│  Python inference worker (data/ppo/inference_worker.py)               │
 │   - loads a trained checkpoint (.pth) at startup                     │
-│   - stateless per request: state vector → policy network → action    │
-│   - hot-reloadable: swap checkpoint without restarting the plugin    │
-│   - binds 127.0.0.1 only, same pattern as the existing main.py        │
+│   - Firestore snapshot listener per watched account, no polling      │
+│   - one process can serve many accounts/machines at once - this is   │
+│     why Firestore replaced the original same-machine-only local HTTP │
+│     design (see §3.6's superseded-design note)                       │
+│   - hot-reloadable: swap checkpoint without restarting listeners     │
 └───────────────────────────┬───────────────────────────────────────────┘
                              │ (offline, not at inference time)
 ┌───────────────────────────▼───────────────────────────────────────────┐
@@ -100,9 +113,12 @@ RuneLite gives every sideloaded jar its own `ClassLoader`.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-Two processes, one machine: the RuneLite client (with the plugin) and a small
-local Python server. The plugin never imports PyTorch or does any tensor math —
-it collects state, calls the server, executes the returned action. This keeps
+The RuneLite client (with the plugin) and the Python inference worker are
+separate processes that need not share a machine — Firestore is the
+transport between them (see §3.6), which is what makes a future
+one-server-many-clients deployment possible without a redesign. The plugin
+never imports PyTorch or does any tensor math — it writes state, waits for
+Firestore to hand back an action, executes it. This keeps
 the Java side simple and lets the model evolve (architecture changes, retraining)
 without ever touching plugin code.
 
@@ -202,9 +218,11 @@ IDLE → GOING_TO_GE → OBSERVE → DECIDE → SUBMITTING → MONITORING → CO
 
 - **OBSERVE**: builds the state vector (§3.2) from every manager above, for
   every watchlisted item plus currently-held positions.
-- **DECIDE**: one HTTP call to the local inference server per tick (batched —
-  all watchlisted items in one request, not one call per item), gets back an
-  action per item: `BUY(qty, price) | SELL(qty, price) | HOLD`.
+- **DECIDE**: writes one `decision/request` document per tick (batched — all
+  watchlisted items in one request, not one write per item — see §3.6), then
+  waits (bounded by a timeout, defaulting to HOLD on every item if it's
+  exceeded) for the matching `decision/response`: an action per item —
+  `BUY(qty, price) | SELL(qty, price) | HOLD`.
 - **SUBMITTING**: each non-HOLD action passes through `Guardrails.check()`
   first (identical enforcement whether the order came from the model or a
   human's right-click) before hitting `Rs2GrandExchange.buyItem`/`sellItem`.
@@ -224,11 +242,14 @@ Sections mirroring `GeStarV2Config`'s structure:
 - **Guardrails**: guardrails master switch, max GP/session, max qty/item, max
   price deviation %, stop-on-breach.
 - **Behavior**: max concurrent offers, collect-to-bank, decision-tick interval.
-- **PPO**: inference server URL (default `http://127.0.0.1:8600`), watchlist
+- **PPO**: decision-response timeout (how long to wait for Firestore's
+  `decision/response` before defaulting to HOLD, see §3.6), watchlist
   management, model confidence threshold below which the plugin forces HOLD
   regardless of the model's suggested action, "shadow mode" (model decides but
   every action requires a manual click to confirm — the recommended way to
   trial a new checkpoint before trusting it unattended).
+- **Cloud sync** (already implemented — see the Firestore-persistence
+  addendum in §0): `firestoreSyncEnabled`, `firestoreServiceAccountPath`.
 
 ---
 
@@ -347,25 +368,67 @@ Given the answers: one rented-GPU run, not an ongoing pipeline; 6 months of
   per-item Python loops; the plan is to profile the env after a first short
   (~10 minute) run before committing to the full budget.
 
-### 3.6 Inference server (`data/service/ppo_server.py`)
+### 3.6 Model↔plugin communication: Firestore, not local HTTP (revised)
 
-Same shape as the existing `data/service/main.py` (FastAPI, binds
-`127.0.0.1` only, loads a model file at startup) but serving the PPO policy
-instead of LightGBM:
+**Superseded design note:** earlier drafts of this proposal (and the
+milestone-order table in §6) described a local HTTP inference server
+(`data/service/ppo_server.py`, plugin POSTs state, gets an action back over
+`127.0.0.1`) on the reasoning that same-machine IPC should be fast and simple.
+That assumption no longer holds: the actual goal is a *central inference
+server managing multiple RuneLite client instances across different
+machines* — there is no shared localhost between them, so local HTTP doesn't
+reach. Firestore (already integrated for portfolio/ledger/watchlist/trade-
+history persistence — see §4) is repurposed as the transport instead. Message
+volume is trivial at any realistic scale (low hundreds to a couple thousand
+writes/hour even at ten simultaneous accounts), so Firestore's usual
+read/write-cost concerns don't apply here.
 
-- `POST /decide` — body: array of per-item state vectors (built by the plugin's
-  `OBSERVE` phase); response: array of `{itemId, action, quantity, price,
-  confidence}`.
-- `GET /health` — current loaded checkpoint path/version, for the plugin to
-  display in its panel.
-- `POST /reload` — hot-swap to a different checkpoint file without restarting
-  the process (so a newly-trained checkpoint can be tried without dropping the
-  running plugin's connection).
-- Deliberately **stateless per request** on the serving side — all position/
-  holding-duration state the policy needs is included in the state vector the
-  plugin sends, computed from the plugin's own `PortfolioManager`. This keeps
-  the server simple and means the plugin's managers remain the single source
-  of truth for "what do I actually hold," never duplicated in Python.
+**Schema** (new, under the same `accounts/{accountHash}/...` root as §4's
+other collections):
+- `accounts/{accountHash}/decision/request` — **one document, overwritten
+  every decision tick** (not one-per-tick history — see below for why).
+  Written by the plugin. Fields: `tickId` (a monotonically increasing counter
+  or timestamp, used to pair this request with its response), `items` (array
+  of per-watchlisted-item state vectors — the same features §3.2 defines:
+  spread/volatility/volume/momentum at 1h/6h/24h, current position size,
+  unrealized P&L%, holding duration, buy-limit headroom, available GP, free
+  GE slots), `writtenAt` (timestamp).
+- `accounts/{accountHash}/decision/response` — one document, overwritten by
+  the Python worker once inference completes. Fields: `tickId` (echoes the
+  request it answered — the plugin ignores a response whose `tickId` doesn't
+  match what it most recently sent, so a slow/stale answer is never acted
+  on), `actions` (array of `{itemId, action, quantity, price, confidence}`),
+  `checkpointVersion` (which `.pth`/commit produced this, for the panel to
+  display), `answeredAt` (timestamp).
+
+**Why overwritten "latest" docs, not one-doc-per-tick history:** the
+request/response pair is a live handshake, not a record meant to be reviewed
+later — `tradeHistory` (§4) already serves as the actual durable log of what
+happened. A doc-per-tick design would need a separate cleanup/TTL mechanism
+for no real benefit at this volume.
+
+**Flow per decision tick** (replaces the old DECIDE-phase description):
+1. Plugin's `OBSERVE` phase builds the state vector and writes it to
+   `decision/request` with a fresh `tickId`.
+2. A persistent Firestore snapshot listener on the Python side (one process
+   can watch many accounts' `decision/request` docs at once — no polling
+   needed) fires, runs the loaded PPO checkpoint, writes `decision/response`.
+3. The plugin either holds its own snapshot listener on `decision/response`
+   or short-polls for a `tickId` match, bounded by a timeout (a few seconds).
+   If no matching response arrives in time, that tick's decision defaults to
+   HOLD for every item and the loop moves on — a slow/unreachable model must
+   never block the trading loop.
+4. Guardrails (§2.2) still apply to every action Firestore returns, exactly
+   as they do to a manual order — the model is never the last line of
+   defense against a bad trade.
+
+**One worker per account, to avoid a race:** if a central server eventually
+watches many accounts, each account's `decision/request` stream must have
+exactly one Python worker answering it — two workers racing to write the
+same account's `decision/response` is a correctness bug (whichever writes
+last wins, but there's no guarantee it processed the more recent request).
+Simplest enforcement: shard accounts across workers by `accountHash`, not by
+having every worker listen to every account.
 
 ### 3.7 Going from backtest-good to live-safe
 
@@ -388,7 +451,49 @@ safe to run unattended with real GP. Recommended rollout, gated by the panel's
 
 ---
 
-## 4. Build system integration
+## 4. Firestore persistence and model↔plugin transport
+
+Implemented in milestone 2.5, ahead of the original build order (see §6) —
+noted here as its own section since it's referenced from multiple other
+places in this document (§0's addendum, §3.6, §6's Decisions).
+
+Project: reuses the existing `ppoflipperopus` Firebase project and its
+service-account credential (gitignored, never committed) — infrastructure
+reuse only, no data/collection sharing with `ge-star-v2`'s `orders`/
+`buyLimits` collections or the shared `tradableItems` reference list.
+
+Every document lives under `accounts/{accountHash}/...`, keyed by
+`Client.getAccountHash()` (a stable Jagex-issued account identifier, not a
+display name or a locally-generated UUID — chosen specifically so history
+follows the actual RuneScape account across reinstalls and, eventually,
+across machines). All collections are admin-only in `firestore.rules`
+(`allow read, write: if false` — written directly via the service-account
+credential, which bypasses rules the same way Cloud Functions do; no client
+SDK read/write path exists or is needed).
+
+| Collection | Purpose | Lifecycle |
+|---|---|---|
+| `accounts/{hash}/portfolio/{itemId}` | Cost-basis ledger: quantity held, average cost, realized P&L, acquisition timestamp | Durable — Firestore is the source of truth, local `ConfigManager` is the offline cache |
+| `accounts/{hash}/buyLimitLedger/{itemId}` | Rolling 4h GE buy-limit usage (per-event quantities/timestamps) | Durable, same as portfolio |
+| `accounts/{hash}/watchlist/{itemId}` | Which items the autonomous policy may act on (doc existence = membership) | Durable, same as portfolio |
+| `accounts/{hash}/tradeHistory/{autoId}` | Immutable log, one doc per completed BUY/SELL fill (action, item, qty, actual submitted/filled price, GP, timestamp) | Append-only, kept forever — this is the actual "browse my history" record |
+| `accounts/{hash}/decision/request` | Model↔plugin transport (§3.6): current state vector for every watchlisted item | **Transient** — one doc, overwritten every decision tick |
+| `accounts/{hash}/decision/response` | Model↔plugin transport (§3.6): the policy's action per item, tagged with the `tickId` it answered | **Transient** — one doc, overwritten every decision tick |
+
+**Sync model** (portfolio/buyLimitLedger/watchlist): on startup, a best-effort
+pull-and-reconcile — a successful Firestore read fully replaces the
+corresponding local entry (Firestore wins); a failed/unreachable pull logs a
+warning and the plugin proceeds local-only for that session, never blocking
+startup. Every local mutation (a recorded buy/sell, a ledger update, a
+watchlist add/remove) pushes to Firestore asynchronously on a background
+executor — never blocking the script tick or the EDT. A safety guard holds
+order submission for a tick while the startup reconcile is still in flight,
+so a trade can't race ahead of — and then get silently overwritten by — the
+pull's full-replace.
+
+---
+
+## 5. Build system integration
 
 New Gradle module, following `ge-star-v2`'s exact shape:
 
@@ -397,26 +502,34 @@ New Gradle module, following `ge-star-v2`'s exact shape:
 - `settings.gradle` — add `include ':plugins:ppo-flipper-star'`.
 - `plugins/ppo-flipper-star/src/main/java/net/runelite/client/plugins/microbot/ppoflipperstar/` —
   source root.
-- Python side lives under `data/ppo/` (training) and extends `data/service/`
-  (inference server), consistent with where the existing pipeline/service code
-  already lives — no new top-level directory needed.
+- Python side lives under `data/ppo/`: the training environment/loop, plus
+  `data/ppo/inference_worker.py` (the Firestore-listener inference process —
+  see §3.6; deliberately not placed under `data/service/`, since that
+  directory is `flipper-star`'s LightGBM HTTP scoring service and this is a
+  different mechanism entirely, not an extension of it).
 
 ---
 
-## 5. Build order (suggested milestones)
+## 6. Build order (suggested milestones)
 
-1. **Scaffold + manual mechanics**: plugin skeleton, config, panel, all
+1. **Scaffold + manual mechanics** ✅ — plugin skeleton, config, panel, all
    Managers, right-click menu, manual buy/sell/collect fully working with a
    human clicking every action. Fully useful on its own, and the thing the RL
    layer will be validated against.
-2. **Watchlist + guardrails**: the safety/scoping layer the autonomous mode
-   will run inside.
-3. **Environment + PPO training loop**: build `GEMarketEnv`, get a PPO agent
-   training against it (even before the inference server or plugin-side wiring
-   exists) — validate the reward curve moves in the right direction on a short
-   run first.
-4. **Inference server + plugin wiring**: connect `PPOFlipperStarScript`'s
-   DECIDE phase to a running server with an early checkpoint, in shadow mode.
+2. **Watchlist + guardrails** ✅ — the safety/scoping layer the autonomous
+   mode will run inside.
+2.5. **Firestore persistence** ✅ (added ahead of the original order —
+   portfolio/buy-limit-ledger/watchlist/trade-history now sync across
+   sessions via the account's stable `Client.getAccountHash()`, per the §0
+   addendum. This is also the mechanism §3.6 repurposes for model↔plugin
+   communication, which is why it landed before milestone 3/4.)
+3. **Environment + PPO training loop** — build `GEMarketEnv`, get a PPO agent
+   training against it (even before the inference worker or plugin-side
+   wiring exists) — validate the reward curve moves in the right direction on
+   a short run first. *(next up)*
+4. **Inference worker + plugin wiring**: connect `PPOFlipperStarScript`'s
+   DECIDE phase to a running Firestore-listening inference worker with an
+   early checkpoint, in shadow mode.
 5. **Full training run** (§3.5) once the env/reward is validated as
    bug-free on a short run.
 6. **Shadow mode → gated live rollout** (§3.7).
@@ -436,3 +549,13 @@ New Gradle module, following `ge-star-v2`'s exact shape:
   validation reward) plus the last few periodic checkpoints once a run
   finishes; older intermediate checkpoints from the same run are deleted
   rather than kept indefinitely.
+- **Model↔plugin transport**: Firestore (§3.6), not local HTTP — driven by an
+  explicit future requirement, not a default assumption: a single central
+  inference server is meant to eventually manage multiple RuneLite client
+  instances across different machines, which local HTTP (same-machine only)
+  can't reach.
+- **Decision document lifecycle**: transient — `decision/request` and
+  `decision/response` are each one document per account, overwritten every
+  tick, not a growing per-tick history. `tradeHistory` (§4) remains the
+  actual durable record of what happened; the decision docs are just the
+  live handshake. No cleanup/TTL job needed as a result.
