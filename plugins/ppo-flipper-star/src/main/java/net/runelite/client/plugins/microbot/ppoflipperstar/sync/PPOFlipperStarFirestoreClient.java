@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Thin REST client over PPOFlipperStar's own Firestore collections, all rooted at
@@ -31,6 +32,10 @@ import java.util.Map;
  *   <li>{@code accounts/{accountHash}/buyLimitLedger/{itemId}} - mirrors {@code BuyLimitLedger}'s per-item purchase-event list</li>
  *   <li>{@code accounts/{accountHash}/watchlist/{itemId}} - one doc per watched item id</li>
  *   <li>{@code accounts/{accountHash}/tradeHistory/{autoId}} - append-only fill log, auto-ID documents</li>
+ *   <li>{@code accounts/{accountHash}/decision/request} - one transient doc, overwritten every
+ *   decision tick, written by this class on behalf of the plugin (PROPOSAL.md §3.6/§4)</li>
+ *   <li>{@code accounts/{accountHash}/decision/response} - one transient doc, overwritten by the
+ *   Python inference worker; read (not written) by this class</li>
  * </ul>
  *
  * <p>Every method here is a synchronous blocking HTTP call - callers (see
@@ -276,6 +281,203 @@ public class PPOFlipperStarFirestoreClient {
     }
 
     // ---------------------------------------------------------------------------------------
+    // decision/request, decision/response - model<->plugin transport (PROPOSAL.md §3.6/§4)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * One per-watchlisted-item state vector packed into a {@code decision/request} write - field
+     * names/shape here are exactly what {@code data/ppo/inference_worker.py}'s
+     * {@code _build_observation_row}/{@code _action_to_order} expect on the Python side (see that
+     * module's docstring). {@code marketFeatures} carries the 13 raw (pre-normalization)
+     * {@code MARKET_FEATURE_COLUMNS} values - normalization (mean_price_* and volatility_* rescaled
+     * against {@code midPrice}, volume_* log1p'd) happens on the Python side via
+     * {@code env.py}'s own {@code _normalize_market_features}, not here, so the wire format stays
+     * a plain mirror of whatever the plugin can compute rather than a second, easy-to-drift
+     * reimplementation of that normalization math in Java.
+     */
+    public static final class DecisionRequestItem {
+        public final int itemId;
+        public final Map<String, Double> marketFeatures;
+        public final double midPrice;
+        public final double avgLowPrice;
+        public final double avgHighPrice;
+        public final double positionSizeNorm;
+        public final double unrealizedPct;
+        public final double holdingDuration;
+        public final double limitHeadroomUsed;
+        public final double availableGpNorm;
+        public final double freeSlotsNorm;
+        public final int buyLimit;
+        public final int limitHeadroomQty;
+        public final int heldQuantity;
+
+        public DecisionRequestItem(int itemId, Map<String, Double> marketFeatures, double midPrice,
+                                    double avgLowPrice, double avgHighPrice, double positionSizeNorm,
+                                    double unrealizedPct, double holdingDuration, double limitHeadroomUsed,
+                                    double availableGpNorm, double freeSlotsNorm, int buyLimit,
+                                    int limitHeadroomQty, int heldQuantity) {
+            this.itemId = itemId;
+            this.marketFeatures = marketFeatures;
+            this.midPrice = midPrice;
+            this.avgLowPrice = avgLowPrice;
+            this.avgHighPrice = avgHighPrice;
+            this.positionSizeNorm = positionSizeNorm;
+            this.unrealizedPct = unrealizedPct;
+            this.holdingDuration = holdingDuration;
+            this.limitHeadroomUsed = limitHeadroomUsed;
+            this.availableGpNorm = availableGpNorm;
+            this.freeSlotsNorm = freeSlotsNorm;
+            this.buyLimit = buyLimit;
+            this.limitHeadroomQty = limitHeadroomQty;
+            this.heldQuantity = heldQuantity;
+        }
+    }
+
+    /**
+     * Overwrites the single {@code decision/request} document for this account (PROPOSAL.md §3.6:
+     * "one document, overwritten every decision tick, not one-per-tick history") with a fresh
+     * {@code tickId} and the full watchlisted-items state vector batch. Uses PUT-via-PATCH-with-no-
+     * mask semantics (a plain PATCH with no {@code updateMask} query param replaces every field of
+     * the document, unlike {@link #patchDocument} elsewhere in this class which always scopes a
+     * mask) since the whole request doc is meant to be fully replaced every tick, not merged.
+     */
+    public void putDecisionRequest(long accountHash, long tickId, List<DecisionRequestItem> items)
+        throws IOException, InterruptedException {
+        JsonArray itemsArray = new JsonArray();
+        for (DecisionRequestItem item : items) {
+            JsonObject itemFields = new JsonObject();
+            itemFields.add("itemId", integerValue(item.itemId));
+            itemFields.add("marketFeatures", mapOfDoubleValues(item.marketFeatures));
+            itemFields.add("midPrice", doubleValue(item.midPrice));
+            itemFields.add("avgLowPrice", doubleValue(item.avgLowPrice));
+            itemFields.add("avgHighPrice", doubleValue(item.avgHighPrice));
+            itemFields.add("positionSizeNorm", doubleValue(item.positionSizeNorm));
+            itemFields.add("unrealizedPct", doubleValue(item.unrealizedPct));
+            itemFields.add("holdingDuration", doubleValue(item.holdingDuration));
+            itemFields.add("limitHeadroomUsed", doubleValue(item.limitHeadroomUsed));
+            itemFields.add("availableGpNorm", doubleValue(item.availableGpNorm));
+            itemFields.add("freeSlotsNorm", doubleValue(item.freeSlotsNorm));
+            itemFields.add("buyLimit", integerValue(item.buyLimit));
+            itemFields.add("limitHeadroomQty", integerValue(item.limitHeadroomQty));
+            itemFields.add("heldQuantity", integerValue(item.heldQuantity));
+
+            JsonObject itemMapValue = new JsonObject();
+            itemMapValue.add("fields", itemFields);
+            JsonObject itemWrapper = new JsonObject();
+            itemWrapper.add("mapValue", itemMapValue);
+            itemsArray.add(itemWrapper);
+        }
+
+        JsonObject fields = new JsonObject();
+        fields.add("tickId", integerValue(tickId));
+        JsonObject itemsWrapper = new JsonObject();
+        itemsWrapper.add("arrayValue", wrapArrayValues(itemsArray));
+        fields.add("items", itemsWrapper);
+        fields.add("writtenAt", timestampValueNow());
+
+        JsonObject body = new JsonObject();
+        body.add("fields", fields);
+
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(accountRoot(accountHash) + "/decision/request"))
+            .header("Authorization", "Bearer " + auth.getAccessToken())
+            .header("Content-Type", "application/json")
+            .timeout(Duration.ofSeconds(10))
+            .method("PATCH", HttpRequest.BodyPublishers.ofString(body.toString()))
+            .build();
+
+        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IOException("put decision request failed: HTTP " + response.statusCode() + " - " + response.body());
+        }
+    }
+
+    /** One proposed action from the model's {@code decision/response}, per PROPOSAL.md §3.6's {@code {itemId, action, quantity, price, confidence}} schema. */
+    public static final class DecisionAction {
+        public final int itemId;
+        public final String action;
+        public final int quantity;
+        public final int price;
+        public final double confidence;
+
+        public DecisionAction(int itemId, String action, int quantity, int price, double confidence) {
+            this.itemId = itemId;
+            this.action = action;
+            this.quantity = quantity;
+            this.price = price;
+            this.confidence = confidence;
+        }
+    }
+
+    /** The full {@code decision/response} document, or null fields where the document doesn't exist yet (no inference worker has ever answered this account). */
+    public static final class DecisionResponse {
+        public final long tickId;
+        public final List<DecisionAction> actions;
+        public final String checkpointVersion;
+
+        public DecisionResponse(long tickId, List<DecisionAction> actions, String checkpointVersion) {
+            this.tickId = tickId;
+            this.actions = actions;
+            this.checkpointVersion = checkpointVersion;
+        }
+    }
+
+    /**
+     * Reads the current {@code decision/response} document, or {@link Optional#empty()} if no
+     * inference worker has ever written one for this account yet (a 404 - not an error condition,
+     * same "collection/document doesn't exist yet" stance {@link #listDocuments} takes). The
+     * caller ({@link net.runelite.client.plugins.microbot.ppoflipperstar.PPOFlipperStarScript})
+     * is responsible for comparing the returned {@code tickId} against the most recently sent
+     * request's tickId and ignoring a stale/mismatched answer - this method just reads whatever
+     * is there right now.
+     */
+    public Optional<DecisionResponse> getDecisionResponse(long accountHash) throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(accountRoot(accountHash) + "/decision/response"))
+            .header("Authorization", "Bearer " + auth.getAccessToken())
+            .timeout(Duration.ofSeconds(10))
+            .GET()
+            .build();
+
+        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() == 404) {
+            return Optional.empty();
+        }
+        if (response.statusCode() != 200) {
+            throw new IOException("get decision response failed: HTTP " + response.statusCode() + " - " + response.body());
+        }
+
+        JsonObject document = new JsonParser().parse(response.body()).getAsJsonObject();
+        JsonObject fields = document.getAsJsonObject("fields");
+        if (fields == null) {
+            return Optional.empty();
+        }
+
+        long tickId = getLong(fields, "tickId");
+        String checkpointVersion = fields.has("checkpointVersion")
+            ? fields.getAsJsonObject("checkpointVersion").get("stringValue").getAsString() : "unknown";
+
+        List<DecisionAction> actions = new ArrayList<>();
+        for (JsonElement el : readArrayValues(fields, "actions")) {
+            try {
+                JsonObject actionFields = el.getAsJsonObject().getAsJsonObject("mapValue").getAsJsonObject("fields");
+                int itemId = getInt(actionFields, "itemId");
+                String actionName = actionFields.getAsJsonObject("action").get("stringValue").getAsString();
+                int quantity = getInt(actionFields, "quantity");
+                int price = getInt(actionFields, "price");
+                double confidence = actionFields.has("confidence")
+                    ? actionFields.getAsJsonObject("confidence").get("doubleValue").getAsDouble()
+                    : 0.0;
+                actions.add(new DecisionAction(itemId, actionName, quantity, price, confidence));
+            } catch (Exception e) {
+                log.warn("PPOFlipperStar: skipping malformed action entry in decision/response - {}", e.getMessage());
+            }
+        }
+
+        return Optional.of(new DecisionResponse(tickId, actions, checkpointVersion));
+    }
+
+    // ---------------------------------------------------------------------------------------
     // shared helpers
     // ---------------------------------------------------------------------------------------
 
@@ -370,6 +572,31 @@ public class PPOFlipperStarFirestoreClient {
         JsonObject v = new JsonObject();
         v.addProperty("timestampValue", Instant.now().toString());
         return v;
+    }
+
+    private static JsonObject doubleValue(double d) {
+        JsonObject v = new JsonObject();
+        // Firestore's REST wire format wants doubleValue as a plain JSON number, not a quoted
+        // string (unlike integerValue, which Firestore's REST API represents as a string to avoid
+        // precision loss on int64 values - see
+        // https://firebase.google.com/docs/firestore/reference/rest/v1/Value).
+        v.addProperty("doubleValue", d);
+        return v;
+    }
+
+    /** Firestore's mapValue wire shape is {"mapValue": {"fields": {...}}} - used here for the per-item marketFeatures sub-object, each value wrapped as a doubleValue. */
+    private static JsonObject mapOfDoubleValues(Map<String, Double> values) {
+        JsonObject fields = new JsonObject();
+        if (values != null) {
+            for (Map.Entry<String, Double> entry : values.entrySet()) {
+                fields.add(entry.getKey(), doubleValue(entry.getValue()));
+            }
+        }
+        JsonObject mapValue = new JsonObject();
+        mapValue.add("fields", fields);
+        JsonObject wrapper = new JsonObject();
+        wrapper.add("mapValue", mapValue);
+        return wrapper;
     }
 
     private static JsonObject arrayOfIntegerValues(List<Integer> values) {

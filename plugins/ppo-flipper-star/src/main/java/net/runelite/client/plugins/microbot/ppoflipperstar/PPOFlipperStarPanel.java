@@ -61,6 +61,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
     private final PortfolioManager portfolio;
     private final GoldManager goldManager;
     private final WatchlistManager watchlistManager;
+    private final DecisionSuggestions decisionSuggestions;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
 
     private JButton executeButton;
@@ -81,12 +82,14 @@ public class PPOFlipperStarPanel extends PluginPanel {
 
     private JPanel orderListPanel;
     private JPanel portfolioListPanel;
+    private JPanel suggestionsListPanel;
 
     private final Timer refreshTimer;
 
     @Inject
     public PPOFlipperStarPanel(PPOFlipperStarPlugin plugin, PPOFlipperStarScript script, OrderQueue queue,
-                                PortfolioManager portfolio, GoldManager goldManager, WatchlistManager watchlistManager) {
+                                PortfolioManager portfolio, GoldManager goldManager, WatchlistManager watchlistManager,
+                                DecisionSuggestions decisionSuggestions) {
         super();
         this.plugin = plugin;
         this.script = script;
@@ -94,6 +97,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
         this.portfolio = portfolio;
         this.goldManager = goldManager;
         this.watchlistManager = watchlistManager;
+        this.decisionSuggestions = decisionSuggestions;
 
         setBorder(new EmptyBorder(10, 10, 10, 10));
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
@@ -105,6 +109,13 @@ public class PPOFlipperStarPanel extends PluginPanel {
         add(buildCancelAllButton());
         add(Box.createRigidArea(new Dimension(0, 10)));
         add(buildStatusPanel());
+        add(Box.createRigidArea(new Dimension(0, 10)));
+        add(buildSuggestionsHeader());
+
+        suggestionsListPanel = new JPanel();
+        suggestionsListPanel.setLayout(new BoxLayout(suggestionsListPanel, BoxLayout.Y_AXIS));
+        add(suggestionsListPanel);
+
         add(Box.createRigidArea(new Dimension(0, 10)));
         add(buildAddOrderForm());
         add(Box.createRigidArea(new Dimension(0, 10)));
@@ -122,10 +133,12 @@ public class PPOFlipperStarPanel extends PluginPanel {
         add(portfolioListPanel);
 
         queue.addListener(() -> SwingUtilities.invokeLater(this::refreshOrderList));
+        decisionSuggestions.addListener(() -> SwingUtilities.invokeLater(this::refreshSuggestions));
 
         refreshFromScriptState();
         refreshOrderList();
         refreshPortfolio();
+        refreshSuggestions();
 
         // The script runs on its own scheduled executor, so status/state text is polled rather
         // than pushed - cheap at a slow interval. The order list itself repaints on the queue's
@@ -135,6 +148,27 @@ public class PPOFlipperStarPanel extends PluginPanel {
             refreshPortfolio();
         });
         refreshTimer.start();
+    }
+
+    /**
+     * Model suggestions section (PROPOSAL.md §2.5/§3.6/§3.7's shadow mode): every actionable
+     * proposal from the PPO policy's most recent decision tick, each with its own Confirm/Dismiss
+     * buttons. Confirming pushes a brand-new {@link PPOFlipperOrder} onto {@link #queue} through
+     * the exact same {@link OrderQueue#add} path a manual right-click/add-order-form order takes
+     * (see {@link #onConfirmSuggestionClicked}) - it is never submitted directly by this panel or
+     * by the script, and it passes through {@link Guardrails#check} identically to any other
+     * order once the script's SUBMITTING_ORDERS state reaches it. There is no code path anywhere
+     * in this plugin that converts a suggestion into a live GE offer without this exact button
+     * click - see {@code PPOFlipperStarScript.runDecideTick}'s javadoc for the same guarantee
+     * stated from the writer side.
+     */
+    private JLabel buildSuggestionsHeader() {
+        JLabel header = new JLabel("Model suggestions (shadow mode)");
+        header.setFont(FontManager.getRunescapeBoldFont());
+        header.setForeground(Color.WHITE);
+        header.setToolTipText("Proposed actions from the PPO policy's most recent decision tick. Nothing here " +
+            "is ever submitted automatically - click Confirm to queue it exactly like a manual order.");
+        return header;
     }
 
     private JLabel buildTitle() {
@@ -586,6 +620,112 @@ public class PPOFlipperStarPanel extends PluginPanel {
         row.add(titleLabel);
         row.add(detailLabel);
         return row;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Model suggestions (PROPOSAL.md §2.5/§3.6/§3.7) - shadow mode, always requires a manual
+    // Confirm click before anything reaches OrderQueue. See buildSuggestionsHeader's javadoc.
+    // ---------------------------------------------------------------------------------------
+
+    private void refreshSuggestions() {
+        suggestionsListPanel.removeAll();
+
+        List<PPOFlipperDecision> suggestions = decisionSuggestions.getAll();
+        if (suggestions.isEmpty()) {
+            JLabel empty = new JLabel("No pending suggestions");
+            empty.setFont(FontManager.getRunescapeSmallFont());
+            empty.setForeground(Color.LIGHT_GRAY);
+            empty.setAlignmentX(Component.LEFT_ALIGNMENT);
+            suggestionsListPanel.add(empty);
+        } else {
+            for (PPOFlipperDecision decision : suggestions) {
+                suggestionsListPanel.add(buildSuggestionRow(decision));
+                suggestionsListPanel.add(Box.createRigidArea(new Dimension(0, 4)));
+            }
+        }
+
+        suggestionsListPanel.revalidate();
+        suggestionsListPanel.repaint();
+    }
+
+    private JPanel buildSuggestionRow(PPOFlipperDecision decision) {
+        JPanel row = new JPanel(new BorderLayout(4, 0));
+        row.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        row.setBorder(new EmptyBorder(6, 6, 6, 6));
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height + 40));
+
+        JPanel textPanel = new JPanel();
+        textPanel.setOpaque(false);
+        textPanel.setLayout(new BoxLayout(textPanel, BoxLayout.Y_AXIS));
+
+        String verb = decision.getGeAction() == GrandExchangeAction.SELL ? "Sell" : "Buy";
+        JLabel titleLabel = new JLabel(String.format("%s %,dx %s", verb, decision.getQuantity(), decision.getItemName()));
+        titleLabel.setFont(FontManager.getRunescapeSmallFont());
+        titleLabel.setForeground(Color.WHITE);
+        titleLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel detailLabel = new JLabel(String.format("@ %,d gp - %s - confidence %.0f%%",
+            decision.getPrice(), decision.getActionName(), decision.getConfidence() * 100.0));
+        detailLabel.setFont(FontManager.getRunescapeSmallFont());
+        detailLabel.setForeground(Color.LIGHT_GRAY);
+        detailLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        textPanel.add(titleLabel);
+        textPanel.add(detailLabel);
+
+        JButton confirmButton = new JButton("Confirm");
+        confirmButton.setFont(FontManager.getRunescapeSmallFont());
+        confirmButton.setBackground(ColorScheme.BRAND_ORANGE);
+        confirmButton.setForeground(Color.WHITE);
+        confirmButton.setFocusPainted(false);
+        confirmButton.setToolTipText("Queue this exact order - it still goes through the same guardrail checks as any manual order");
+        confirmButton.addActionListener(e -> onConfirmSuggestionClicked(decision));
+
+        JButton dismissButton = new JButton("x");
+        dismissButton.setFont(FontManager.getRunescapeSmallFont());
+        dismissButton.setFocusPainted(false);
+        dismissButton.setMargin(new Insets(0, 6, 0, 6));
+        dismissButton.setToolTipText("Dismiss without queuing");
+        dismissButton.addActionListener(e -> decisionSuggestions.remove(decision.getId()));
+
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 4, 0));
+        buttonPanel.setOpaque(false);
+        buttonPanel.add(confirmButton);
+        buttonPanel.add(dismissButton);
+
+        row.add(textPanel, BorderLayout.CENTER);
+        row.add(buttonPanel, BorderLayout.EAST);
+        return row;
+    }
+
+    /**
+     * The ONLY path by which a model-proposed action can ever become a real order in this
+     * plugin: converts the confirmed {@link PPOFlipperDecision} into a brand-new
+     * {@link PPOFlipperOrder} and pushes it onto {@link #queue} via {@link OrderQueue#add} -
+     * byte-for-byte the same call the add-order form and right-click dialogs make, so it is
+     * indistinguishable from a manual order to {@link PPOFlipperStarScript}/{@link Guardrails}
+     * from this point on. Runs the same {@link #validateNewOrder} pre-check the manual paths use
+     * (a SELL for more than is held, or of something not held at all, is rejected here too rather
+     * than silently queuing something Guardrails would reject anyway) before removing the
+     * suggestion from the list.
+     */
+    private void onConfirmSuggestionClicked(PPOFlipperDecision decision) {
+        if (!decision.isActionable() || decision.getGeAction() == null) {
+            decisionSuggestions.remove(decision.getId());
+            return;
+        }
+
+        String rejection = validateNewOrder(decision.getGeAction(), decision.getItemName(), decision.getQuantity());
+        if (rejection != null) {
+            JOptionPane.showMessageDialog(this, "Could not queue suggestion: " + rejection,
+                "Suggestion rejected", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        queue.add(new PPOFlipperOrder(decision.getGeAction(), decision.getItemId(), decision.getItemName(),
+            decision.getQuantity(), decision.getPrice()));
+        decisionSuggestions.remove(decision.getId());
     }
 
     // ---------------------------------------------------------------------------------------

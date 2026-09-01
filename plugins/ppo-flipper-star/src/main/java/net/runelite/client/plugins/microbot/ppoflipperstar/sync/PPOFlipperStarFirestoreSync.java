@@ -232,6 +232,67 @@ public class PPOFlipperStarFirestoreSync {
             timestampMillis), "push trade history entry for item " + itemId);
     }
 
+    // ---------------------------------------------------------------------------------------
+    // decision/request, decision/response - model<->plugin transport (PROPOSAL.md §3.6)
+    // ---------------------------------------------------------------------------------------
+    //
+    // Deliberately synchronous (unlike the pushXAsync methods above), not fire-and-forget: the
+    // DECIDE phase in PPOFlipperStarScript needs to know the write actually landed before it
+    // starts waiting/polling for a matching decision/response - firing this async and moving on
+    // immediately would make "wait up to the timeout for a response" race against a write that
+    // hasn't even happened yet. Callers (the script's own tick thread, never the EDT) are
+    // expected to bound their own wait around these calls the same way any other Firestore call
+    // in this sync layer is treated as best-effort/non-fatal.
+
+    /**
+     * Writes this tick's full watchlisted-item state vector batch to
+     * {@code decision/request}, replacing whatever was there before. Returns false (never
+     * throws) if sync isn't enabled or no account hash is available yet - callers should treat
+     * that exactly like "no request sent this tick," i.e. skip to a HOLD default the same way a
+     * response timeout would.
+     */
+    public boolean pushDecisionRequest(long tickId, List<PPOFlipperStarFirestoreClient.DecisionRequestItem> items) {
+        PPOFlipperStarFirestoreClient clientRef = client;
+        if (clientRef == null) return false;
+
+        Optional<Long> accountHash = accountIdentity.getAccountHash();
+        if (!accountHash.isPresent()) {
+            log.debug("PPOFlipperStar: skipping decision/request write, no account hash resolved yet.");
+            return false;
+        }
+
+        try {
+            clientRef.putDecisionRequest(accountHash.get(), tickId, items);
+            return true;
+        } catch (Exception e) {
+            log.warn("PPOFlipperStar: failed to write decision/request (tickId={}) - {}", tickId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Reads the current {@code decision/response} document, or {@link Optional#empty()} if sync
+     * isn't enabled, no account hash is available, no worker has ever answered this account, or
+     * the read itself failed - every such case is treated identically by the caller (keep
+     * waiting, or time out to HOLD), so this collapses them all to empty rather than
+     * distinguishing "not present" from "error" the way {@link PPOFlipperStarFirestoreClient#getDecisionResponse}
+     * itself does for its own caller (this method).
+     */
+    public Optional<PPOFlipperStarFirestoreClient.DecisionResponse> getDecisionResponse() {
+        PPOFlipperStarFirestoreClient clientRef = client;
+        if (clientRef == null) return Optional.empty();
+
+        Optional<Long> accountHash = accountIdentity.getAccountHash();
+        if (!accountHash.isPresent()) return Optional.empty();
+
+        try {
+            return clientRef.getDecisionResponse(accountHash.get());
+        } catch (Exception e) {
+            log.debug("PPOFlipperStar: failed to read decision/response - {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     @FunctionalInterface
     private interface FirestoreOperation {
         void run(long accountHash) throws Exception;

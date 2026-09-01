@@ -46,6 +46,23 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Model<->plugin transport (PROPOSAL.md §3.6/§4): decision/request is written by the plugin
+    // (its DECIDE phase, once per decision tick, overwriting the same document rather than
+    // appending) and read by the Python inference worker's Firestore snapshot listener;
+    // decision/response is written by that worker and read by the plugin. Both are transient
+    // (overwritten every tick, not a growing history - tradeHistory above remains the durable
+    // record of what actually happened) and admin-only, same pattern as every other
+    // accounts/{accountHash}/* collection here: written directly by service-account credentials
+    // on both the plugin and worker sides (bypassing these rules the same way Cloud Functions
+    // do), never through any client SDK.
+    match /accounts/{accountHash}/decision/request {
+      allow read, write: if false;
+    }
+
+    match /accounts/{accountHash}/decision/response {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

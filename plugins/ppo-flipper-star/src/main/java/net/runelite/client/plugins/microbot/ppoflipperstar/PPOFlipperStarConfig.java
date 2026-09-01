@@ -11,9 +11,12 @@ import net.runelite.client.config.ConfigSection;
     "Buys and sells items on the Grand Exchange from an order queue you manage in the sidebar" +
     " panel or via right-click (add items by name/quantity/price, watch them fill live), with" +
     " spend/price guardrails.<br /><br />" +
-    "Milestone 1: manual-first mechanics only - everything here can be driven entirely by hand." +
-    " The PPO section below is a placeholder for a later milestone; no autonomous decision-" +
-    "making or HTTP calls happen yet.<br /><br />" +
+    "Manual ordering always works by hand, exactly as before. A PPO policy (trained offline," +
+    " served by a separate Python Firestore-listening worker - see PROPOSAL.md §3.6) is now" +
+    " consulted every decision tick for every watchlisted item, in shadow mode: its proposed" +
+    " actions appear in the panel's \"Model suggestions\" section and require an explicit" +
+    " Confirm click before ever reaching the order queue - the model can never submit an order" +
+    " on its own in this build.<br /><br />" +
     "Start at (or near) the Grand Exchange with the items or coins already in your inventory or bank.<br /><br />" +
     "made by billstar"
 )
@@ -179,32 +182,53 @@ public interface PPOFlipperStarConfig extends Config {
     }
 
     @ConfigSection(
-        name = "PPO (future milestone)",
-        description = "Placeholder settings for the autonomous PPO policy - not wired to any inference calls yet",
+        name = "PPO",
+        description = "The autonomous PPO policy, consulted every decision tick over Firestore (PROPOSAL.md §3.6) " +
+            "in shadow mode - the model proposes actions in the panel's \"Model suggestions\" section, but nothing " +
+            "is submitted to the order queue without an explicit manual Confirm click. Wiring shadow mode off to " +
+            "real unattended execution is an explicit future milestone, not something any setting here enables.",
         position = 3,
         closedByDefault = true
     )
     String ppoSection = "ppo";
 
     @ConfigItem(
-        keyName = "inferenceServerUrl",
-        name = "Inference server URL",
-        description = "Base URL of the local PPO inference server (see PROPOSAL.md §3.6). Not called by this " +
-            "version of the plugin - stored now so the config shape is stable when that milestone lands.",
+        keyName = "decisionResponseTimeoutSeconds",
+        name = "Decision response timeout (seconds)",
+        description = "How long the DECIDE phase waits for a matching decision/response document (tickId echoed " +
+            "back) after writing decision/request, before giving up on that tick and defaulting every item to " +
+            "HOLD (PROPOSAL.md §3.6: \"a slow/unreachable model must never block the trading loop\"). Manual " +
+            "order submission via OrderQueue is unaffected by this timeout either way.",
         position = 0,
         section = ppoSection
     )
-    default String inferenceServerUrl() {
-        return "http://127.0.0.1:8600";
+    default int decisionResponseTimeoutSeconds() {
+        return 5;
+    }
+
+    @ConfigItem(
+        keyName = "modelConfidenceThreshold",
+        name = "Model confidence threshold",
+        description = "A proposed action whose confidence (from the response's per-action \"confidence\" field) " +
+            "is below this is forced to HOLD before it's even shown as a suggestion, regardless of what the model " +
+            "proposed. 0 disables this filter.",
+        position = 1,
+        section = ppoSection
+    )
+    default double modelConfidenceThreshold() {
+        return 0.0;
     }
 
     @ConfigItem(
         keyName = "shadowMode",
         name = "Shadow mode",
-        description = "When the PPO policy is wired up in a later milestone, shadow mode means the model only " +
-            "proposes actions for manual confirmation rather than executing unattended. Defaults to on (the safe " +
-            "default) even though nothing reads this yet.",
-        position = 1,
+        description = "The model only proposes actions for manual confirmation in the panel's \"Model " +
+            "suggestions\" section - nothing is ever submitted to the order queue without an explicit Confirm " +
+            "click, regardless of this setting's value. Wiring this to real unattended execution is an explicit " +
+            "future milestone; this toggle exists now so the config shape is stable when that milestone lands, " +
+            "but this build enforces manual confirmation unconditionally - see PPOFlipperStarScript's DECIDE " +
+            "phase javadoc.",
+        position = 2,
         section = ppoSection
     )
     default boolean shadowMode() {

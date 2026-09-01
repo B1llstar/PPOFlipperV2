@@ -8,6 +8,7 @@ import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
+import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreClient;
 import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 import net.runelite.client.plugins.microbot.util.antiban.Rs2Antiban;
 import net.runelite.client.plugins.microbot.util.antiban.Rs2AntibanSettings;
@@ -26,7 +27,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 /**
  * State machine that pulls queued orders from the shared {@link OrderQueue} (the same queue the
@@ -34,12 +39,14 @@ import java.util.concurrent.TimeUnit;
  * and updates each order's live status/fill as it progresses. {@link Guardrails} are checked
  * immediately before every submission.
  *
- * <p>Milestone 1 scope (see PROPOSAL.md §5): this is manual-order-execution only. "What to
- * submit next" comes purely from {@link OrderQueue#nextQueued()} - there is no DECIDE/PPO-
- * calling phase in this state machine yet, so the loop here is deliberately
- * IDLE → GOING_TO_GE → SUBMITTING_ORDERS → MONITORING_OFFERS → COLLECTING(via monitor)/DONE
- * rather than the eventual IDLE → GOING_TO_GE → OBSERVE → DECIDE → SUBMITTING → MONITORING →
- * COLLECTING loop the proposal describes for when autonomous decision-making lands.
+ * <p>Milestone 1 scope (see PROPOSAL.md §5) was manual-order-execution only, with "what to
+ * submit next" coming purely from {@link OrderQueue#nextQueued()}. Milestone 4 (this) adds a
+ * DECIDE phase, per §2.4/§3.6: on a separate cadence from the mechanical execution loop below, the
+ * script builds a state vector for every watchlisted item via {@link DecisionEngine}, sends it to
+ * the Firestore-listening Python inference worker, and waits (bounded, defaulting to a no-op on
+ * timeout) for its proposed actions. See {@link #runDecideTick()}'s javadoc for the shadow-mode
+ * guarantee this phase operates under - it is additive to, and never replaces, manual ordering via
+ * OrderQueue.nextQueued() below, which is unchanged from milestone 1.
  */
 @Slf4j
 public class PPOFlipperStarScript extends Script {
@@ -62,6 +69,8 @@ public class PPOFlipperStarScript extends Script {
     private final BuyLimitLedger buyLimitLedger;
     private final GoldManager goldManager;
     private final PPOFlipperStarFirestoreSync firestoreSync;
+    private final DecisionEngine decisionEngine;
+    private final DecisionSuggestions decisionSuggestions;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
 
@@ -83,14 +92,29 @@ public class PPOFlipperStarScript extends Script {
     // the EDT (button click) and read from this script's own scheduled-executor thread.
     private volatile boolean cancelAllRequested = false;
 
+    // DECIDE phase runs on its own cadence (decisionTickIntervalSeconds), independent of the
+    // mechanical execution tick loop's own SCHEDULE_INTERVAL_MS - this just tracks when the next
+    // decide-tick is due, read/written only from this script's own scheduled-executor thread.
+    private long nextDecisionTickAtMillis = 0;
+
+    // A single-thread executor DECIDE ticks run on, kept separate from the main tick loop's
+    // scheduledExecutorService so a slow/blocked Firestore round-trip (bounded by
+    // decisionResponseTimeoutSeconds, but still up to several seconds) never delays order
+    // submission/monitoring. (Re)created in run(), shut down in shutdown().
+    private ExecutorService decideExecutor;
+    private final AtomicBoolean decideInFlight = new AtomicBoolean(false);
+
     @Inject
     public PPOFlipperStarScript(OrderQueue queue, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
-                                 GoldManager goldManager, PPOFlipperStarFirestoreSync firestoreSync) {
+                                 GoldManager goldManager, PPOFlipperStarFirestoreSync firestoreSync,
+                                 DecisionEngine decisionEngine, DecisionSuggestions decisionSuggestions) {
         this.queue = queue;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
         this.goldManager = goldManager;
         this.firestoreSync = firestoreSync;
+        this.decisionEngine = decisionEngine;
+        this.decisionSuggestions = decisionSuggestions;
     }
 
     public boolean run(PPOFlipperStarConfig config) {
@@ -102,6 +126,16 @@ public class PPOFlipperStarScript extends Script {
         this.orderAwaitingFunds = null;
         this.lastFundsShortfallOrder = null;
         this.needsReconcile = true;
+        this.nextDecisionTickAtMillis = 0;
+        this.decideInFlight.set(false);
+        if (this.decideExecutor != null) {
+            this.decideExecutor.shutdownNow();
+        }
+        this.decideExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "PPOFlipperStar-Decide");
+            t.setDaemon(true);
+            return t;
+        });
 
         if (!goldManager.hasSessionSnapshot()) {
             goldManager.snapshotSessionStart();
@@ -153,6 +187,10 @@ public class PPOFlipperStarScript extends Script {
         orderAwaitingFunds = null;
         lastFundsShortfallOrder = null;
         state = State.IDLE;
+        if (decideExecutor != null) {
+            decideExecutor.shutdownNow();
+            decideExecutor = null;
+        }
         super.shutdown();
     }
 
@@ -262,6 +300,8 @@ public class PPOFlipperStarScript extends Script {
             state = State.CANCELLING_ALL;
         }
 
+        maybeRunDecideTick();
+
         switch (state) {
             case IDLE:
                 break;
@@ -313,6 +353,118 @@ public class PPOFlipperStarScript extends Script {
                 }
                 break;
         }
+    }
+
+    /**
+     * Fires {@link #runDecideTick()} on its own cadence ({@code decisionTickIntervalSeconds},
+     * independent of the mechanical execution loop's own faster {@link #SCHEDULE_INTERVAL_MS}
+     * poll rate) - checked every tick() call but only actually dispatches work once the interval
+     * has elapsed. Dispatched onto {@link #decideExecutor} rather than run inline: DECIDE's
+     * Firestore write-then-poll round-trip (bounded by {@code decisionResponseTimeoutSeconds},
+     * up to several seconds) must never delay order submission/monitoring on this same tick
+     * loop's thread - see {@link #runDecideTick()}'s javadoc for the full flow.
+     */
+    private void maybeRunDecideTick() {
+        long now = System.currentTimeMillis();
+        if (now < nextDecisionTickAtMillis) return;
+
+        long intervalMs = Math.max(1, config.decisionTickIntervalSeconds()) * 1000L;
+        nextDecisionTickAtMillis = now + intervalMs;
+
+        if (decideExecutor == null || decideExecutor.isShutdown()) return;
+        if (!decideInFlight.compareAndSet(false, true)) {
+            // A previous decide-tick's Firestore round-trip is still in flight (e.g. this tick's
+            // interval elapsed again before the last poll timed out) - skip dispatching another
+            // one on top of it rather than piling up concurrent DECIDE calls against the same
+            // account's single decision/request document.
+            return;
+        }
+
+        final PPOFlipperStarConfig configSnapshot = config;
+        try {
+            decideExecutor.execute(() -> {
+                try {
+                    runDecideTick(configSnapshot);
+                } catch (Exception e) {
+                    log.warn("PPOFlipperStar: DECIDE tick failed unexpectedly - {}", e.getMessage(), e);
+                } finally {
+                    decideInFlight.set(false);
+                }
+            });
+        } catch (Exception e) {
+            decideInFlight.set(false);
+        }
+    }
+
+    /**
+     * The DECIDE phase (PROPOSAL.md §2.4/§3.6): builds a state vector for every watchlisted item
+     * via {@link DecisionEngine}, writes it to {@code decision/request}, and waits (bounded by
+     * {@code decisionResponseTimeoutSeconds}, defaulting to "no suggestions this tick" on
+     * timeout - see {@link DecisionEngine#decide}) for the model's proposed actions. Runs
+     * independently of - and never blocks or is blocked by - the mechanical
+     * SUBMITTING_ORDERS/MONITORING_OFFERS states above, which keep driving {@link OrderQueue} for
+     * manual orders exactly as milestone 1 did.
+     *
+     * <p><b>SHADOW MODE IS UNCONDITIONAL IN THIS MILESTONE.</b> Every actionable proposal this
+     * method receives is only ever handed to {@link DecisionSuggestions} for display in the
+     * panel's "Model suggestions" section - it is never, under any config value (including
+     * {@code config.shadowMode() == false}), pushed onto {@link OrderQueue} directly. Converting
+     * a suggestion into a real order happens exactly one way: a human clicking Confirm in the
+     * panel (see {@code PPOFlipperStarPanel}'s suggestion-row Confirm button), which then goes
+     * through {@link OrderQueue#add} and {@link Guardrails#check} exactly like a manual
+     * right-click/panel order - no special-cased bypass exists anywhere in this path. Wiring
+     * {@code shadowMode() == false} to genuine autonomous execution (skipping the Confirm click)
+     * is explicit future-milestone work per PROPOSAL.md §3.7's staged rollout - this build does
+     * not read {@code config.shadowMode()} at all in this method, specifically so there is no
+     * dormant "if shadow mode is off, submit directly" branch sitting in the code for a future
+     * change to accidentally enable without deliberate new work.
+     */
+    private void runDecideTick(PPOFlipperStarConfig configSnapshot) {
+        long timeoutMillis = Math.max(0, configSnapshot.decisionResponseTimeoutSeconds()) * 1000L;
+        Optional<DecisionEngine.DecisionResult> result = decisionEngine.decide(timeoutMillis, configSnapshot.maxActiveOffers());
+        if (!result.isPresent()) {
+            // No watchlisted items, sync unavailable, or a timeout - PROPOSAL.md §3.6: "a slow/
+            // unreachable model must never block the trading loop." Nothing to show; leave
+            // whatever suggestions are already in DecisionSuggestions untouched rather than
+            // clearing them, so a transient timeout doesn't yank a suggestion out from under a
+            // user mid-review.
+            return;
+        }
+
+        DecisionEngine.DecisionResult decision = result.get();
+        double confidenceThreshold = Math.max(0.0, configSnapshot.modelConfidenceThreshold());
+
+        List<PPOFlipperDecision> suggestions = decision.actions.stream()
+            .filter(a -> a.confidence >= confidenceThreshold)
+            .map(a -> toDecision(decision.tickId, a, decision.checkpointVersion))
+            .filter(PPOFlipperDecision::isActionable)
+            .collect(Collectors.toList());
+
+        decisionSuggestions.replaceAll(decision.tickId, suggestions);
+        if (!suggestions.isEmpty()) {
+            log.info("PPOFlipperStar: DECIDE tick {} produced {} actionable suggestion(s) for review.",
+                decision.tickId, suggestions.size());
+        }
+    }
+
+    /** Converts one raw {@code decision/response} action entry into a {@link PPOFlipperDecision}, resolving the item's display name via {@link Rs2ItemManager} and mapping the action-name string onto a {@link GrandExchangeAction} for BUY/SELL tiers (null for HOLD). */
+    private PPOFlipperDecision toDecision(long tickId, PPOFlipperStarFirestoreClient.DecisionAction action,
+                                           String checkpointVersion) {
+        String itemName = itemManager.getItemComposition(action.itemId) != null
+            ? itemManager.getItemComposition(action.itemId).getName()
+            : ("item " + action.itemId);
+
+        GrandExchangeAction geAction = null;
+        if (action.action != null) {
+            if (action.action.startsWith("BUY")) {
+                geAction = GrandExchangeAction.BUY;
+            } else if (action.action.startsWith("SELL")) {
+                geAction = GrandExchangeAction.SELL;
+            }
+        }
+
+        return new PPOFlipperDecision(tickId, action.itemId, itemName, action.action, geAction,
+            action.quantity, action.price, action.confidence, checkpointVersion, System.currentTimeMillis());
     }
 
     private void prepareFundsOrItems() {

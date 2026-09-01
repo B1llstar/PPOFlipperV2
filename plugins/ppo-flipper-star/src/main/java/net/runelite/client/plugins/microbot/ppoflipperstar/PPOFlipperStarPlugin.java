@@ -69,6 +69,9 @@ public class PPOFlipperStarPlugin extends Plugin {
     private GoldManager goldManager;
 
     @Inject
+    private DecisionSuggestions decisionSuggestions;
+
+    @Inject
     private ClientToolbar clientToolbar;
 
     @Inject
@@ -147,7 +150,7 @@ public class PPOFlipperStarPlugin extends Plugin {
     }
 
     private void addPanel() {
-        panel = new PPOFlipperStarPanel(this, script, queue, portfolio, goldManager, watchlistManager);
+        panel = new PPOFlipperStarPanel(this, script, queue, portfolio, goldManager, watchlistManager, decisionSuggestions);
 
         // Reuse the client's own Grand Exchange icon (bundled in the client jar) instead of
         // shipping a duplicate image asset.
