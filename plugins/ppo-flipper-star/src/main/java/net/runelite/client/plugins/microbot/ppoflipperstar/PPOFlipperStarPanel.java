@@ -477,7 +477,16 @@ public class PPOFlipperStarPanel extends PluginPanel {
         titleLabel.setForeground(Color.WHITE);
         titleLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JLabel detailLabel = new JLabel(String.format("@ %,d gp - %s", order.getPrice(), statusText(order)));
+        // Once submitted, show the price actually offered to the GE (which clampToLivePrice may
+        // have adjusted away from what was typed - see PPOFlipperOrder.submittedPrice's javadoc),
+        // not the originally-requested price - a DONE/SUBMITTED order showing the requested price
+        // here made a clamp look like it never happened once the clamp note dropped out of
+        // statusText's SKIPPED/FAILED-only history.
+        int displayPrice = order.getSubmittedPrice() > 0 ? order.getSubmittedPrice() : order.getPrice();
+        String priceLabel = (order.getSubmittedPrice() > 0 && order.getSubmittedPrice() != order.getPrice())
+            ? String.format("@ %,d gp (requested %,d gp)", displayPrice, order.getPrice())
+            : String.format("@ %,d gp", displayPrice);
+        JLabel detailLabel = new JLabel(String.format("%s - %s", priceLabel, statusText(order)));
         detailLabel.setFont(FontManager.getRunescapeSmallFont());
         detailLabel.setForeground(statusColor(order));
         detailLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -507,12 +516,9 @@ public class PPOFlipperStarPanel extends PluginPanel {
             case QUEUED:
                 return "Queued";
             case SUBMITTED:
-                String base = String.format("Active - %d%% filled", order.getProgressPercentage());
-                // statusDetail on a SUBMITTED order (as opposed to SKIPPED/FAILED) means
-                // clampToLivePrice adjusted the price away from what was requested - see
-                // PPOFlipperOrder.submittedPrice's javadoc. Surfaced here so a human who typed a
-                // specific price can see why the fill differs, not just in the debug log.
-                return order.getStatusDetail() != null ? base + " (" + order.getStatusDetail() + ")" : base;
+                // A price clamp (if any) is shown in buildOrderRow's price line itself
+                // (submittedPrice vs. requested price), not repeated here.
+                return String.format("Active - %d%% filled", order.getProgressPercentage());
             case DONE:
                 return "Done";
             case SKIPPED:

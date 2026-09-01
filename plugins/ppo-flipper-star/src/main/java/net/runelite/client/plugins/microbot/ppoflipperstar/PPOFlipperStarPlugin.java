@@ -11,7 +11,6 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.grandexchange.GrandExchangePlugin;
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.plugins.microbot.globval.WidgetIndices;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
@@ -151,13 +150,30 @@ public class PPOFlipperStarPlugin extends Plugin {
      * pattern from vendor/microbot-hub's QoLPlugin (creates a new client-side MenuEntry via
      * Client.createMenuEntry at the next free index, copying the triggering entry's
      * param0/param1/identifier/type so it targets the same inventory slot).
+     *
+     * <p>Deliberately does NOT gate on {@code WidgetIndices.ResizableModernViewport.
+     * INVENTORY_CONTAINER} the way QoLPlugin's equivalent check does - verified against the
+     * client jar (microbot-2.6.21.jar) that the inventory container widget id differs per
+     * viewport layout (separate INVENTORY_CONTAINER constants under
+     * WidgetIndices.ResizableModernViewport and .ResizableClassicViewport, with different
+     * values, and FixedClassicViewport exposing no such constant at all under that name) -
+     * gating on one specific layout's id meant every menu entry silently failed to appear for
+     * anyone not running that exact layout, with no error or log line. {@code getItemId() != -1}
+     * (set by the client whenever a menu entry targets an inventory item, regardless of which
+     * viewport layout renders the container) plus a live {@code Rs2Inventory} slot lookup is
+     * layout-agnostic and is the actual thing being checked for anyway.
      */
     @Subscribe
     public void onMenuEntryAdded(MenuEntryAdded event) {
-        if (event.getMenuEntry().getParam1() != WidgetIndices.ResizableModernViewport.INVENTORY_CONTAINER) return;
+        int itemId = event.getMenuEntry().getItemId();
+        if (itemId == -1) return;
 
+        // A bank/shop/trade click also sets getItemId() with a small param0 slot index, which
+        // could coincidentally match an occupied *inventory* slot number holding a different
+        // item - matching the item id too (not just "some item is in this slot number") rules
+        // that out, since only a genuine inventory-slot click will have both agree.
         Rs2ItemModel item = Rs2Inventory.getItemInSlot(event.getMenuEntry().getParam0());
-        if (item == null) return;
+        if (item == null || item.getId() != itemId) return;
 
         addMenuEntry(event, "Buy more", item.getName(), e -> {
             if (panel != null) panel.openBuyDialog(item);
