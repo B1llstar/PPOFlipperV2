@@ -57,6 +57,47 @@ BEST_SIDECAR_PATH = MODELS_DIR / "best.json"
 METRICS_LOG_PATH = MODELS_DIR / "training_log.csv"
 
 
+def push_trained_items_to_firestore(dataset: MarketDataset, git_commit: str) -> None:
+    """Records the exact item universe a training run used, as a durable Firestore document -
+    not per-account state (accounts/{accountHash}/...), so it lives alongside the other
+    project-wide reference data (tradableItems) rather than under any specific account. Pushed
+    once per run, right after the dataset loads (the item set doesn't change mid-run), not on
+    every checkpoint - checkpoints already carry their own trained_item_ids in their sidecar JSON
+    (see CheckpointAndEvalCallback._save_pth) for a self-contained per-checkpoint record; this is
+    the queryable, cross-run-comparable version of the same fact.
+
+    Best-effort: a missing/unreadable service account key or any Firestore failure logs a
+    warning and the training run continues unaffected - this is a nice-to-have record, never a
+    dependency of training itself.
+    """
+    service_account_path = pathlib.Path(__file__).parent.parent.parent / "ppoflipperopus-firebase-adminsdk-fbsvc-4e78117dde.json"
+    if not service_account_path.exists():
+        print(f"Skipping trained-item Firestore push - no service account key at {service_account_path}")
+        return
+
+    try:
+        from google.cloud import firestore
+    except ImportError:
+        print("Skipping trained-item Firestore push - google-cloud-firestore not installed")
+        return
+
+    try:
+        db = firestore.Client.from_service_account_json(str(service_account_path))
+        items = [
+            {"itemId": series.item_id, "name": series.name, "buyLimit": series.buy_limit}
+            for series in dataset.items.values()
+        ]
+        db.collection("modelTrainedItems").document(git_commit).set({
+            "gitCommit": git_commit,
+            "itemCount": len(items),
+            "items": items,
+            "trainedAt": firestore.SERVER_TIMESTAMP,
+        })
+        print(f"Pushed {len(items)} trained item(s) to Firestore modelTrainedItems/{git_commit}")
+    except Exception as e:
+        print(f"Warning: failed to push trained-item list to Firestore - {e}")
+
+
 def get_git_commit() -> str:
     """Tags a checkpoint with the git commit of the env/reward code that
     produced it, per PROPOSAL.md 3.4's "agent versioning" requirement - reward/
@@ -215,6 +256,14 @@ class CheckpointAndEvalCallback(BaseCallback):
             "git_commit": self.git_commit,
             "saved_at": time.time(),
             "validation": val_metrics,
+            # The exact item universe this checkpoint was trained against - a watchlisted item
+            # outside this set has zero real training experience behind it, so the model's
+            # suggestions for it are pure extrapolation (the same failure mode a prior version of
+            # this project hit: an item showing up as a live candidate with zero rows in its own
+            # training data). Recorded here (and pushed to Firestore once per run - see
+            # push_trained_items_to_firestore) so it's checkable after the fact, not just implied
+            # by whatever --max-items happened to be passed on the command line.
+            "trained_item_ids": self.dataset.item_ids(),
         }, indent=2))
 
     def _prune_old_checkpoints(self) -> None:
@@ -250,6 +299,7 @@ def main() -> None:
 
     print("Loading market dataset into RAM...")
     dataset = load_market_dataset(max_items=args.max_items, min_rows=args.min_rows)
+    push_trained_items_to_firestore(dataset, get_git_commit())
 
     env_fns = [
         make_env_fn(dataset, "train", args.watchlist_size, args.episode_length, args.seed + i)
