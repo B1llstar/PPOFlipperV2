@@ -43,8 +43,15 @@ into the queue.
    margin (see `data/service/main.py`).
 2. **Filter**: drops candidates below `Min predicted margin %`, anything
    that would exceed `Max open flips` (FlipperStar-originated orders still
-   QUEUED/SUBMITTED in GE Star V2), and items already held from a prior
-   flip that hasn't sold yet.
+   QUEUED/SUBMITTED in GE Star V2), items already held from a prior flip
+   that hasn't sold yet, and items that already have a BUY queued/submitted
+   from an earlier scan that hasn't filled yet
+   (`pendingBuyOrderIdsByItemId`) - this last one matters because both the
+   already-held check and the buy-limit ledger only learn about a purchase
+   once it fills, so without it the same top-ranked item would get queued
+   again every scan cycle until its order actually fills (which can take
+   longer than the auto-scan interval) - live-reported as 3 simultaneous
+   flax orders before this check existed.
 3. **Size**: quantity is capped by `Max GP per flip`, the item's GE buy
    limit (preferring the live client-side lookup via GE Star V2's bridge -
    `Rs2GrandExchange.getItemMappingData()` - falling back to the scoring

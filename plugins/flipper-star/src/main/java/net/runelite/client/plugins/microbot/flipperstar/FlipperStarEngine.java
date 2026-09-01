@@ -66,6 +66,15 @@ public class FlipperStarEngine {
     // reconcileOrders can drop it once GE Star V2 reports it finished/failed/removed.
     private final Map<Integer, Long> pendingSellOrderIdsByItemId = new ConcurrentHashMap<>();
 
+    // Same idea, BUY side: without this, an item stays a top-ranked candidate across multiple
+    // scan cycles until its order actually fills (which can take longer than the auto-scan
+    // interval) - getHeldQuantity and the buy-limit ledger both only update on a completed
+    // fill, so neither one sees a still-QUEUED/SUBMITTED order and both let a second (then a
+    // third) buy for the same item queue right behind the first. Live-reported: 3 simultaneous
+    // flax orders from exactly this gap. Keyed by item id so "does this item already have an
+    // in-flight buy" is a single lookup before sizing/queuing a new one.
+    private final Map<Integer, Long> pendingBuyOrderIdsByItemId = new ConcurrentHashMap<>();
+
     private ScheduledExecutorService executor;
     private ScheduledFuture<?> autoScanTask;
 
@@ -91,6 +100,7 @@ public class FlipperStarEngine {
         }
 
         reconcileOrders(openOrderIds);
+        reconcileOrders(pendingBuyOrderIdsByItemId.values());
 
         // Buying is inventory-only now (see GeStarPortfolio/withdrawFromBank) - a BUY that
         // fills with nowhere for the items to land would just fail to collect, so skip queuing
@@ -122,6 +132,7 @@ public class FlipperStarEngine {
         int skippedMargin = 0;
         int skippedExposure = 0;
         int skippedAlreadyHeld = 0;
+        int skippedAlreadyPending = 0;
         int skippedNoSlots = 0;
 
         // Reserves one free inventory slot per new item this scan queues a BUY for, on top of
@@ -152,6 +163,17 @@ public class FlipperStarEngine {
                 continue;
             }
 
+            // Skip items that already have a BUY queued/submitted from an earlier scan that
+            // hasn't filled yet - getHeldQuantity (above) and the buy-limit ledger both only
+            // learn about a purchase once it fills, so a still-in-flight order for the same
+            // item is otherwise invisible to every check in this loop, and the item stays a
+            // top candidate every scan until it fills. This is what actually stops duplicate
+            // same-item orders from stacking up, not the checks above.
+            if (pendingBuyOrderIdsByItemId.containsKey(candidate.getItemId())) {
+                skippedAlreadyPending++;
+                continue;
+            }
+
             if (projectedFreeSlots <= 0) {
                 skippedNoSlots++;
                 continue;
@@ -164,6 +186,7 @@ public class FlipperStarEngine {
             long orderId = geStarBridge.addOrder(GrandExchangeAction.BUY, candidate.getItemName(), quantity, price);
             if (orderId >= 0) {
                 openOrderIds.add(orderId);
+                pendingBuyOrderIdsByItemId.put(candidate.getItemId(), orderId);
                 queued++;
                 projectedFreeSlots--;
                 log.info("FlipperStar: queued BUY {}x {} @ {} (predicted margin {}%)",
@@ -173,8 +196,8 @@ public class FlipperStarEngine {
 
         lastScanTimestamp = System.currentTimeMillis();
         lastScanSummary = String.format(
-            "%d candidates, %d queued, %d below margin threshold, %d at exposure cap, %d already held, %d no free slots",
-            candidates.size(), queued, skippedMargin, skippedExposure, skippedAlreadyHeld, skippedNoSlots);
+            "%d candidates, %d queued, %d below margin threshold, %d at exposure cap, %d already held, %d already pending, %d no free slots",
+            candidates.size(), queued, skippedMargin, skippedExposure, skippedAlreadyHeld, skippedAlreadyPending, skippedNoSlots);
         log.info("FlipperStar: scan complete - {}", lastScanSummary);
 
         if (config.exitScanEnabled()) {
@@ -312,10 +335,12 @@ public class FlipperStarEngine {
     /**
      * Drops any tracked order id that's no longer QUEUED or SUBMITTED in GE Star V2 (finished,
      * skipped, failed, or removed entirely) - called at the start of every scan so exposure
-     * tracking (maxOpenFlips, and pending-sell-per-item) reflects real current state, not a
-     * monotonically growing set of every order FlipperStar has ever queued this session. Used
-     * for both openOrderIds directly and pendingSellOrderIdsByItemId's values() (a live view -
-     * removing from it removes the corresponding item-id entry from the backing map too).
+     * tracking (maxOpenFlips, and pending-buy/pending-sell-per-item) reflects real current
+     * state, not a monotonically growing set of every order FlipperStar has ever queued this
+     * session. Used for openOrderIds directly and for pendingBuyOrderIdsByItemId's/
+     * pendingSellOrderIdsByItemId's values() (a live view - removing from it removes the
+     * corresponding item-id entry from the backing map too), so once an order fills/fails its
+     * item becomes eligible to be queued again on the next scan.
      */
     private void reconcileOrders(Collection<Long> orderIds) {
         orderIds.removeIf(orderId -> {

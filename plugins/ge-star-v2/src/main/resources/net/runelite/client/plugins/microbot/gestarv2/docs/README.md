@@ -262,6 +262,20 @@ when web sync is enabled (see "Web sync" below) - purely for
 cross-machine visibility/audit, never required for the guardrail itself,
 which only ever reads the local ledger.
 
+A BUY is also rejected if it isn't the *earliest* still-active
+(QUEUED/SUBMITTED) BUY for that item name already in the queue - i.e. a
+duplicate riding along behind one that hasn't resolved yet. This exists
+because `getHeldQuantity` and `BuyLimitLedger` both only learn about a
+purchase once it *fills* - neither one sees a still-unfilled order, so
+without this check the same top-ranked candidate could get queued again
+every scan cycle (live-reported as 3 simultaneous flax orders). The
+primary fix for this lives in FlipperStar itself
+(`pendingBuyOrderIdsByItemId`, checked before queuing at all - see
+[FlipperStar's docs](../../../flipper-star/docs/README.md)); this
+guardrail is the second line of defense that catches a duplicate from
+any other source (manual panel, web UI), since it's checked here
+regardless of where the order came from.
+
 "Max concurrent offers" (default 8, how many of the 8 GE slots to use at
 once) lives in the **Behavior** section instead — it's a throttle, not a
 safety check, and stays in effect even with guardrails disabled. Lower it

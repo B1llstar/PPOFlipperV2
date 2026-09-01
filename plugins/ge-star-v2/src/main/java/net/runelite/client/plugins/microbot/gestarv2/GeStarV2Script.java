@@ -90,7 +90,7 @@ public class GeStarV2Script extends Script {
 
     public boolean run(GeStarV2Config config) {
         this.config = config;
-        this.guardrails = new GeStarGuardrails(config, portfolio, buyLimitLedger);
+        this.guardrails = new GeStarGuardrails(config, portfolio, buyLimitLedger, queue);
         this.guardrails.reset();
         this.state = State.GOING_TO_GE;
         this.activeOrders.clear();

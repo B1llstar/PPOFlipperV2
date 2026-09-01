@@ -21,16 +21,18 @@ public class GeStarGuardrails {
     private final GeStarV2Config config;
     private final GeStarPortfolio portfolio;
     private final BuyLimitLedger buyLimitLedger;
+    private final GeStarOrderQueue queue;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final GeStarWikiPriceClient wikiPriceClient = new GeStarWikiPriceClient();
 
     @Getter
     private long gpSpentThisSession = 0;
 
-    public GeStarGuardrails(GeStarV2Config config, GeStarPortfolio portfolio, BuyLimitLedger buyLimitLedger) {
+    public GeStarGuardrails(GeStarV2Config config, GeStarPortfolio portfolio, BuyLimitLedger buyLimitLedger, GeStarOrderQueue queue) {
         this.config = config;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
+        this.queue = queue;
     }
 
     public void reset() {
@@ -67,6 +69,20 @@ public class GeStarGuardrails {
         // enough was already bought recently.
         if (order.getAction() == GrandExchangeAction.BUY) {
             String reason = checkBuyLimit(order);
+            if (reason != null) return reason;
+        }
+
+        // Second line of defense against duplicate same-item BUYs stacking up (the first is
+        // FlipperStarEngine's own pendingBuyOrderIdsByItemId check, which only covers orders it
+        // originates) - catches a duplicate from any other source (manual panel, web UI, a
+        // future caller) that FlipperStar's own check can't see. Deliberately keyed on whether
+        // this exact order is the FIRST QUEUED/SUBMITTED order for the item in the queue, not
+        // "is there any other order for this item" - the earliest one must still be allowed
+        // through, only a genuine duplicate behind it gets rejected. Always rejected regardless
+        // of the guardrails master switch, same reasoning as the checks above: a duplicate can
+        // never usefully coexist with the order ahead of it.
+        if (order.getAction() == GrandExchangeAction.BUY) {
+            String reason = checkDuplicateBuy(order);
             if (reason != null) return reason;
         }
 
@@ -130,6 +146,29 @@ public class GeStarGuardrails {
             return String.format(
                 "buy quantity %d would exceed the GE limit (%d already bought in the last 4h, limit %d)",
                 order.getQuantity(), alreadyBought, limit);
+        }
+
+        return null;
+    }
+
+    /**
+     * Rejects {@code order} if it's not the earliest still-active (QUEUED or SUBMITTED) BUY for
+     * this item name already in the queue - i.e. something ahead of it for the same item hasn't
+     * resolved yet, so this one is a duplicate riding along behind it. Order identity (not just
+     * item name) is compared so this never rejects an order against itself.
+     */
+    private String checkDuplicateBuy(GeStarOrder order) {
+        GeStarOrder earliest = queue.getAll().stream()
+            .filter(o -> o.getAction() == GrandExchangeAction.BUY)
+            .filter(o -> o.getStatus() == GeStarOrder.Status.QUEUED || o.getStatus() == GeStarOrder.Status.SUBMITTED)
+            .filter(o -> o.getItemName().equalsIgnoreCase(order.getItemName()))
+            .findFirst()
+            .orElse(null);
+
+        if (earliest != null && earliest.getId() != order.getId()) {
+            return String.format(
+                "duplicate BUY for %s - order [%d] for this item is already queued/submitted ahead of it",
+                order.getItemName(), earliest.getId());
         }
 
         return null;
