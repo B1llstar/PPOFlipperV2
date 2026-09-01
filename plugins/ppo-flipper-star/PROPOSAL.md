@@ -142,7 +142,13 @@ Uses RuneLite's `MenuEntryAdded` event, the same mechanism `QoLPlugin` in
 ```java
 @Subscribe
 public void onMenuEntryAdded(MenuEntryAdded event) {
-    if (event.getMenuEntry().getParam1() != WidgetIndices.ResizableModernViewport.INVENTORY_CONTAINER) return;
+    // NOTE: the actual shipped check is getItemId() != -1 plus a matching Rs2Inventory slot
+    // lookup, not a WidgetIndices.*.INVENTORY_CONTAINER comparison as originally sketched here -
+    // that constant differs per viewport layout (Fixed/Resizable Classic vs. Resizable Modern),
+    // so gating on one specific layout's value silently produced no menu entries at all under
+    // the others. Found and fixed during live testing - see PPOFlipperStarPlugin.java's
+    // onMenuEntryAdded for the real, layout-agnostic implementation.
+    if (event.getMenuEntry().getItemId() == -1) return;
     Rs2ItemModel item = Rs2Inventory.getItemInSlot(event.getMenuEntry().getParam0());
     if (item == null) return;
 
@@ -176,7 +182,7 @@ All singletons via Guice `@Inject`, same DI pattern every plugin in this repo us
 | `BuyLimitLedger` | Rolling 4h GE buy-limit window per item, persisted across restarts | Own ledger + `Rs2GrandExchange.getItemMappingData` for the limit itself |
 | `OrderQueue` | Pending/submitted/done orders, one source of truth the panel and script both read | In-memory + `ConfigManager` persistence for crash recovery |
 | `Guardrails` | Hard caps independent of the RL policy: max GP/session, max qty/item, max price deviation from live Wiki price, "never sell more than held", "never exceed buy limit" | Pure logic, same structure as `GeStarGuardrails` — checked on *every* order regardless of whether it came from the model or a human click |
-| `MarketStateProvider` | Live insta-buy/insta-sell/volume per item, from the OSRS Wiki real-time API directly (not a third-party aggregator — see §2.3) | Wiki API client (adapted from `data/pipeline/wiki_client.py`) |
+| `WikiPriceClient` + `WikiHistoryBuffer` | Live insta-buy/insta-sell per item (`WikiPriceClient`, not a third-party aggregator — see §2.3) plus a real rolling 24h price/volume history per item (`WikiHistoryBuffer`, polling the wiki's bulk `/5m` endpoint), used to compute genuine volatility/mean-price/volume/momentum features for the DECIDE phase (§3.6) rather than approximating them from a single snapshot. Originally sketched as one `MarketStateProvider` class; built as two once the rolling-history requirement became concrete. | Wiki real-time-prices API (`/latest` and `/5m`) |
 
 ### 2.3 Two correctness lessons carried forward from the old code
 
@@ -523,16 +529,45 @@ New Gradle module, following `ge-star-v2`'s exact shape:
    sessions via the account's stable `Client.getAccountHash()`, per the §0
    addendum. This is also the mechanism §3.6 repurposes for model↔plugin
    communication, which is why it landed before milestone 3/4.)
-3. **Environment + PPO training loop** — build `GEMarketEnv`, get a PPO agent
-   training against it (even before the inference worker or plugin-side
-   wiring exists) — validate the reward curve moves in the right direction on
-   a short run first. *(next up)*
-4. **Inference worker + plugin wiring**: connect `PPOFlipperStarScript`'s
-   DECIDE phase to a running Firestore-listening inference worker with an
-   early checkpoint, in shadow mode.
-5. **Full training run** (§3.5) once the env/reward is validated as
-   bug-free on a short run.
-6. **Shadow mode → gated live rollout** (§3.7).
+3. **Environment + PPO training loop** ✅ — `GEMarketEnv` built and validated
+   with real training runs (50k steps, then 500k steps after the first run's
+   policy collapsed to a single always-BUY action — a known early-PPO failure
+   mode, confirmed transient by the longer run: by step 400k the policy
+   closes real profitable buy→sell cycles, 86% win rate on a validation
+   episode). `best.pth` is the current checkpoint.
+4. **Inference worker + plugin wiring** ✅ — `data/ppo/inference_worker.py`
+   loads `best.pth` and answers `decision/request` documents; the plugin's
+   DECIDE phase is wired in, unconditionally shadow-mode (no config path
+   lets a suggestion reach `OrderQueue` without a human clicking Confirm).
+   Extended further: `WikiHistoryBuffer` now feeds real rolling
+   volatility/volume/momentum features (previously flattened
+   approximations), and account discovery is automatic (presence-heartbeat
+   scan, no account hash needs to be found/passed manually) with a one-click
+   launch path (`scripts/launch-with-ppo.sh`).
+5. **Full training run** (§3.5) — not started. The current `best.pth` is
+   only 500k steps, well short of the 5-10M-step budget §3.5 sizes for real
+   convergence; live shadow-mode testing with today's checkpoint is the
+   deliberately-chosen next step before spending on this (see the "Live
+   testing before the full run" note below), so the whole pipeline is known
+   to work before paying for a better model to run through it.
+6. **Shadow mode → gated live rollout** (§3.7) — shadow mode (step 2 of
+   §3.7) is live-testable today via `scripts/launch-with-ppo.sh`. Steps 3-4
+   (small-stakes live run, guardrail loosening) are not started and
+   shouldn't be until shadow-mode output has actually been reviewed.
+
+**Known gaps against this document, not yet closed:**
+- `OrderQueue` (§2.2's table) is in-memory only — no `ConfigManager`
+  persistence exists despite the table saying so. A client crash while
+  orders are `QUEUED` (not yet submitted to the GE) loses them; a
+  `SUBMITTED` order is recovered via `reconcileSubmittedOrders`' live-offer
+  adoption regardless. Worth fixing before relying on unattended operation
+  across restarts, not blocking for supervised shadow-mode testing.
+- §2.2's `MarketStateProvider` and §2.1's inline code sample (which still
+  shows the pre-fix `WidgetIndices.ResizableModernViewport.INVENTORY_CONTAINER`
+  check) describe an earlier state of the code, superseded by
+  `WikiPriceClient`/`WikiHistoryBuffer` and the layout-agnostic
+  `getItemId() != -1` check respectively - naming/doc drift, not a
+  functional gap.
 
 ---
 
