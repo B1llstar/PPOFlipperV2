@@ -59,6 +59,7 @@ public class GeStarV2Panel extends PluginPanel {
     private JSpinner quantitySpinner;
     private JSpinner priceSpinner;
     private JComboBox<GrandExchangeAction> actionCombo;
+    private JLabel addOrderErrorLabel;
 
     private JPanel orderListPanel;
 
@@ -214,6 +215,12 @@ public class GeStarV2Panel extends PluginPanel {
         addButton.addActionListener(e -> onAddOrderClicked());
         panel.add(addButton, c);
 
+        c.gridy++;
+        addOrderErrorLabel = new JLabel(" ");
+        addOrderErrorLabel.setFont(FontManager.getRunescapeSmallFont());
+        addOrderErrorLabel.setForeground(FAILED_RED);
+        panel.add(addOrderErrorLabel, c);
+
         return panel;
     }
 
@@ -242,6 +249,8 @@ public class GeStarV2Panel extends PluginPanel {
     }
 
     private void onAddOrderClicked() {
+        addOrderErrorLabel.setText(" ");
+
         String name = itemNameField.getText() == null ? "" : itemNameField.getText().trim();
         if (name.isEmpty()) return;
 
@@ -249,6 +258,23 @@ public class GeStarV2Panel extends PluginPanel {
         int price = (Integer) priceSpinner.getValue();
         GrandExchangeAction action = (GrandExchangeAction) actionCombo.getSelectedItem();
         if (action == null) action = GrandExchangeAction.BUY;
+
+        // Reject at entry, not just at submission time: a SELL for an item not actually held
+        // (or held in a lesser quantity) would otherwise sit in the queue until
+        // GeStarGuardrails.check rejects it at submitNextOrder - confusing to watch queued and
+        // "waiting" when it can never fill. Same live-inventory read the submission-time
+        // guardrail uses, so the two can never disagree.
+        if (action == GrandExchangeAction.SELL) {
+            int held = portfolio.getHeldQuantity(name);
+            if (held <= 0) {
+                addOrderErrorLabel.setText(name + " is not in inventory");
+                return;
+            }
+            if (quantity > held) {
+                addOrderErrorLabel.setText("Only " + held + "x " + name + " held, can't sell " + quantity);
+                return;
+            }
+        }
 
         queue.add(new GeStarOrder(action, name, quantity, price));
         itemNameField.setText("");
