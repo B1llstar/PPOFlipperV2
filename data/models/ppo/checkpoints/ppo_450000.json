@@ -1,0 +1,11 @@
+{
+  "step": 450000,
+  "git_commit": "585dbc0de26879e1711d18ce31cb0de1cb755113",
+  "saved_at": 1788257897.557013,
+  "validation": {
+    "mean_episode_reward": 350.4783532312986,
+    "mean_realized_pnl": 492428.353231286,
+    "mean_win_rate": 0.7587341058288268,
+    "mean_guardrail_violations": 2839.0
+  }
+}
