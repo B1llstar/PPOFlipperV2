@@ -485,6 +485,7 @@ SDK read/write path exists or is needed).
 | `accounts/{hash}/tradeHistory/{autoId}` | Immutable log, one doc per completed BUY/SELL fill (action, item, qty, actual submitted/filled price, GP, timestamp) | Append-only, kept forever — this is the actual "browse my history" record |
 | `accounts/{hash}/decision/request` | Model↔plugin transport (§3.6): current state vector for every watchlisted item | **Transient** — one doc, overwritten every decision tick |
 | `accounts/{hash}/decision/response` | Model↔plugin transport (§3.6): the policy's action per item, tagged with the `tickId` it answered | **Transient** — one doc, overwritten every decision tick |
+| `accounts/{hash}/presence/heartbeat` | "This account is actively running the plugin right now" (`lastSeenMillis`), refreshed every ~60s while the plugin runs — lets the Python inference worker and the web dashboard (§4.1) discover active accounts without an account hash ever being passed in manually | **Transient** — one doc, overwritten on every heartbeat |
 
 **Sync model** (portfolio/buyLimitLedger/watchlist): on startup, a best-effort
 pull-and-reconcile — a successful Firestore read fully replaces the
@@ -496,6 +497,46 @@ executor — never blocking the script tick or the EDT. A safety guard holds
 order submission for a tick while the startup reconcile is still in flight,
 so a trade can't race ahead of — and then get silently overwritten by — the
 pull's full-replace.
+
+### 4.1 Web dashboard (`firebase/web/`)
+
+A Vue 3 + Vite dashboard, deployed to Firebase Hosting on the same
+`ppoflipperopus` project, live at https://ppoflipperopus.web.app. Added after
+milestone 4 (not part of the original build order — a human-facing
+observability layer over the Firestore schema above, not something the
+plugin or the model depend on). **Read-only by construction**: every write to
+`accounts/{accountHash}/**` stays unconditionally admin-only in
+`firestore.rules` regardless of who's signed in — the dashboard can display
+suggestions and history, but it can never place a trade or otherwise mutate
+state. That capability exists in exactly one place, the RuneLite plugin's own
+panel, on purpose.
+
+- **Access**: Google sign-in, gated by a hardcoded email allowlist enforced
+  server-side in `firestore.rules` (`isAllowlistedDashboardViewer()`) — not
+  by anything client-side, since a client-side check alone would be
+  trivially bypassable. See the root [README.md](../../README.md)'s
+  "PPOFlipperStar web dashboard" section for the deploy sequence and how to
+  add a new allowlisted email.
+- **Account discovery**: a Firestore `collectionGroup("presence")` query
+  (not `collectionGroup("heartbeat")` — verified empirically that grouping
+  on the fixed document *id* rather than the subcollection *id* silently
+  returns zero results with no error, a real trap worth remembering if this
+  code is ever touched) finds every account with a heartbeat, defaulting to
+  the most recently active one; a picker only appears if more than one
+  account exists.
+- **Views**: a live dashboard (portfolio, buy-limit headroom, watchlist,
+  presence/online status, and the latest `decision/request`↔`response` pair
+  shown side by side — "here's what the model saw, here's what it
+  suggested"), a filterable/sortable trade history table, and a performance
+  view charting cumulative realized P&L and win rate rebuilt client-side
+  from `tradeHistory`. Live updates via Firestore `onSnapshot` listeners;
+  unrealized P&L uses the public OSRS Wiki price API directly from the
+  browser (no auth needed, CORS-open).
+- **Deliberately not touched**: `firebase/functions/` (the old GE Star web
+  UI's Cloud Functions) and the `orders`/`buyLimits` collections/rules
+  remain exactly as they were — this dashboard shares only the Firebase
+  project itself, same infrastructure-reuse stance as §0's Firestore
+  addendum.
 
 ---
 
@@ -551,9 +592,15 @@ New Gradle module, following `ge-star-v2`'s exact shape:
    testing before the full run" note below), so the whole pipeline is known
    to work before paying for a better model to run through it.
 6. **Shadow mode → gated live rollout** (§3.7) — shadow mode (step 2 of
-   §3.7) is live-testable today via `scripts/launch-with-ppo.sh`. Steps 3-4
-   (small-stakes live run, guardrail loosening) are not started and
-   shouldn't be until shadow-mode output has actually been reviewed.
+   §3.7) is live-testable today via `scripts/launch-with-ppo.sh`, and is
+   where things currently stand: logged in, watching the dashboard and
+   panel suggestions. Steps 3-4 (small-stakes live run, guardrail loosening)
+   are not started and shouldn't be until shadow-mode output has actually
+   been reviewed.
+6.5. **Web dashboard** ✅ (added after milestone 4, not part of the original
+   order — see §4.1). A read-only Vue/Firebase Hosting observability layer
+   over the same Firestore schema, useful for reviewing shadow-mode output
+   (step 2 above) without needing the RuneLite client window open.
 
 **Gaps this document once flagged, now closed:**
 - `OrderQueue` (§2.2's table) now persists `QUEUED`/`SUBMITTED` orders via
