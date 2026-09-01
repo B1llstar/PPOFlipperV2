@@ -36,6 +36,9 @@ import java.util.Optional;
  *   decision tick, written by this class on behalf of the plugin (PROPOSAL.md §3.6/§4)</li>
  *   <li>{@code accounts/{accountHash}/decision/response} - one transient doc, overwritten by the
  *   Python inference worker; read (not written) by this class</li>
+ *   <li>{@code accounts/{accountHash}/presence/heartbeat} - "this account is actively running
+ *   the plugin," periodically refreshed, so the worker can discover accounts to watch instead
+ *   of needing an account hash passed in manually</li>
  * </ul>
  *
  * <p>Every method here is a synchronous blocking HTTP call - callers (see
@@ -238,6 +241,43 @@ public class PPOFlipperStarFirestoreClient {
         // deleting an already-absent doc is not an error condition here.
         if (response.statusCode() != 200) {
             throw new IOException("watchlist delete failed: HTTP " + response.statusCode() + " - " + response.body());
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // presence - a single doc per account announcing "this account is actively running the
+    // plugin right now," so the Python inference worker (data/ppo/inference_worker.py) can
+    // discover which accounts to watch without needing the account hash passed in manually.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Upserts this account's presence heartbeat. Called once on login (once the account hash
+     * resolves) and periodically thereafter (see {@link PPOFlipperStarFirestoreSync}) - the
+     * worker's own account-discovery scan (re-run periodically, not just once at its own
+     * startup) uses {@code lastSeenMillis} to tell an actively-running account apart from one
+     * that was closed a while ago and just never got its presence doc cleaned up (no explicit
+     * "going offline" write exists - simpler to let presence go stale than to guarantee a
+     * best-effort delete fires on every possible shutdown path, including a crashed client).
+     */
+    public void putPresence(long accountHash, String pluginVersion) throws IOException, InterruptedException {
+        JsonObject fields = new JsonObject();
+        fields.add("lastSeenMillis", integerValue(System.currentTimeMillis()));
+        fields.add("pluginVersion", stringValue(pluginVersion));
+
+        JsonObject body = new JsonObject();
+        body.add("fields", fields);
+
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(accountRoot(accountHash) + "/presence/heartbeat"))
+            .header("Authorization", "Bearer " + auth.getAccessToken())
+            .header("Content-Type", "application/json")
+            .timeout(Duration.ofSeconds(10))
+            .method("PATCH", HttpRequest.BodyPublishers.ofString(body.toString()))
+            .build();
+
+        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IOException("presence upsert failed: HTTP " + response.statusCode() + " - " + response.body());
         }
     }
 

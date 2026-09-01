@@ -63,6 +63,17 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // "This account is actively running the plugin right now" heartbeat, refreshed on a fixed
+    // schedule by PPOFlipperStarFirestoreSync (independent of any local state mutation, unlike
+    // portfolio/watchlist/etc above) - lets the Python inference worker
+    // (data/ppo/inference_worker.py) discover which accounts to open a decision/request listener
+    // for by scanning accounts/* for a recent heartbeat, rather than needing an account hash
+    // passed to it manually on the command line. Admin-only, same pattern as every other
+    // accounts/{accountHash}/* collection here.
+    match /accounts/{accountHash}/presence/heartbeat {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

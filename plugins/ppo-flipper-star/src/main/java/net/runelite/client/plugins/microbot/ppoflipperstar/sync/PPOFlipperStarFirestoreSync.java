@@ -13,6 +13,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Best-effort background bridge between PPOFlipperStar's local {@code ConfigManager}-backed
@@ -34,15 +36,27 @@ import java.util.concurrent.Executors;
  *   calling thread (a script tick, the EDT). A failure here is logged and dropped - local state
  *   is already correct and persisted locally by the time these are called, Firestore is only
  *   ever catching up to it.</li>
+ *   <li><b>Presence heartbeat</b> ({@link #pushPresenceHeartbeat}): a third, independent
+ *   direction - refreshed on its own fixed schedule (not tied to any local mutation) so the
+ *   Python inference worker can auto-discover which accounts are actively running the plugin
+ *   without an account hash ever needing to be passed to it manually. See
+ *   {@link PPOFlipperStarFirestoreClient#putPresence}.</li>
  * </ul>
  */
 @Slf4j
 @Singleton
 public class PPOFlipperStarFirestoreSync {
 
+    // How often to refresh accounts/{hash}/presence/heartbeat while the plugin runs - the
+    // Python inference worker (data/ppo/inference_worker.py) re-scans for active accounts on
+    // roughly this same cadence, so an account that just started up is picked up within one
+    // scan interval rather than needing the worker restarted.
+    private static final long PRESENCE_HEARTBEAT_INTERVAL_SECONDS = 60;
+
     private final AccountIdentity accountIdentity;
 
     private volatile ExecutorService executor;
+    private volatile ScheduledExecutorService presenceExecutor;
     private volatile PPOFlipperStarFirestoreClient client;
     private volatile boolean enabled;
 
@@ -101,6 +115,15 @@ public class PPOFlipperStarFirestoreSync {
             return t;
         });
         enabled = true;
+
+        presenceExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "PPOFlipperStar-Presence");
+            t.setDaemon(true);
+            return t;
+        });
+        presenceExecutor.scheduleWithFixedDelay(
+            this::pushPresenceHeartbeat, 0, PRESENCE_HEARTBEAT_INTERVAL_SECONDS, TimeUnit.SECONDS);
+
         log.info("PPOFlipperStar: cloud sync started.");
     }
 
@@ -111,6 +134,44 @@ public class PPOFlipperStarFirestoreSync {
         executor = null;
         if (executorRef != null) {
             executorRef.shutdownNow();
+        }
+        ScheduledExecutorService presenceExecutorRef = presenceExecutor;
+        presenceExecutor = null;
+        if (presenceExecutorRef != null) {
+            presenceExecutorRef.shutdownNow();
+        }
+    }
+
+    /**
+     * Refreshes this account's presence heartbeat (see {@link PPOFlipperStarFirestoreClient#putPresence})
+     * so the Python inference worker's account-discovery scan finds it - see PROPOSAL.md's
+     * "auto-detects the account on login" design: the worker never needs an account hash passed
+     * in manually, it lists {@code accounts/*} for documents with a recent heartbeat. A no-op
+     * (logged at debug, not warn - a not-yet-logged-in session with no account hash yet is the
+     * expected steady state on every plugin startup, not a failure) until
+     * {@link AccountIdentity#getAccountHash} has something to report.
+     */
+    private void pushPresenceHeartbeat() {
+        PPOFlipperStarFirestoreClient clientRef = client;
+        if (clientRef == null) return;
+
+        Optional<Long> accountHash = accountIdentity.getAccountHash();
+        if (!accountHash.isPresent()) {
+            log.debug("PPOFlipperStar: skipping presence heartbeat, no account hash resolved yet.");
+            return;
+        }
+
+        try {
+            // Not load-bearing for anything (the worker only cares about lastSeenMillis to
+            // decide whether an account is actively running the plugin) - just a
+            // nice-to-have diagnostic if it's ever useful to see which plugin version wrote a
+            // given heartbeat. No manifest/build-versioning wiring exists in this Gradle module
+            // to read a real version string at runtime, so this is deliberately a plain literal
+            // rather than a fragile reflection-based lookup that would silently return null in a
+            // shaded/sideloaded jar with no version metadata set.
+            clientRef.putPresence(accountHash.get(), "1.0.0");
+        } catch (Exception e) {
+            log.debug("PPOFlipperStar: presence heartbeat failed - {}", e.getMessage());
         }
     }
 

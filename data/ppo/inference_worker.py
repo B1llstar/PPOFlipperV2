@@ -44,10 +44,25 @@ Flow per decision tick (see PROPOSAL.md 3.6 for the full schema)
 3. The plugin either polls or listens on decision/response and ignores any
    response whose tickId doesn't match the most recent request it sent.
 
+Account discovery
+------------------
+By default (no --account-hash given) this worker auto-discovers accounts to
+watch by periodically scanning accounts/{accountHash}/presence/heartbeat
+(a doc PPOFlipperStarFirestoreSync refreshes every ~60s while the plugin
+runs - see that class's javadoc). This means no account hash ever needs to
+be found or passed in manually: enable the plugin, log in, and within one
+scan interval this worker starts watching that account. An account whose
+heartbeat goes stale (no refresh within STALE_THRESHOLD_SECONDS - the
+plugin closed, crashed, or was disabled) has its InferenceWorker stopped on
+the next scan. --account-hash is still available to force-watch one
+specific account without waiting on discovery (e.g. for testing against a
+hash you already know), skipping the scan entirely.
+
 Usage
 ------
-    python inference_worker.py --account-hash 123456789
-    python inference_worker.py --account-hash 123456789 --checkpoint ../models/ppo/checkpoints/ppo_200000.pth
+    python inference_worker.py                        # auto-discover accounts via presence
+    python inference_worker.py --account-hash 123456789   # watch exactly one account, no discovery
+    python inference_worker.py --checkpoint ../models/ppo/checkpoints/ppo_200000.pth
 """
 
 from __future__ import annotations
@@ -500,12 +515,126 @@ class InferenceWorker:
         )
 
 
+class WorkerSupervisor:
+    """Owns a dynamic set of InferenceWorker instances, one per account whose
+    accounts/{accountHash}/presence/heartbeat is fresh - see this module's
+    "Account discovery" docstring section for the full picture. Periodically
+    (SCAN_INTERVAL_SECONDS) lists every document in the top-level `accounts`
+    collection, checks each one's presence/heartbeat subdocument's
+    lastSeenMillis against STALE_THRESHOLD_SECONDS, and starts/stops
+    InferenceWorkers to match: a newly-fresh account gets a worker started,
+    an account whose heartbeat has gone stale (plugin closed/crashed/
+    disabled) gets its worker stopped and removed.
+
+    One worker per account is maintained here for the same reason
+    InferenceWorker itself only ever watches one account
+    (PROPOSAL.md 3.6's "one worker per account, to avoid a race") - this
+    class doesn't change that invariant, it just automates deciding which
+    accounts need one, and manages potentially many of them in a single
+    process (this is also the mechanism a future central multi-account
+    server would use, per the proposal's eventual goal - this supervisor
+    already works that way today, it just usually finds only one account).
+    """
+
+    # Slightly more than 2x the plugin's own ~60s heartbeat refresh interval
+    # (see PPOFlipperStarFirestoreSync.PRESENCE_HEARTBEAT_INTERVAL_SECONDS) -
+    # tolerates one missed heartbeat (a transient network hiccup) without
+    # immediately tearing down a worker for an account that's still actually
+    # running.
+    STALE_THRESHOLD_SECONDS = 150
+
+    # How often to re-scan accounts/* for presence changes. Matches the
+    # plugin's own heartbeat cadence closely enough that a newly-started
+    # account is picked up within roughly one heartbeat interval, without
+    # scanning so often it meaningfully adds to Firestore read volume (this
+    # is a small `list documents` call, not a per-account read, so even a
+    # fairly tight interval here is cheap).
+    SCAN_INTERVAL_SECONDS = 30
+
+    def __init__(self, db: firestore.Client, model: PPO, checkpoint_version: "CheckpointVersion"):
+        self.db = db
+        self.model = model
+        self.checkpoint_version = checkpoint_version
+        self._workers: dict[int, InferenceWorker] = {}
+        self._stop_event = threading.Event()
+
+    def _fresh_account_hashes(self) -> set[int]:
+        """Every account hash under accounts/* whose presence/heartbeat.lastSeenMillis
+        is within STALE_THRESHOLD_SECONDS of now. A missing presence/heartbeat doc (an
+        account that has other collections - portfolio, watchlist - but was never
+        active while running a build with the presence feature, or simply isn't
+        running the plugin right now) is treated as not-fresh, not an error."""
+        fresh: set[int] = set()
+        now_millis = time.time() * 1000.0
+        threshold_millis = self.STALE_THRESHOLD_SECONDS * 1000.0
+
+        try:
+            account_docs = list(self.db.collection("accounts").list_documents())
+        except Exception as e:
+            log.warning("Account-discovery scan failed to list accounts/* - %s", e)
+            return fresh
+
+        for account_doc_ref in account_docs:
+            try:
+                account_hash = int(account_doc_ref.id)
+            except ValueError:
+                continue
+
+            try:
+                heartbeat = account_doc_ref.collection("presence").document("heartbeat").get()
+            except Exception as e:
+                log.debug("Presence read failed for account %s (treating as not-fresh) - %s", account_hash, e)
+                continue
+
+            if not heartbeat.exists:
+                continue
+            last_seen = heartbeat.to_dict().get("lastSeenMillis")
+            if last_seen is None:
+                continue
+            if now_millis - float(last_seen) <= threshold_millis:
+                fresh.add(account_hash)
+
+        return fresh
+
+    def _scan_once(self) -> None:
+        fresh = self._fresh_account_hashes()
+        current = set(self._workers.keys())
+
+        for account_hash in fresh - current:
+            log.info("Account %s presence detected, starting inference worker for it.", account_hash)
+            worker = InferenceWorker(self.db, account_hash, self.model, self.checkpoint_version)
+            worker.start()
+            self._workers[account_hash] = worker
+
+        for account_hash in current - fresh:
+            log.info("Account %s presence went stale, stopping its inference worker.", account_hash)
+            self._workers.pop(account_hash).stop()
+
+    def run_forever(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self._scan_once()
+            except Exception as e:
+                # Never let a scan failure kill the supervisor loop - a transient
+                # Firestore error on one scan shouldn't tear down every already-running
+                # worker, it should just try again next interval.
+                log.error("Account-discovery scan failed unexpectedly: %s", e, exc_info=True)
+            self._stop_event.wait(self.SCAN_INTERVAL_SECONDS)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        for worker in self._workers.values():
+            worker.stop()
+        self._workers.clear()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--account-hash", type=int, required=True,
-                         help="The RuneScape account hash (Client.getAccountHash()) whose "
-                              "accounts/{accountHash}/decision/request to watch. Multi-account "
-                              "sharding is future work - this worker watches exactly one account.")
+    parser.add_argument("--account-hash", type=int, default=None,
+                         help="Watch exactly one account's accounts/{accountHash}/decision/request, "
+                              "skipping auto-discovery entirely. Omit (the default) to auto-discover "
+                              "every account with a fresh accounts/{accountHash}/presence/heartbeat "
+                              "instead - see this module's docstring 'Account discovery' section.")
     parser.add_argument("--checkpoint", type=pathlib.Path, default=DEFAULT_CHECKPOINT_PATH,
                          help=f"Path to a .pth policy state_dict (default: {DEFAULT_CHECKPOINT_PATH})")
     parser.add_argument("--service-account-path", type=pathlib.Path, default=DEFAULT_SERVICE_ACCOUNT_PATH,
@@ -526,20 +655,43 @@ def main() -> None:
     # at this path is being used, per the task's explicit instruction.
     db = firestore.Client.from_service_account_json(str(args.service_account_path))
 
-    worker = InferenceWorker(db, args.account_hash, model, checkpoint_version)
+    if args.account_hash is not None:
+        log.info("Watching exactly account %s (auto-discovery skipped, --account-hash given).", args.account_hash)
+        worker = InferenceWorker(db, args.account_hash, model, checkpoint_version)
+
+        def _handle_sigint(signum, frame):
+            log.info("Shutting down (signal %s)...", signum)
+            worker.stop()
+
+        signal.signal(signal.SIGINT, _handle_sigint)
+        signal.signal(signal.SIGTERM, _handle_sigint)
+
+        worker.start()
+        try:
+            worker.wait_forever()
+        finally:
+            worker.stop()
+        log.info("Stopped.")
+        return
+
+    log.info(
+        "No --account-hash given - auto-discovering accounts via presence heartbeat "
+        "(scanning every %ss, treating a heartbeat stale after %ss).",
+        WorkerSupervisor.SCAN_INTERVAL_SECONDS, WorkerSupervisor.STALE_THRESHOLD_SECONDS,
+    )
+    supervisor = WorkerSupervisor(db, model, checkpoint_version)
 
     def _handle_sigint(signum, frame):
         log.info("Shutting down (signal %s)...", signum)
-        worker.stop()
+        supervisor.stop()
 
     signal.signal(signal.SIGINT, _handle_sigint)
     signal.signal(signal.SIGTERM, _handle_sigint)
 
-    worker.start()
     try:
-        worker.wait_forever()
+        supervisor.run_forever()
     finally:
-        worker.stop()
+        supervisor.stop()
     log.info("Stopped.")
 
 
