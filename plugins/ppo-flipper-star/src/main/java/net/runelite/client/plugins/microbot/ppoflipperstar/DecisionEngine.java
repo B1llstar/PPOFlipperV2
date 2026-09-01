@@ -26,24 +26,22 @@ import java.util.concurrent.atomic.AtomicLong;
  * from {@link PPOFlipperStarScript} so the (fairly involved) state-vector construction and its
  * documented approximations live in one focused place.
  *
- * <p><b>Correctness gap, stated plainly:</b> {@code data/ppo/env.py}'s observation is built from
- * {@code data/ppo/features.py}'s rolling-window features (spread_pct plus volatility/mean_price/
- * volume/momentum at 1h/6h/24h - 12-, 72-, and 288-block rolling aggregates over 5-minute-block
- * historical data) computed offline over {@code data/raw/5m/*.parquet}. The live Java plugin has
- * no equivalent rolling time-series store - only {@link WikiPriceClient}'s single most-recent
- * insta-buy/insta-sell snapshot per item, refreshed on demand. This class does NOT reimplement a
- * rolling-window history buffer in Java (a real feature, out of scope for this milestone - flagged
- * here rather than silently faked): every 1h/6h/24h-windowed feature is approximated from the same
- * single live snapshot, using it as a stand-in for the (unavailable) windowed mean/volatility/
- * volume/momentum -- see {@link #buildMarketFeatures} for exactly which fields are real vs.
- * approximated. This means the live observation the model sees is systematically less informative
- * than what it was trained/backtested on (it has no real sense of recent trend/volatility), which
- * is precisely the kind of live-vs-backtest mismatch PROPOSAL.md §3.7 says shadow mode exists to
- * surface before any GP is at risk - this is not a defect to silently work around, it is the
- * expected first finding of running shadow mode at all. A faithful fix would maintain a rolling
- * per-item price/volume history buffer fed by repeated {@link WikiPriceClient} polls (or a
- * dedicated historical-candle endpoint) inside the plugin; that is real, non-trivial future work,
- * not something to fake plausibly here.
+ * <p><b>Live feature fidelity (previously a known gap, now fixed):</b> {@code data/ppo/env.py}'s
+ * observation is built from {@code data/ppo/features.py}'s rolling-window features (spread_pct
+ * plus volatility/mean_price/volume/momentum at 1h/6h/24h - 12-, 72-, and 288-block rolling
+ * aggregates over 5-minute-block historical data) computed offline over
+ * {@code data/raw/5m/*.parquet}. Earlier versions of this class approximated all of that from a
+ * single live {@link WikiPriceClient} snapshot (volatility/momentum/volume flattened to 0, since
+ * there was no rolling history to compute them from at all). {@link WikiHistoryBuffer} now polls
+ * the same bulk wiki {@code /5m} endpoint the training data itself came from and accumulates a
+ * real per-item rolling window, so {@link #buildMarketFeatures} computes genuine rolling features
+ * via {@link WikiHistoryBuffer#computeRollingFeatures} rather than approximating them. The
+ * remaining caveat is cold-start, not a permanent gap: a freshly-started plugin (or a
+ * newly-watchlisted item) has a thin or empty history buffer until real wall-clock time passes to
+ * fill it - see {@link WikiHistoryBuffer#computeRollingFeatures}'s javadoc for exactly how thin
+ * windows are handled (matching {@code build_features.py}'s own {@code min_periods} semantics,
+ * not fabricating a value). This is still a live-vs-backtest difference worth watching in shadow
+ * mode per PROPOSAL.md §3.7, just a shrinking one rather than a fixed 0.0 forever.
  */
 @Slf4j
 @Singleton
@@ -70,6 +68,7 @@ public class DecisionEngine {
     private final GoldManager goldManager;
     private final WatchlistManager watchlistManager;
     private final PPOFlipperStarFirestoreSync firestoreSync;
+    private final WikiHistoryBuffer wikiHistoryBuffer;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
 
@@ -77,12 +76,14 @@ public class DecisionEngine {
 
     @Inject
     public DecisionEngine(PortfolioManager portfolio, BuyLimitLedger buyLimitLedger, GoldManager goldManager,
-                           WatchlistManager watchlistManager, PPOFlipperStarFirestoreSync firestoreSync) {
+                           WatchlistManager watchlistManager, PPOFlipperStarFirestoreSync firestoreSync,
+                           WikiHistoryBuffer wikiHistoryBuffer) {
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
         this.goldManager = goldManager;
         this.watchlistManager = watchlistManager;
         this.firestoreSync = firestoreSync;
+        this.wikiHistoryBuffer = wikiHistoryBuffer;
     }
 
     /** Result of one full decide-and-wait round, for the script to turn into panel suggestions. */
@@ -171,7 +172,7 @@ public class DecisionEngine {
         double avgLow = price.instaSellPrice;
         double midPrice = (avgHigh + avgLow) / 2.0;
 
-        Map<String, Double> marketFeatures = buildMarketFeatures(avgHigh, avgLow, midPrice);
+        Map<String, Double> marketFeatures = buildMarketFeatures(itemId, avgHigh, avgLow, midPrice);
 
         int heldQuantity = portfolio.getHeldQuantity(itemId);
         long avgCost = portfolio.getAverageCost(itemId);
@@ -209,30 +210,28 @@ public class DecisionEngine {
     }
 
     /**
-     * Approximates data/ppo/features.py's 13 rolling-window market features from a single live
-     * Wiki insta-buy/insta-sell snapshot - see this class's javadoc for the full explanation of
-     * why this is an approximation, not a faithful reproduction, and what a real fix looks like.
-     * spread_pct is computed exactly the same way features.py does (it's genuinely a
-     * point-in-time feature, not a rolling one, so this one has no approximation gap at all).
-     * Every *_1h/_6h/_24h field reuses the same live snapshot for all three horizons since no
-     * rolling history is available - volatility/momentum are set to 0 (a real "no signal"
-     * value, consistent with clean_market_features.py's own fill-value for insufficient
-     * history) rather than a fabricated nonzero number, mean_price_* is set to the current mid
-     * price itself (net-zero effect after env.py's own normalization step, which rescales
-     * mean_price_* to (mean_price / mid_price - 1) - exactly 0.0 here since they're equal, which
-     * is a defensible "no trend information available" encoding), and volume_* is left as 0 since
-     * the plugin has no historical volume figure at all here (only WikiPriceClient's price
-     * fields, no volume).
+     * Builds data/ppo/features.py's 13 rolling-window market features from
+     * {@link WikiHistoryBuffer}'s real accumulated per-item history. spread_pct is a genuinely
+     * point-in-time feature (computed the same way features.py does, from the current live
+     * snapshot, not the rolling buffer) - the *_1h/_6h/_24h fields come from
+     * {@link WikiHistoryBuffer#computeRollingFeatures}, which reproduces
+     * {@code compute_rolling_features}'s formulas exactly. See that method's javadoc for
+     * cold-start behavior (thin/empty history shortly after startup or for a newly-watchlisted
+     * item) - not something this method papers over, just inherent to needing real elapsed
+     * wall-clock time to build real history.
      */
-    private Map<String, Double> buildMarketFeatures(double avgHigh, double avgLow, double midPrice) {
+    private Map<String, Double> buildMarketFeatures(int itemId, double avgHigh, double avgLow, double midPrice) {
         Map<String, Double> features = new LinkedHashMap<>();
         double spreadPct = avgLow > 0 ? (avgHigh - avgLow) / avgLow : 0.0;
         features.put("spread_pct", spreadPct);
+
+        Map<String, WikiHistoryBuffer.RollingFeatures> rolling = wikiHistoryBuffer.computeRollingFeatures(itemId, midPrice);
         for (String window : new String[]{"1h", "6h", "24h"}) {
-            features.put("volatility_" + window, 0.0);
-            features.put("mean_price_" + window, midPrice);
-            features.put("volume_" + window, 0.0);
-            features.put("momentum_" + window, 0.0);
+            WikiHistoryBuffer.RollingFeatures f = rolling.get(window);
+            features.put("volatility_" + window, f.volatility);
+            features.put("mean_price_" + window, f.meanPrice);
+            features.put("volume_" + window, f.volume);
+            features.put("momentum_" + window, f.momentum);
         }
         return features;
     }

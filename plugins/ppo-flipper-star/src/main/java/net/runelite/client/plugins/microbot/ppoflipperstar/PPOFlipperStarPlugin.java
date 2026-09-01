@@ -83,6 +83,9 @@ public class PPOFlipperStarPlugin extends Plugin {
     @Inject
     private PPOFlipperStarFirestoreSync firestoreSync;
 
+    @Inject
+    private WikiHistoryBuffer wikiHistoryBuffer;
+
     private PPOFlipperStarPanel panel;
     private NavigationButton navButton;
 
@@ -106,6 +109,13 @@ public class PPOFlipperStarPlugin extends Plugin {
 
         firestoreSync.start(config);
         startCloudReconcile();
+
+        // Starts immediately regardless of whether the script/Execute has been run, or whether
+        // any items are watchlisted yet - the buffer accumulates history for whatever gets
+        // watchlisted later so it isn't starting cold the moment DECIDE actually needs it. See
+        // WikiHistoryBuffer's class javadoc for why this exists (real rolling features for the
+        // model, replacing the flat-zero approximation DecisionEngine used before).
+        wikiHistoryBuffer.start();
     }
 
     @Override
@@ -115,6 +125,7 @@ public class PPOFlipperStarPlugin extends Plugin {
         overlayManager.remove(overlay);
         firestoreSync.stop();
         eventBus.unregister(accountIdentity);
+        wikiHistoryBuffer.stop();
     }
 
     /**
