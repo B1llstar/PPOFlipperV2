@@ -15,6 +15,22 @@
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "tradeHistory",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "itemId", "order": "ASCENDING" },
+        { "fieldPath": "timestampMillis", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "tradeHistory",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "action", "order": "ASCENDING" },
+        { "fieldPath": "timestampMillis", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

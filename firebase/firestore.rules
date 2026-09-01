@@ -3,6 +3,23 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ---------------------------------------------------------------------------------------
+    // PPOFlipperStar dashboard read-access allowlist (Vue app under firebase/web/, built to
+    // firebase/public/ - see firebase.json's hosting.public). Signed in via Google auth only.
+    //
+    // This function is intentionally the ONLY thing that ever grants a "true" for read access
+    // to anything under accounts/{accountHash}/** - every write stays `if false` unconditionally
+    // (service-account/admin-only, bypassing rules entirely, same as before this change) so the
+    // dashboard can never become a write path no matter how this allowlist evolves later.
+    function isAllowlistedDashboardViewer() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email in [
+          'billborkowski7@gmail.com',
+          'crigne4lyfe@gmail.com'
+        ];
+    }
+
     // Orders are created/updated only through Cloud Functions (which run with
     // admin privileges and bypass these rules entirely) so that quantity/price
     // guardrails and ownership are always enforced server-side. Signed-in users
@@ -25,25 +42,30 @@ service cloud.firestore {
     // PPOFlipperStar's own per-account state (portfolio/cost-basis, buy-limit ledger, watchlist,
     // and an append-only trade-history log), keyed by the RuneScape account's stable
     // Client.getAccountHash() - see
-    // plugins/ppo-flipper-star/.../sync/PPOFlipperStarFirestoreClient.java. Admin-only, same
-    // pattern as buyLimits above: written directly by the plugin's service-account credentials
-    // (bypassing these rules the same way Cloud Functions do), never through a client SDK - no
-    // client read/write path exists or is needed, since this is Firestore-as-durable-cache for
-    // the plugin's own local state, not anything a web UI reads yet.
+    // plugins/ppo-flipper-star/.../sync/PPOFlipperStarFirestoreClient.java. Writes stay
+    // unconditionally admin-only forever (written directly by the plugin's service-account
+    // credentials and the Python inference worker, bypassing these rules the same way Cloud
+    // Functions do - never through a client SDK). Reads are now opened up, read-only, to the
+    // allowlisted dashboard viewer defined above (firebase/web/ - a Vue read-only observability
+    // dashboard, never a write path).
     match /accounts/{accountHash}/portfolio/{itemId} {
-      allow read, write: if false;
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
     }
 
     match /accounts/{accountHash}/buyLimitLedger/{itemId} {
-      allow read, write: if false;
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
     }
 
     match /accounts/{accountHash}/watchlist/{itemId} {
-      allow read, write: if false;
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
     }
 
     match /accounts/{accountHash}/tradeHistory/{tradeId} {
-      allow read, write: if false;
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
     }
 
     // Model<->plugin transport (PROPOSAL.md §3.6/§4): decision/request is written by the plugin
@@ -51,16 +73,17 @@ service cloud.firestore {
     // appending) and read by the Python inference worker's Firestore snapshot listener;
     // decision/response is written by that worker and read by the plugin. Both are transient
     // (overwritten every tick, not a growing history - tradeHistory above remains the durable
-    // record of what actually happened) and admin-only, same pattern as every other
-    // accounts/{accountHash}/* collection here: written directly by service-account credentials
-    // on both the plugin and worker sides (bypassing these rules the same way Cloud Functions
-    // do), never through any client SDK.
+    // record of what actually happened). Writes stay admin-only; reads are opened up to the
+    // allowlisted dashboard viewer so the Live Dashboard can show "what the model was shown /
+    // what it suggested" side by side, same as the collections above.
     match /accounts/{accountHash}/decision/request {
-      allow read, write: if false;
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
     }
 
     match /accounts/{accountHash}/decision/response {
-      allow read, write: if false;
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
     }
 
     // "This account is actively running the plugin right now" heartbeat, refreshed on a fixed
@@ -68,10 +91,44 @@ service cloud.firestore {
     // portfolio/watchlist/etc above) - lets the Python inference worker
     // (data/ppo/inference_worker.py) discover which accounts to open a decision/request listener
     // for by scanning accounts/* for a recent heartbeat, rather than needing an account hash
-    // passed to it manually on the command line. Admin-only, same pattern as every other
-    // accounts/{accountHash}/* collection here.
+    // passed to it manually on the command line. Writes stay admin-only. Reads are opened up to
+    // the allowlisted dashboard viewer both directly (single-account presence display) and via
+    // the collection-group rule below (multi-account discovery, since the dashboard doesn't know
+    // account hashes in advance).
     match /accounts/{accountHash}/presence/heartbeat {
-      allow read, write: if false;
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
+    }
+
+    // Account-discovery collection-group rule: the dashboard doesn't know any accountHash in
+    // advance (Firestore security rules can't "list" arbitrary top-level accounts/* documents
+    // without already knowing their names), so it instead runs a
+    // collectionGroup(db, 'presence') query client-side and reads each match's single
+    // "heartbeat" doc off the returned snapshot.
+    //
+    // Deliberately grouped on "presence" (the subcollection), NOT "heartbeat" (the fixed-ID
+    // document inside it) - verified empirically against the Firestore emulator
+    // (firebase-tools 14.6.0, cloud-firestore-emulator v1.19.8) before relying on this, per this
+    // task's explicit "flag if you're not fully confident" instruction: a collection-group query
+    // grouped on a leaf collection whose every instance holds exactly one fixed-name document
+    // (every accounts/{hash}/presence subcollection here contains only "heartbeat") reliably
+    // returned ZERO results in that emulator even under fully-open rules with the document
+    // provably present (confirmed independently via the Admin/REST API) - while grouping on
+    // "presence" (or on "tradeHistory", a collection with real auto-ID docs, tested as a control)
+    // returned every matching document correctly. Rather than ship a rule that "looks right" but
+    // is a documented empirical trap for this exact fixed-single-doc-name shape, this rule groups
+    // on "presence" - each result document IS the heartbeat doc (path
+    // accounts/{hash}/presence/heartbeat), so no data is lost, only the grouped collection id
+    // differs from what a first pass at this rule might naively use. This is deliberately a
+    // SEPARATE rule from the direct-path match above - collection-group queries are evaluated
+    // against rules whose path pattern matches the query's collection *id*, and
+    // `match /{path=**}/presence/{doc}` is the wildcard-prefix form that applies regardless of
+    // how many segments (here: accounts/{accountHash}) come before the "presence" leaf. Read-only,
+    // same allowlist gate as everywhere else in this file - this rule grants no write access and
+    // does not change the direct-path rule above.
+    match /{path=**}/presence/{doc} {
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
     }
 
     match /{document=**} {
