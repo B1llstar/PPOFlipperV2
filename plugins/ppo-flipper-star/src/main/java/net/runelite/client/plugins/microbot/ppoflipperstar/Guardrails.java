@@ -112,6 +112,21 @@ public class Guardrails {
      * GE buy limit. The limit itself comes from {@link Rs2GrandExchange#getItemMappingData} - if
      * the item can't be resolved there, nothing is enforced (matches
      * {@link #checkPriceDeviation}'s same can't-resolve-so-don't-block stance).
+     *
+     * <p><b>Deliberately reads {@code mapping.tradeLimitPer4Hours} directly, NOT
+     * {@code mapping.hasTradeLimit()}/{@code getEffectiveTradeLimit()}</b> - found live, via
+     * shadow-mode testing, that those two methods are not what their names suggest: verified
+     * against the client jar's bytecode, {@code hasTradeLimit()} is
+     * {@code tradeLimitPer4Hours > 0 && tradeLimitPer4Hours < 1000} (a bounded range check, not
+     * a "do we have real limit data" check) and {@code getEffectiveTradeLimit()} clamps anything
+     * {@code >= 1000} down to a flat 500. Confirmed against the OSRS Wiki's own public mapping
+     * data that this guardrail was silently not enforcing for the overwhelming majority of real
+     * tradeable items - Fishing bait (real limit 8000), Flax (13000), Emerald (13000), Adamant
+     * dart (11000), Atlatl dart (11000) all failed {@code hasTradeLimit()} and fell through to
+     * "not enforced" here despite having perfectly real limit data available. The raw field is a
+     * plain {@code int} with {@code -1} as its "no data" sentinel (see
+     * {@code Rs2GrandExchange.fetchItemMappingData}'s bytecode) - any other value, including one
+     * {@code >= 1000}, is the item's genuine GE buy limit and must be enforced as such.
      */
     private String checkBuyLimit(PPOFlipperOrder order) {
         int itemId = order.getItemId() > 0 ? order.getItemId() : itemManager.getItemId(order.getItemName());
@@ -120,11 +135,11 @@ public class Guardrails {
         }
 
         ItemMappingData mapping = Rs2GrandExchange.getItemMappingData(itemId);
-        if (mapping == null || !mapping.hasTradeLimit()) {
+        if (mapping == null || mapping.tradeLimitPer4Hours <= 0) {
             return null;
         }
 
-        int limit = mapping.getEffectiveTradeLimit();
+        int limit = mapping.tradeLimitPer4Hours;
         int alreadyBought = buyLimitLedger.quantityBoughtInWindow(itemId, System.currentTimeMillis());
         if (alreadyBought + order.getQuantity() > limit) {
             return String.format(

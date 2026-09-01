@@ -190,8 +190,16 @@ public class DecisionEngine {
             .map(e -> (double) e.getHoldingDurationMillis(System.currentTimeMillis()) / HOLDING_DURATION_NORMALIZATION_MILLIS)
             .orElse(0.0);
 
+        // Deliberately reads tradeLimitPer4Hours directly, not hasTradeLimit()/
+        // getEffectiveTradeLimit() - see Guardrails.checkBuyLimit's javadoc for the full story:
+        // those two methods are a bytecode-confirmed bug/naming trap (hasTradeLimit() is really
+        // "limit > 0 AND < 1000", getEffectiveTradeLimit() clamps anything >= 1000 to 500), which
+        // silently zeroed buyLimit for the overwhelming majority of real tradeable items - this
+        // is exactly what caused every live suggestion to come back with quantity=0 regardless of
+        // confidence (see _action_to_order in inference_worker.py: desired_qty is 0 whenever
+        // buyLimit <= 0). -1 is the field's real "no data" sentinel; anything else is genuine.
         ItemMappingData mapping = Rs2GrandExchange.getItemMappingData(itemId);
-        int buyLimit = (mapping != null && mapping.hasTradeLimit()) ? mapping.getEffectiveTradeLimit() : 0;
+        int buyLimit = (mapping != null && mapping.tradeLimitPer4Hours > 0) ? mapping.tradeLimitPer4Hours : 0;
         int alreadyBought = buyLimitLedger.quantityBoughtInWindow(itemId, System.currentTimeMillis());
         int headroom = Math.max(buyLimit - alreadyBought, 0);
         double limitHeadroomUsed = buyLimit > 0 ? (double) alreadyBought / buyLimit : 0.0;
