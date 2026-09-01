@@ -202,3 +202,67 @@ Microbot.getClientThread().invoke(() -> {
 
 `@Subscribe` event handlers (`onGameTick`, etc.) already run on the client
 thread automatically — no need to wrap those.
+
+## PPOFlipperStar web dashboard (Firebase Hosting)
+
+`firebase/web/` is a Vue 3 dashboard that reads PPOFlipperStar's Firestore
+data (portfolio, trade history, buy-limit ledger, watchlist, live model
+suggestions) read-only, for observability — it can never place trades. It
+deploys to Firebase Hosting under the `ppoflipperopus` project, live at
+https://ppoflipperopus.web.app. See
+[plugins/ppo-flipper-star/PROPOSAL.md](plugins/ppo-flipper-star/PROPOSAL.md)
+§4 for the full Firestore schema it reads.
+
+### Deploying an update
+
+```bash
+cd firebase/web
+npm install
+npm run build              # writes into ../public/, the Hosting root
+
+cd ..
+firebase deploy --only hosting --project ppoflipperopus
+```
+
+If `firestore.rules` or `firestore.indexes.json` changed too (e.g. a new
+collection the dashboard needs to read), deploy those in the same pass:
+
+```bash
+firebase deploy --only firestore:rules,firestore:indexes,hosting --project ppoflipperopus
+```
+
+`firebase/public/` is gitignored (build output only, same convention as
+`firebase/functions/lib/`) — always rebuild before deploying, don't deploy
+stale output.
+
+### Adding a new user to the dashboard's email allowlist
+
+Access is gated by a hardcoded email allowlist in `firebase/firestore.rules`
+(`isAllowlistedDashboardViewer()`), not an open sign-in — anyone can sign in
+with Google, but only an allowlisted email can actually read any data.
+
+1. Edit the email array in `firebase/firestore.rules`:
+   ```
+   function isAllowlistedDashboardViewer() {
+     return request.auth != null
+       && request.auth.token.email != null
+       && request.auth.token.email in [
+         'billborkowski7@gmail.com',
+         'crigne4lyfe@gmail.com',
+         'new-person@example.com'   // add here
+       ];
+   }
+   ```
+2. Deploy just the rules: `firebase deploy --only firestore:rules --project ppoflipperopus`
+   (no need to rebuild/redeploy hosting for an allowlist change).
+3. Also update `ALLOWLISTED_EMAILS` in
+   `firebase/web/src/firebase/config.js` to match — it's not what enforces
+   access (the rules above are), but it's what the dashboard uses to show a
+   fast, clear "you don't have access" message instead of letting a
+   non-allowlisted user sign in and only then hit permission-denied errors
+   on every read.
+
+One-time setup this all depends on (already done for the current project,
+listed here in case the project is ever recreated): Firebase console →
+`ppoflipperopus` → Authentication → Sign-in method → enable the **Google**
+provider.
