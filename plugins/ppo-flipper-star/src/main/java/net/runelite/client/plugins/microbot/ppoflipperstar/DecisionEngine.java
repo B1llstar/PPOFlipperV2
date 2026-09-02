@@ -146,6 +146,17 @@ public class DecisionEngine {
             // incident - this was found via live testing, not anticipated in advance.
             double freeSlotsNorm = Math.max(MAX_GE_SLOTS - Rs2GrandExchange.getActiveOfferSlots().length, 0) / (double) MAX_GE_SLOTS;
 
+            // Same fix shape as the getActiveOfferSlots() hoist just above - a real incident found
+            // live: buildRequestItem's per-item wikiPriceClient.getLatestPrice(itemId) call meant
+            // up to ~300 sequential single-item HTTP requests per tick, each with its own 5s
+            // timeout. When the wiki API had a slow/unreachable stretch, every one of those 300
+            // calls queued up and timed out one after another, stalling this whole method for
+            // minutes and making autonomous trading look dead (the Python inference worker was
+            // fine the whole time - this fetch loop was the actual bottleneck). One bulk call
+            // upfront, cache-backed at the same TTL as the per-item path, so this is a cheap no-op
+            // once warm rather than a real network call every tick.
+            wikiPriceClient.refreshAllPrices();
+
             long tickId = tickIdGenerator.incrementAndGet();
             List<PPOFlipperStarFirestoreClient.DecisionRequestItem> items = new ArrayList<>();
             for (int itemId : watchedIds) {

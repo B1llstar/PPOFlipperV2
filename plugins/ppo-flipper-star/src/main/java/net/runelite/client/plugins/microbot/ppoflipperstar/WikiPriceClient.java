@@ -34,6 +34,10 @@ import java.util.concurrent.ConcurrentHashMap;
 public class WikiPriceClient {
 
     private static final String LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest?id=%d";
+    // Same endpoint with no id param - returns every tradeable item's latest price in one
+    // response (confirmed live: a plain curl against this URL returns the full dataset). See
+    // refreshAllPrices()'s javadoc for why this exists.
+    private static final String LATEST_URL_ALL = "https://prices.runescape.wiki/api/v1/osrs/latest";
     // Deliberately generic, no personal/project-identifying terms - just enough to be a real
     // contact-identifying agent per the wiki's own request (see
     // https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices), without any obligation to
@@ -66,6 +70,77 @@ public class WikiPriceClient {
     }
 
     private final Map<Integer, CachedPrice> cache = new ConcurrentHashMap<>();
+    private volatile long lastBulkFetchAtMillis = 0;
+
+    /**
+     * Fetches EVERY item's latest price in one HTTP call (the wiki's {@code /latest} endpoint
+     * with no {@code id} parameter returns the full dataset - confirmed live) and warms the cache
+     * for all of them at once. Exists specifically for {@link DecisionEngine}'s per-tick loop over
+     * every watchlisted item: calling {@link #getLatestPrice(int)} once per item there meant up to
+     * ~300 sequential single-item HTTP requests per DECIDE tick, each with its own 5s timeout - a
+     * real incident found live, where the wiki API had a slow/unreachable stretch and every one of
+     * those 300 calls queued up and timed out one after another, stalling the DECIDE loop for
+     * minutes and making autonomous trading look dead (the Python inference worker was actually
+     * fine the whole time - this per-item fetch loop was the real bottleneck, not the model).
+     *
+     * <p>Call this ONCE per tick before the per-item loop, exactly the same fix shape as
+     * {@code DecisionEngine.decide}'s own {@code Rs2GrandExchange.getActiveOfferSlots()} hoist -
+     * see that method's javadoc for the sibling incident this mirrors. Respects the same
+     * {@link #CACHE_TTL_MILLIS} as the per-item path via {@link #lastBulkFetchAtMillis}, so calling
+     * this every tick is cheap when the cache is still warm (one no-op check, not a network call).
+     * Never throws - a failed bulk fetch just leaves the cache as it was (individual
+     * {@link #getLatestPrice(int)} calls still fall back to their own per-item fetch if needed).
+     */
+    public void refreshAllPrices() {
+        if (System.currentTimeMillis() - lastBulkFetchAtMillis < CACHE_TTL_MILLIS) {
+            return;
+        }
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(LATEST_URL_ALL))
+                .header("User-Agent", USER_AGENT)
+                .timeout(Duration.ofSeconds(10))
+                .GET()
+                .build();
+
+            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                log.warn("PPOFlipperStar: bulk wiki price fetch returned HTTP {}", response.statusCode());
+                return;
+            }
+
+            JsonObject data = new JsonParser().parse(response.body()).getAsJsonObject().getAsJsonObject("data");
+            if (data == null) {
+                return;
+            }
+
+            long now = System.currentTimeMillis();
+            int updated = 0;
+            for (Map.Entry<String, com.google.gson.JsonElement> entry : data.entrySet()) {
+                Price price = parsePrice(entry.getValue().getAsJsonObject());
+                if (price == null) continue;
+                try {
+                    cache.put(Integer.parseInt(entry.getKey()), new CachedPrice(price, now));
+                    updated++;
+                } catch (NumberFormatException ignored) {
+                    // Not expected (the wiki keys this map by item id), but never let a single
+                    // malformed key break the rest of the batch.
+                }
+            }
+            lastBulkFetchAtMillis = now;
+            log.debug("PPOFlipperStar: bulk wiki price fetch updated {} item(s).", updated);
+        } catch (Exception e) {
+            log.warn("PPOFlipperStar: bulk wiki price fetch failed - {}", e.getMessage());
+        }
+    }
+
+    private static Price parsePrice(JsonObject itemPrice) {
+        // Same "high" (insta-buy)/"low" (insta-sell) convention as getLatestPrice - do not swap.
+        Integer high = itemPrice.has("high") && !itemPrice.get("high").isJsonNull() ? itemPrice.get("high").getAsInt() : null;
+        Integer low = itemPrice.has("low") && !itemPrice.get("low").isJsonNull() ? itemPrice.get("low").getAsInt() : null;
+        return (high != null && low != null) ? new Price(high, low) : null;
+    }
 
     /**
      * Live insta-buy/insta-sell reference for one item, or null if the item has no recent
@@ -101,14 +176,12 @@ public class WikiPriceClient {
 
             // The wiki's "high" is the most recent insta-buy trade (what buyers are currently
             // paying) and "low" is the most recent insta-sell trade (what sellers are currently
-            // getting) - do not swap these.
-            Integer high = itemPrice.has("high") && !itemPrice.get("high").isJsonNull() ? itemPrice.get("high").getAsInt() : null;
-            Integer low = itemPrice.has("low") && !itemPrice.get("low").isJsonNull() ? itemPrice.get("low").getAsInt() : null;
-            if (high == null || low == null) {
+            // getting) - do not swap these. See parsePrice() - same convention, shared logic.
+            Price price = parsePrice(itemPrice);
+            if (price == null) {
                 return cached != null ? cached.price : null;
             }
 
-            Price price = new Price(high, low);
             cache.put(itemId, new CachedPrice(price, System.currentTimeMillis()));
             return price;
         } catch (Exception e) {
