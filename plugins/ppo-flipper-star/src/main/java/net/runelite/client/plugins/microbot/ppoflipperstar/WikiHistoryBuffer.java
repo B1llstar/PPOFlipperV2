@@ -1,18 +1,13 @@
 package net.runelite.client.plugins.microbot.ppoflipperstar;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.google.gson.JsonSyntaxException;
-import com.google.gson.reflect.TypeToken;
 import lombok.extern.slf4j.Slf4j;
-import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreClient;
 import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
-import java.lang.reflect.Type;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -55,32 +50,36 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code latest_complete_block} does, since the most-recent block is sometimes still filling in
  * server-side.
  *
- * <p><b>Persistence, added after a real bug found during live shadow-mode testing:</b> this
- * class used to be in-memory only. Since it's a Guice singleton scoped to the plugin's own
- * injector (which RuneLite recreates fresh on every disable/re-enable, not just a genuine client
- * restart), every re-enable silently wiped accumulated history back to empty - and because real
- * volatility/momentum/volume signal needs real elapsed wall-clock hours to build (see
- * {@link #computeRollingFeatures}'s cold-start note), a buffer that never survives more than a
- * few minutes at a time in practice NEVER accumulates real signal, no matter how long it's left
- * running in total. Confirmed live: a model fed all-zero volatility/momentum on every item
- * (because the buffer kept resetting) produced a badly-mispriced SELL suggestion that a guardrail
- * correctly rejected - the guardrail did its job, but the underlying cause was this class
- * silently losing its work. Two persistence layers now guard against that:
- * <ul>
- *   <li><b>Local {@code ConfigManager} cache</b> - the buffer's full state is persisted on every
- *   successful poll and restored on construction, so a same-machine plugin restart (disable/
- *   re-enable, or a client restart) resumes exactly where it left off instead of cold-starting.</li>
- *   <li><b>Shared Firestore {@code marketHistory/{itemId}}</b> - deliberately NOT under
- *   {@code accounts/{accountHash}/}, since this is public wiki market data, not per-account
- *   state (see {@link PPOFlipperStarFirestoreClient}'s marketHistory section). The first time
- *   this buffer needs history for an item it has no local cache for at all (a fresh install, or
- *   a newly-watchlisted item nobody's ever tracked on this machine), it pulls whatever's already
- *   there to seed itself instantly - useful today as a second line of defense if the local cache
- *   is ever lost, and becomes genuinely load-bearing once a second machine/account starts running
- *   this plugin against the same Firebase project, since it won't need to cold-start for hours
- *   either. Pushed periodically (not every poll), full-replace, best-effort - Firestore being
- *   unreachable never blocks local polling from working.</li>
- * </ul>
+ * <p><b>Persistence:</b> this class used to be in-memory only. Since it's a Guice singleton
+ * scoped to the plugin's own injector (which RuneLite recreates fresh on every disable/re-enable,
+ * not just a genuine client restart), every re-enable silently wiped accumulated history back to
+ * empty - and because real volatility/momentum/volume signal needs real elapsed wall-clock hours
+ * to build (see {@link #computeRollingFeatures}'s cold-start note), a buffer that never survives
+ * more than a few minutes at a time in practice NEVER accumulates real signal, no matter how long
+ * it's left running in total. Confirmed live: a model fed all-zero volatility/momentum on every
+ * item (because the buffer kept resetting) produced a badly-mispriced SELL suggestion that a
+ * guardrail correctly rejected - the guardrail did its job, but the underlying cause was this
+ * class silently losing its work.
+ *
+ * <p>Persisted exclusively via the shared Firestore {@code marketHistory/{itemId}} collection -
+ * deliberately NOT under {@code accounts/{accountHash}/}, since this is public wiki market data,
+ * not per-account state (see {@link PPOFlipperStarFirestoreClient}'s marketHistory section). The
+ * first time this buffer needs history for an item it has no in-memory data for at all (a fresh
+ * plugin start, or a newly-watchlisted item), it pulls whatever's already there to seed itself
+ * instantly rather than cold-starting for hours - see {@link #maybeSeedFromFirestore}. Pushed
+ * periodically (not every poll - see {@link #FIRESTORE_PUSH_INTERVAL_MINUTES}), full-replace,
+ * best-effort; Firestore being unreachable never blocks local polling from working, it just means
+ * this run's candles aren't shared until connectivity returns.
+ *
+ * <p><b>No longer also persisted through local {@code ConfigManager}</b> (removed after a real
+ * incident): with ~300+ watchlisted items and a full 288-block (24h) history each, the serialized
+ * buffer grew past 12MB - and since {@code ConfigManager} rewrites this plugin's ENTIRE properties
+ * file on any single config change, persisting that on every successful poll (every ~5 minutes)
+ * created a real corruption/race window against ordinary panel config changes (a setting toggled
+ * in the panel could be clobbered by an in-flight multi-megabyte rewrite, or vice versa) -
+ * suspected as the cause of config settings intermittently appearing to revert after a restart.
+ * Firestore already provides real persistence/resilience for this specific data (see above), so
+ * the local copy was pure redundant risk, not a safety net worth keeping.
  */
 @Slf4j
 @Singleton
@@ -98,15 +97,12 @@ public class WikiHistoryBuffer {
     private static final int WINDOW_6H_BLOCKS = 72;
     private static final int WINDOW_24H_BLOCKS = 288;
 
-    private static final String CONFIG_GROUP = "ppoflipperstar";
-    private static final String HISTORY_KEY = "wikiHistoryBuffer";
-    private static final Type HISTORY_TYPE = new TypeToken<Map<Integer, List<Candle>>>() {}.getType();
-
     // How often to push the current buffer to the shared Firestore cache - not every poll (that
     // would be a write per watchlisted item every single minute, unnecessary for data that's
-    // only ever read back at cold-start). Local ConfigManager persistence (every poll) is the
-    // thing actually protecting against losing recent candles; this is just keeping the shared
-    // cross-machine copy reasonably current.
+    // only ever read back at cold-start/seed time). This buffer is in-memory only between pushes
+    // (see class javadoc - no local ConfigManager persistence), so a client restart between two
+    // pushes loses at most this many minutes of the most recent candles for items that already
+    // had a Firestore copy; a brand-new item just seeds from Firestore on first need regardless.
     private static final long FIRESTORE_PUSH_INTERVAL_MINUTES = 10;
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
@@ -149,11 +145,9 @@ public class WikiHistoryBuffer {
         }
     }
 
-    private final ConfigManager configManager;
     private final PPOFlipperStarFirestoreSync firestoreSync;
-    private final Gson gson = new Gson();
 
-    private final Map<Integer, Deque<Candle>> history;
+    private final Map<Integer, Deque<Candle>> history = new ConcurrentHashMap<>();
     // Items already checked against the shared Firestore cache (seeded from it or confirmed to
     // have their own local/live history already) - each item id is only ever seed-checked once
     // per plugin instance, on first need, not on every poll. See maybeSeedFromFirestore.
@@ -164,10 +158,8 @@ public class WikiHistoryBuffer {
     private final AtomicBoolean started = new AtomicBoolean(false);
 
     @Inject
-    public WikiHistoryBuffer(ConfigManager configManager, PPOFlipperStarFirestoreSync firestoreSync) {
-        this.configManager = configManager;
+    public WikiHistoryBuffer(PPOFlipperStarFirestoreSync firestoreSync) {
         this.firestoreSync = firestoreSync;
-        this.history = new ConcurrentHashMap<>(loadPersistedHistory());
     }
 
     /**
@@ -188,8 +180,7 @@ public class WikiHistoryBuffer {
         scheduler.scheduleWithFixedDelay(this::pollOnce, 0, 1, TimeUnit.MINUTES);
         scheduler.scheduleWithFixedDelay(this::pushAllToFirestore,
             FIRESTORE_PUSH_INTERVAL_MINUTES, FIRESTORE_PUSH_INTERVAL_MINUTES, TimeUnit.MINUTES);
-        log.info("PPOFlipperStar: wiki 5m history buffer polling started ({} item(s) restored from local cache).",
-            history.size());
+        log.info("PPOFlipperStar: wiki 5m history buffer polling started (seeding per-item from Firestore on first need).");
     }
 
     public void stop() {
@@ -273,7 +264,6 @@ public class WikiHistoryBuffer {
 
             lastFetchedBlockTimestamp = block;
             log.debug("PPOFlipperStar: wiki 5m history poll fetched block {} - {} item candle(s) added.", block, added);
-            persistLocalHistory();
         } catch (Exception e) {
             log.warn("PPOFlipperStar: wiki 5m history poll failed for block {} - {}", block, e.getMessage());
         }
@@ -291,46 +281,6 @@ public class WikiHistoryBuffer {
                 deque.removeFirst();
             }
         }
-    }
-
-    // ---------------------------------------------------------------------------------------
-    // Local ConfigManager persistence - see class javadoc's "Persistence" section for why this
-    // exists. Written after every successful poll (addCandle already ran for every item in that
-    // block by the time this is called); loaded once at construction.
-    // ---------------------------------------------------------------------------------------
-
-    private void persistLocalHistory() {
-        Map<Integer, List<Candle>> snapshot = new HashMap<>();
-        for (Map.Entry<Integer, Deque<Candle>> entry : history.entrySet()) {
-            synchronized (entry.getValue()) {
-                snapshot.put(entry.getKey(), new ArrayList<>(entry.getValue()));
-            }
-        }
-        configManager.setConfiguration(CONFIG_GROUP, HISTORY_KEY, gson.toJson(snapshot, HISTORY_TYPE));
-    }
-
-    private Map<Integer, Deque<Candle>> loadPersistedHistory() {
-        String json = configManager.getConfiguration(CONFIG_GROUP, HISTORY_KEY);
-        if (json == null || json.isEmpty()) {
-            return new HashMap<>();
-        }
-
-        Map<Integer, List<Candle>> restored;
-        try {
-            restored = gson.fromJson(json, HISTORY_TYPE);
-        } catch (JsonSyntaxException e) {
-            log.warn("PPOFlipperStar: wiki history buffer config was not valid JSON, starting empty - {}", e.getMessage());
-            return new HashMap<>();
-        }
-        if (restored == null) {
-            return new HashMap<>();
-        }
-
-        Map<Integer, Deque<Candle>> result = new HashMap<>();
-        for (Map.Entry<Integer, List<Candle>> entry : restored.entrySet()) {
-            result.put(entry.getKey(), new ArrayDeque<>(entry.getValue()));
-        }
-        return result;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -372,7 +322,6 @@ public class WikiHistoryBuffer {
             }
 
             history.put(itemId, deque);
-            persistLocalHistory();
             log.info("PPOFlipperStar: seeded {} candle(s) for item {} from the shared Firestore market-history cache.",
                 deque.size(), itemId);
         });

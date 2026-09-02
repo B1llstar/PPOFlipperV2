@@ -96,6 +96,20 @@ public class Guardrails {
         }
 
         if (order.getAction() == GrandExchangeAction.BUY) {
+            // Checked before the session-total cap below, deliberately: a single order can never
+            // consume more than this much regardless of how much session budget remains, whereas
+            // the session cap alone would let one large order eat the entire remaining budget in
+            // one shot (found live: a single BUY_SMALL tier order came out to 7.58M gp - "small"
+            // in the model's own action-tier sense, not in real gp terms, since tier sizing scales
+            // off an item's GE buy limit, not its price - see PPOFlipperStarConfig's
+            // maxGpPerOrder description).
+            long maxGpPerOrder = config.maxGpPerOrder();
+            if (maxGpPerOrder > 0 && order.totalValue() > maxGpPerOrder) {
+                return String.format(
+                    "would spend %d gp in a single order, exceeding the per-order cap (%d gp)",
+                    order.totalValue(), maxGpPerOrder);
+            }
+
             int maxGp = config.maxGpToSpend();
             if (maxGp > 0 && gpSpentThisSession + order.totalValue() > maxGp) {
                 return String.format(

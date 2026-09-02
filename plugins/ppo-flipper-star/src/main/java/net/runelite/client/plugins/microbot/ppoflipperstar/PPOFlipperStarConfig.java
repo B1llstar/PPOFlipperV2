@@ -149,6 +149,22 @@ public interface PPOFlipperStarConfig extends Config {
     }
 
     @ConfigItem(
+        keyName = "maxGpPerOrder",
+        name = "Max GP per single order",
+        description = "Hard cap on how much a SINGLE buy order can spend, checked before the session cap above and " +
+            "independent of it - the session cap alone can't stop one large order from consuming most or all of the " +
+            "remaining session budget in one shot. This matters because the trained policy's BUY_SMALL/MEDIUM/LARGE " +
+            "action tiers size themselves as a fraction of an item's GE buy limit, not its price - a \"small\" tier " +
+            "order on an expensive item (e.g. Grimy ranarr weed) can still come out to several million gp. 0 = no " +
+            "cap, if you deliberately want a single order able to spend up to the full session budget.",
+        position = 5,
+        section = guardrailsSection
+    )
+    default int maxGpPerOrder() {
+        return 500_000;
+    }
+
+    @ConfigItem(
         keyName = "maxQuantityPerItem",
         name = "Max quantity per item",
         description = "Refuse to place any single order above this quantity, regardless of what the order list says. " +
