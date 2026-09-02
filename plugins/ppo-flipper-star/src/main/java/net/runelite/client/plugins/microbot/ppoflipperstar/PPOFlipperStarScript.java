@@ -781,7 +781,7 @@ public class PPOFlipperStarScript extends Script {
             long currentBacklog = queue.countByStatus(PPOFlipperOrder.Status.QUEUED)
                 + queue.countByStatus(PPOFlipperOrder.Status.SUBMITTED);
             if (currentBacklog >= maxQueueDepth) {
-                log.debug("PPOFlipperStar: autonomous queue backlog at {} (cap {}), holding off on {} this tick.",
+                log.info("PPOFlipperStar: autonomous queue backlog at {} (cap {}), holding off on {} this tick.",
                     currentBacklog, maxQueueDepth, decision);
                 break;
             }
@@ -791,13 +791,14 @@ public class PPOFlipperStarScript extends Script {
                     && o.getAction() == decision.getGeAction()
                     && (o.getStatus() == PPOFlipperOrder.Status.QUEUED || o.getStatus() == PPOFlipperOrder.Status.SUBMITTED));
             if (alreadyPending) {
-                log.debug("PPOFlipperStar: skipping autonomous {} - an equivalent order for {} is already queued/submitted.",
+                log.info("PPOFlipperStar: skipping autonomous {} - an equivalent order for {} is already queued/submitted.",
                     decision, decision.getItemName());
                 decisionSuggestions.remove(decision.getId());
                 continue;
             }
 
             if (!passesRejectionCooldown(decision)) {
+                log.info("PPOFlipperStar: skipping autonomous {} - still within its post-rejection cooldown.", decision);
                 decisionSuggestions.remove(decision.getId());
                 continue;
             }
@@ -815,7 +816,7 @@ public class PPOFlipperStarScript extends Script {
             String rejection = guardrails.check(candidate);
             if (rejection != null) {
                 recordAutonomousRejection(decision);
-                log.debug("PPOFlipperStar: withheld autonomous {} - would be rejected: {}", decision, rejection);
+                log.info("PPOFlipperStar: withheld autonomous {} - would be rejected: {}", decision, rejection);
                 decisionSuggestions.remove(decision.getId());
                 continue;
             }
@@ -826,30 +827,32 @@ public class PPOFlipperStarScript extends Script {
         }
     }
 
-    // How long an item+action combo stays throttled after autonomouslySubmit found it would be
-    // rejected by Guardrails - see lastAutonomousRejectionAtMillis' javadoc for the incident this
-    // fixes. Not user-configurable: this is purely a churn-prevention measure with no trading-
-    // strategy tradeoff to expose, unlike buySuggestionCooldownSeconds (which changes what
-    // suggestions surface at all).
-    private static final long AUTONOMOUS_REJECTION_COOLDOWN_MILLIS = 60_000L;
-
     private static String rejectionCooldownKey(int itemId, GrandExchangeAction action) {
         return itemId + ":" + action;
     }
 
     /**
      * True if {@code decision}'s item+action wasn't rejected by Guardrails within the last
-     * {@link #AUTONOMOUS_REJECTION_COOLDOWN_MILLIS} - see {@link #lastAutonomousRejectionAtMillis}'s
+     * {@code autonomousRejectionCooldownSeconds} - see {@link #lastAutonomousRejectionAtMillis}'s
      * javadoc. A cooldown, not a permanent block: once it expires, the exact same item+action is
      * fully eligible again on the very next DECIDE tick, so a rejection whose underlying cause
      * clears (the item is acquired, its price moves back in range, a queue slot frees up) isn't
      * suppressed indefinitely - only the tight, wasteful re-reject-every-tick loop is.
+     *
+     * <p><b>Originally a hardcoded 60s, made configurable after a real incident:</b> with
+     * {@code decisionTickIntervalSeconds} around 5-10s and a large watchlist, a 60s cooldown meant
+     * a rejected item went completely silent for 6-12 consecutive ticks - watching the actual live
+     * behavior, this looked like "almost nothing ever gets submitted despite the model producing
+     * plenty of suggestions every tick," which is a real usability problem, not a safety one (the
+     * cooldown's only job is stopping the reject-every-tick spam loop, not gatekeeping trades).
      */
     private boolean passesRejectionCooldown(PPOFlipperDecision decision) {
         if (decision.getGeAction() == null) return true;
+        long cooldownMillis = Math.max(0, config.autonomousRejectionCooldownSeconds()) * 1000L;
+        if (cooldownMillis <= 0) return true;
         Long lastRejectedAt = lastAutonomousRejectionAtMillis.get(rejectionCooldownKey(decision.getItemId(), decision.getGeAction()));
         if (lastRejectedAt == null) return true;
-        return System.currentTimeMillis() - lastRejectedAt >= AUTONOMOUS_REJECTION_COOLDOWN_MILLIS;
+        return System.currentTimeMillis() - lastRejectedAt >= cooldownMillis;
     }
 
     private void recordAutonomousRejection(PPOFlipperDecision decision) {

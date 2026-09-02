@@ -314,6 +314,26 @@ public interface PPOFlipperStarConfig extends Config {
     }
 
     @ConfigItem(
+        keyName = "autonomousRejectionCooldownSeconds",
+        name = "Autonomous rejection cooldown (seconds)",
+        description = "Once autonomous submission finds that an item+action would be rejected by Guardrails (e.g. " +
+            "a SELL for something not actually held, or a price too far from guide price), that exact item+action " +
+            "is withheld from autonomous submission for this many seconds before being eligible again - stops the " +
+            "model re-proposing, and this plugin re-queuing-then-rejecting, the same doomed order every single " +
+            "DECIDE tick. This is purely a churn-prevention measure, not a trading-strategy setting: keep it short " +
+            "enough that a rejection whose cause actually clears (the item is acquired, price moves back in range) " +
+            "is picked up again within a couple of ticks rather than sitting silent for a long stretch - a value " +
+            "much longer than decisionTickIntervalSeconds means a rejected item can go quiet for many consecutive " +
+            "ticks, which looks like \"nothing is happening\" even while the model is producing plenty of other " +
+            "suggestions. 0 disables this entirely, restoring the original reject-every-tick behavior.",
+        position = 6,
+        section = ppoSection
+    )
+    default int autonomousRejectionCooldownSeconds() {
+        return 15;
+    }
+
+    @ConfigItem(
         keyName = "shadowMode",
         name = "Shadow mode",
         description = "Documentation of the staged-rollout design (see PROPOSAL.md §3.7) - this setting itself " +
