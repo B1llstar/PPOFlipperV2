@@ -117,6 +117,19 @@ public class PPOFlipperStarScript extends Script {
     // id, never touched for SELL suggestions. Read/written only from the DECIDE executor thread.
     private final Map<Integer, Long> lastBuySuggestionAtMillis = new HashMap<>();
 
+    // Last time an item+action combo was REJECTED by Guardrails while being autonomously
+    // submitted - see passesRejectionCooldown's javadoc for why this exists (a real incident: the
+    // same guardrail-rejected item/action was being re-proposed and re-rejected every DECIDE
+    // tick, sometimes multiple times a minute, because nothing remembered "this was just tried
+    // and failed"). Keyed by item id + action, applies to both BUY and SELL (unlike
+    // lastBuySuggestionAtMillis above, which is a different, BUY-only mechanism for a different
+    // problem - see its own javadoc). Deliberately scoped to autonomous submission only - a
+    // MANUALLY queued order that gets rejected should still be retried/reconsidered by the human
+    // who queued it without this plugin silently sitting on it. Read/written only from the DECIDE
+    // executor thread (autonomouslySubmit checks it before queuing; submitNextOrder records into
+    // it only for orders that originated autonomously - see markSkipped's call sites).
+    private final Map<String, Long> lastAutonomousRejectionAtMillis = new HashMap<>();
+
     // A single-thread executor DECIDE ticks run on, kept separate from the main tick loop's
     // scheduledExecutorService so a slow/blocked Firestore round-trip (bounded by
     // decisionResponseTimeoutSeconds, but still up to several seconds) never delays order
@@ -150,6 +163,7 @@ public class PPOFlipperStarScript extends Script {
         this.nextBankRefreshAtMillis = 0;
         this.nextLiveHoldingsSyncAtMillis = 0;
         this.lastBuySuggestionAtMillis.clear();
+        this.lastAutonomousRejectionAtMillis.clear();
         this.decideInFlight.set(false);
         if (this.decideExecutor != null) {
             this.decideExecutor.shutdownNow();
@@ -748,11 +762,64 @@ public class PPOFlipperStarScript extends Script {
                 continue;
             }
 
-            queue.add(new PPOFlipperOrder(decision.getGeAction(), decision.getItemId(), decision.getItemName(),
-                decision.getQuantity(), decision.getPrice()));
+            if (!passesRejectionCooldown(decision)) {
+                decisionSuggestions.remove(decision.getId());
+                continue;
+            }
+
+            PPOFlipperOrder candidate = new PPOFlipperOrder(decision.getGeAction(), decision.getItemId(),
+                decision.getItemName(), decision.getQuantity(), decision.getPrice());
+
+            // Speculatively checked here, BEFORE queuing, rather than letting submitNextOrder's
+            // own Guardrails.check() reject it later - a real incident: without this, the same
+            // guardrail-rejected item/action was being re-proposed and re-queued-then-rejected
+            // every DECIDE tick (sometimes several times a minute), since nothing remembered "this
+            // was just tried and failed." Guardrails.check() is a pure read (no side effects - see
+            // its own javadoc), so calling it here and again inside submitNextOrder for the same
+            // order if it passes is redundant but harmless, not double-counted spend/state.
+            String rejection = guardrails.check(candidate);
+            if (rejection != null) {
+                recordAutonomousRejection(decision);
+                log.debug("PPOFlipperStar: withheld autonomous {} - would be rejected: {}", decision, rejection);
+                decisionSuggestions.remove(decision.getId());
+                continue;
+            }
+
+            queue.add(candidate);
             decisionSuggestions.remove(decision.getId());
             log.info("PPOFlipperStar: AUTONOMOUS submit - {} (confidence {})", decision, decision.getConfidence());
         }
+    }
+
+    // How long an item+action combo stays throttled after autonomouslySubmit found it would be
+    // rejected by Guardrails - see lastAutonomousRejectionAtMillis' javadoc for the incident this
+    // fixes. Not user-configurable: this is purely a churn-prevention measure with no trading-
+    // strategy tradeoff to expose, unlike buySuggestionCooldownSeconds (which changes what
+    // suggestions surface at all).
+    private static final long AUTONOMOUS_REJECTION_COOLDOWN_MILLIS = 60_000L;
+
+    private static String rejectionCooldownKey(int itemId, GrandExchangeAction action) {
+        return itemId + ":" + action;
+    }
+
+    /**
+     * True if {@code decision}'s item+action wasn't rejected by Guardrails within the last
+     * {@link #AUTONOMOUS_REJECTION_COOLDOWN_MILLIS} - see {@link #lastAutonomousRejectionAtMillis}'s
+     * javadoc. A cooldown, not a permanent block: once it expires, the exact same item+action is
+     * fully eligible again on the very next DECIDE tick, so a rejection whose underlying cause
+     * clears (the item is acquired, its price moves back in range, a queue slot frees up) isn't
+     * suppressed indefinitely - only the tight, wasteful re-reject-every-tick loop is.
+     */
+    private boolean passesRejectionCooldown(PPOFlipperDecision decision) {
+        if (decision.getGeAction() == null) return true;
+        Long lastRejectedAt = lastAutonomousRejectionAtMillis.get(rejectionCooldownKey(decision.getItemId(), decision.getGeAction()));
+        if (lastRejectedAt == null) return true;
+        return System.currentTimeMillis() - lastRejectedAt >= AUTONOMOUS_REJECTION_COOLDOWN_MILLIS;
+    }
+
+    private void recordAutonomousRejection(PPOFlipperDecision decision) {
+        lastAutonomousRejectionAtMillis.put(rejectionCooldownKey(decision.getItemId(), decision.getGeAction()),
+            System.currentTimeMillis());
     }
 
     /** Converts one raw {@code decision/response} action entry into a {@link PPOFlipperDecision}, resolving the item's display name via {@link Rs2ItemManager} and mapping the action-name string onto a {@link GrandExchangeAction} for BUY/SELL tiers (null for HOLD). */
