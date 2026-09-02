@@ -917,16 +917,56 @@ public class PPOFlipperStarScript extends Script {
             }
             return capped;
         } else {
-            if (price.instaSellPrice <= 0) return order.getPrice();
-            int floored = Math.max(order.getPrice(), price.instaSellPrice);
+            int floored = order.getPrice();
+            if (price.instaSellPrice > 0) {
+                floored = Math.max(floored, price.instaSellPrice);
+            }
             if (floored > order.getPrice()) {
                 log.info("PPOFlipperStar: raised sell price for {} from {} to live insta-sell price {}",
                     order.getItemName(), order.getPrice(), price.instaSellPrice);
                 order.setStatusDetail(String.format(
                     "Price raised to live insta-sell %d gp (requested %d gp)", floored, order.getPrice()));
             }
-            return floored;
+            return applyMinSellMargin(order, floored);
         }
+    }
+
+    /**
+     * A second, independent floor beyond the live insta-sell price above: the trained policy's
+     * sell-price offset (env.py's SELL_PRICE_OFFSET_FRAC - up to 30% of the live spread conceded
+     * for a SELL_100) is chosen purely from live market spread, with zero awareness of what was
+     * actually paid for the position being sold - it can legitimately undersell a real profit
+     * margin in exchange for a faster fill. This guarantees a minimum realized margin over the
+     * position's own tracked average cost, independent of what the model or the insta-sell floor
+     * above requested.
+     *
+     * <p>Only applies when {@link PortfolioManager#getAverageCost} has real tracked cost data for
+     * this item ({@code > 0}) - for untracked/pre-existing stock (cost basis unknown, see
+     * {@link PortfolioManager}'s javadoc on selling more than tracked as held), there's nothing to
+     * compute a margin against, so this silently no-ops and only the insta-sell floor applies, same
+     * as before this guard existed.
+     *
+     * <p>Raises the price to meet the floor rather than rejecting the order outright, matching the
+     * insta-sell floor's own behavior above - the trade still goes out (may fill slower now that
+     * it's less aggressively priced, but that's now bounded by {@code staleOfferTimeoutMinutes}
+     * rather than waiting forever) instead of silently not happening at all this tick.
+     */
+    private int applyMinSellMargin(PPOFlipperOrder order, int candidatePrice) {
+        double marginPercent = config.minSellProfitMarginPercent();
+        if (marginPercent <= 0) return candidatePrice;
+
+        int itemId = order.getItemId() > 0 ? order.getItemId() : itemManager.getItemId(order.getItemName());
+        int averageCost = itemId > 0 ? portfolio.getAverageCost(itemId) : 0;
+        if (averageCost <= 0) return candidatePrice;
+
+        int minPrice = (int) Math.ceil(averageCost * (1.0 + marginPercent / 100.0));
+        if (candidatePrice >= minPrice) return candidatePrice;
+
+        log.info("PPOFlipperStar: raised sell price for {} from {} to minimum margin price {} ({}% over avg cost {})",
+            order.getItemName(), candidatePrice, minPrice, marginPercent, averageCost);
+        order.setStatusDetail(String.format(
+            "Price raised to %d gp to guarantee %.1f%% margin over avg cost %d gp", minPrice, marginPercent, averageCost));
+        return minPrice;
     }
 
     private boolean hasFundsOrItems(PPOFlipperOrder order) {

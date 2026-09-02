@@ -94,6 +94,25 @@ public interface PPOFlipperStarConfig extends Config {
         return 0;
     }
 
+    @ConfigItem(
+        keyName = "minSellProfitMarginPercent",
+        name = "Minimum SELL profit margin (%)",
+        description = "The trained policy's sell price is set purely from the live market spread (see env.py's " +
+            "SELL_PRICE_OFFSET_FRAC - a SELL_100 can concede up to 30% of the spread for a faster fill), with no " +
+            "awareness of what you actually paid for the position - it can undersell a real profit margin to " +
+            "guarantee a quicker fill. When this is above 0, a SELL is never actually offered below your tracked " +
+            "average cost for that item plus this percentage - the price is raised to meet that floor if needed " +
+            "(the order still submits, just less aggressively priced, which may fill slower). Only applies when a " +
+            "real tracked average cost exists for the item (0 for untracked/pre-existing stock, e.g. holdings from " +
+            "before this ledger started tracking it) - in that case only the live insta-sell floor above applies, " +
+            "same as before this setting existed. 0 disables this floor entirely.",
+        position = 4,
+        section = ordersSection
+    )
+    default double minSellProfitMarginPercent() {
+        return 0;
+    }
+
     @ConfigSection(
         name = "Guardrails",
         description = "Safety limits enforced before any offer is submitted",
