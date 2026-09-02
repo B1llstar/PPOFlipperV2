@@ -231,16 +231,19 @@ public interface PPOFlipperStarConfig extends Config {
     @ConfigItem(
         keyName = "staleOfferTimeoutMinutes",
         name = "Stale offer timeout (minutes)",
-        description = "An offer that's been live on the GE this long without fully filling is aborted and " +
-            "collected back to inventory/bank, freeing that GE slot for something else - rather than a hardcoded " +
-            "reprice rule, the item is simply left to the next DECIDE tick, which re-evaluates it using the same " +
-            "model judgment (spread/volatility/momentum/holding-duration) as any fresh HOLD/BUY/SELL decision. If " +
-            "the model still thinks the trade is worthwhile it'll naturally requeue at a then-current price; if " +
-            "conditions changed it can just as easily propose HOLD instead. A PARTIALLY filled offer is left alone " +
-            "regardless of age - only a fully-unfilled offer is ever aborted this way, since pulling a partial fill " +
-            "would strand the already-filled portion's exit strategy. 0 disables this entirely (offers wait " +
-            "indefinitely, matching behavior before this setting existed). Applies to both BUY and SELL offers, " +
-            "manual or autonomous - this is about GE slot hygiene, not a trading strategy.",
+        description = "An offer that's been live on the GE this long without fully filling becomes eligible to be " +
+            "aborted and collected back to inventory/bank, freeing that GE slot - but it's ONLY actually pulled " +
+            "once something else is genuinely queued and waiting for a slot. An idle slot holding a slow-moving " +
+            "offer costs nothing while nothing else wants it, so a stale offer with no queued replacement is left " +
+            "alone indefinitely rather than force-cycled just because a timer elapsed. When it IS pulled, rather " +
+            "than a hardcoded reprice rule, the item is simply left to the next DECIDE tick, which re-evaluates it " +
+            "using the same model judgment (spread/volatility/momentum/holding-duration) as any fresh HOLD/BUY/SELL " +
+            "decision. If the model still thinks the trade is worthwhile it'll naturally requeue at a then-current " +
+            "price; if conditions changed it can just as easily propose HOLD instead. A PARTIALLY filled offer is " +
+            "left alone regardless of age or queue pressure - only a fully-unfilled offer is ever aborted this way, " +
+            "since pulling a partial fill would strand the already-filled portion's exit strategy. 0 disables this " +
+            "entirely (offers wait indefinitely, matching behavior before this setting existed). Applies to both " +
+            "BUY and SELL offers, manual or autonomous - this is about GE slot hygiene, not a trading strategy.",
         position = 3,
         section = behaviorSection
     )
