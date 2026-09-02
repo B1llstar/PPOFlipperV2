@@ -116,10 +116,22 @@ public class DecisionEngine {
                 return Optional.empty();
             }
 
+            // Computed ONCE per tick, not per item - found live (bytecode-confirmed) that
+            // Rs2GrandExchange.getActiveOfferSlots() does a genuine blocking round-trip onto the
+            // RuneLite client thread per call (up to 8x internally, once per GrandExchangeSlots
+            // value), with no internal caching. This value is a global fact ("how many GE slots
+            // are active right now"), identical for every item in the same tick - calling it once
+            // per watchlisted item (this was previously inside buildRequestItem, called in a loop
+            // over the whole watchlist) meant a 300+-item watchlist queued thousands of blocking
+            // client-thread round trips per second, which visibly froze the client's own render
+            // loop through pure queue contention. See PROPOSAL.md/commit history for the full
+            // incident - this was found via live testing, not anticipated in advance.
+            double freeSlotsNorm = Math.max(MAX_GE_SLOTS - Rs2GrandExchange.getActiveOfferSlots().length, 0) / (double) MAX_GE_SLOTS;
+
             long tickId = tickIdGenerator.incrementAndGet();
             List<PPOFlipperStarFirestoreClient.DecisionRequestItem> items = new ArrayList<>();
             for (int itemId : watchedIds) {
-                buildRequestItem(itemId, maxActiveOffers).ifPresent(items::add);
+                buildRequestItem(itemId, maxActiveOffers, freeSlotsNorm).ifPresent(items::add);
             }
             if (items.isEmpty()) {
                 log.debug("PPOFlipperStar: no watchlisted item had usable live price data this tick, skipping decision request.");
@@ -162,7 +174,7 @@ public class DecisionEngine {
      * scored - skipped for this tick rather than sent with fabricated zeros, matching
      * {@link WikiPriceClient#getLatestPrice}'s own "return null, let the caller decide" contract).
      */
-    private Optional<PPOFlipperStarFirestoreClient.DecisionRequestItem> buildRequestItem(int itemId, int maxActiveOffers) {
+    private Optional<PPOFlipperStarFirestoreClient.DecisionRequestItem> buildRequestItem(int itemId, int maxActiveOffers, double freeSlotsNorm) {
         WikiPriceClient.Price price = wikiPriceClient.getLatestPrice(itemId);
         if (price == null || price.instaBuyPrice <= 0 || price.instaSellPrice <= 0) {
             return Optional.empty();
@@ -206,9 +218,8 @@ public class DecisionEngine {
         double positionSizeNorm = buyLimit > 0 ? (double) heldQuantity / buyLimit : 0.0;
 
         double availableGpNorm = goldManager.getTotalGold() / GP_NORMALIZATION_DENOMINATOR;
-        int activeOffers = Rs2GrandExchange.getActiveOfferSlots().length;
-        int freeSlots = Math.max(MAX_GE_SLOTS - activeOffers, 0);
-        double freeSlotsNorm = freeSlots / (double) MAX_GE_SLOTS;
+        // freeSlotsNorm is now a parameter, computed once per tick by decide() - see that
+        // method's comment for why this moved out of the per-item loop.
 
         return Optional.of(new PPOFlipperStarFirestoreClient.DecisionRequestItem(
             itemId, marketFeatures, midPrice, avgLow, avgHigh,
