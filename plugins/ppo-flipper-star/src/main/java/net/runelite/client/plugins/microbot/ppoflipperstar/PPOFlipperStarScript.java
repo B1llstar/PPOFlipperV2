@@ -495,6 +495,14 @@ public class PPOFlipperStarScript extends Script {
                 "interface never actually opened within the wait.");
             return;
         }
+        // Temporary targeted diagnostic: openBank()/sleepUntil both report success, but a real,
+        // confirmed-in-bank item (Pie dish) still reads back as 0 held after this refresh - log
+        // what the cache actually contains for it right now, while the bank is still open, to
+        // find out whether the cache genuinely captured it or the interface opened without
+        // actually refreshing Rs2BankData's snapshot underneath it.
+        int pieDishId = itemManager.getItemId("Pie dish");
+        log.info("PPOFlipperStar: bank refresh succeeded (openBank+isOpen both true) - Pie dish (id {}) held: {}",
+            pieDishId, pieDishId > 0 ? portfolio.getHeldQuantity(pieDishId) : "unresolved");
         Rs2Bank.closeBank();
         sleepUntil(() -> !Rs2Bank.isOpen());
     }
