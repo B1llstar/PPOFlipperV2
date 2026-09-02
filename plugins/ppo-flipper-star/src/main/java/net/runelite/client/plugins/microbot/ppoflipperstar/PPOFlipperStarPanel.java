@@ -347,11 +347,63 @@ public class PPOFlipperStarPanel extends PluginPanel {
         return wrapper;
     }
 
-    private JLabel buildOrderListHeader() {
+    /**
+     * Order-list section header, with a "Clear queue" button alongside it - added after a real
+     * live incident where autonomous mode's per-tick re-evaluation of a 300+ item watchlist (with
+     * no dedup at the time - see PPOFlipperStarScript.autonomouslySubmit's later fix) queued over
+     * 1,500 orders in minutes, with no way to wipe the backlog short of restarting the client
+     * entirely. "Cancel all offers" already clears QUEUED orders as a side effect of its main job
+     * (aborting live GE offers), but that's a slower, GE-trip-triggering action for a problem that
+     * doesn't need one - clearing a QUEUED-only backlog is instant and touches nothing on the GE.
+     */
+    private JPanel buildOrderListHeader() {
         JLabel header = new JLabel("Order queue");
         header.setFont(FontManager.getRunescapeBoldFont());
         header.setForeground(Color.WHITE);
-        return header;
+
+        JButton clearButton = new JButton("Clear queue");
+        clearButton.setFont(FontManager.getRunescapeSmallFont());
+        clearButton.setBackground(ColorScheme.MEDIUM_GRAY_COLOR);
+        clearButton.setForeground(Color.WHITE);
+        clearButton.setFocusPainted(false);
+        clearButton.setMargin(new Insets(0, 6, 0, 6));
+        clearButton.setToolTipText("Removes every QUEUED (not yet submitted) order from the queue. Does NOT touch "
+            + "SUBMITTED orders (real offers already live on the GE) - use \"Cancel all offers\" above for those.");
+        clearButton.addActionListener(e -> onClearQueueClicked());
+
+        JPanel row = new JPanel(new BorderLayout());
+        row.setOpaque(false);
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        row.add(header, BorderLayout.WEST);
+        row.add(clearButton, BorderLayout.EAST);
+        return row;
+    }
+
+    /**
+     * Removes every QUEUED order in one call - deliberately leaves SUBMITTED orders alone (a
+     * SUBMITTED order corresponds to a real, live GE offer; silently dropping it from the local
+     * queue would make the plugin lose track of something still actually happening in-game -
+     * that's what {@code requestCancelAll}/reconciliation exists to handle correctly). Confirms
+     * first since this is a bulk, not-easily-undone action, same UX pattern as the watchlist-seed
+     * button above.
+     */
+    private void onClearQueueClicked() {
+        List<PPOFlipperOrder> toRemove = queue.getByStatus(PPOFlipperOrder.Status.QUEUED);
+        if (toRemove.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Queue has no QUEUED orders to clear.",
+                "Clear queue", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+            String.format("Remove %d queued order(s)? This does not affect orders already submitted to the GE.",
+                toRemove.size()),
+            "Clear queue", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (confirm != JOptionPane.YES_OPTION) return;
+
+        for (PPOFlipperOrder order : toRemove) {
+            queue.remove(order.getId());
+        }
     }
 
     private JLabel buildPortfolioHeader() {
