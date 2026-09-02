@@ -11,13 +11,30 @@ service cloud.firestore {
     // to anything under accounts/{accountHash}/** - every write stays `if false` unconditionally
     // (service-account/admin-only, bypassing rules entirely, same as before this change) so the
     // dashboard can never become a write path no matter how this allowlist evolves later.
+    //
+    // Two ways in: an exact match against the fixed email list below, OR any Google-authenticated
+    // email that CONTAINS one of the substrings in ALLOWLISTED_EMAIL_SUBSTRINGS (case-insensitive),
+    // regardless of domain. This second path is a deliberate, explicitly-accepted weaker-security
+    // tradeoff versus the exact-match list: since Google email local-parts are entirely
+    // self-chosen, ANY account containing that substring in ANY domain gets full read access to
+    // every account's portfolio/trade history/decision state - e.g. "cyanidebyte2@gmail.com",
+    // "notcyanidebyte@anydomain.com" would all match "cyanidebyte". Only add a substring here that
+    // is unique/distinctive enough that an unintended match is implausible, and prefer the exact
+    // fixed list above for anyone where the tighter guarantee matters.
     function isAllowlistedDashboardViewer() {
       return request.auth != null
         && request.auth.token.email != null
-        && request.auth.token.email in [
-          'billborkowski7@gmail.com',
-          'crigne4lyfe@gmail.com'
-        ];
+        && (
+          request.auth.token.email in [
+            'billborkowski7@gmail.com',
+            'crigne4lyfe@gmail.com'
+          ]
+          || matchesAllowlistedSubstring(request.auth.token.email.lower())
+        );
+    }
+
+    function matchesAllowlistedSubstring(lowercaseEmail) {
+      return lowercaseEmail.matches('.*cyanidebyte.*');
     }
 
     // Orders are created/updated only through Cloud Functions (which run with

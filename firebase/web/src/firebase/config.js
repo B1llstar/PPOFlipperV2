@@ -61,3 +61,16 @@ export const googleProvider = new GoogleAuthProvider()
  * user will just see permission-denied errors on every read instead of any actual data leaking.
  */
 export const ALLOWLISTED_EMAILS = ['billborkowski7@gmail.com', 'crigne4lyfe@gmail.com']
+
+/**
+ * Second, looser allowlist path mirroring firestore.rules' matchesAllowlistedSubstring(): any
+ * signed-in email CONTAINING one of these substrings (case-insensitive), in ANY domain, is
+ * treated as allowlisted — not an exact-match list. This is a deliberate, weaker-security
+ * tradeoff versus ALLOWLISTED_EMAILS above: since Google email local-parts are entirely
+ * self-chosen, anyone who can create an account containing this substring gets full read access
+ * to every account's portfolio/trade history/decision state. Keep entries here distinctive
+ * enough that an accidental/unintended match is implausible. Must stay in sync with
+ * firestore.rules' own substring list (same reasoning as ALLOWLISTED_EMAILS above — this is only
+ * a client-side convenience check, Firestore's rule is the real gate).
+ */
+export const ALLOWLISTED_EMAIL_SUBSTRINGS = ['cyanidebyte']
