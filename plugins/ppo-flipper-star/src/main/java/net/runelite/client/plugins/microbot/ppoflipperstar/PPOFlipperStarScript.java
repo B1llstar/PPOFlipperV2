@@ -464,7 +464,14 @@ public class PPOFlipperStarScript extends Script {
         if (now < nextBankRefreshAtMillis) return;
         nextBankRefreshAtMillis = now + (intervalSeconds * 1000L);
 
-        if (Rs2Bank.isOpen()) return;
+        log.info("PPOFlipperStar: bank refresh due (GE open: {}, Rs2Bank.isOpen(): {})",
+            Rs2GrandExchange.isOpen(), Rs2Bank.isOpen());
+        if (Rs2Bank.isOpen()) {
+            log.warn("PPOFlipperStar: proactive bank refresh skipped - Rs2Bank.isOpen() reports true while " +
+                "this script never opened it, which would prevent any refresh from ever happening if this is a " +
+                "stale/incorrect cached state rather than a genuinely open bank interface.");
+            return;
+        }
 
         // Diagnostic logging added after a real incident: openBank() was silently returning false
         // every 30s for an entire session (confirmed via bytecode research - it can fail for
