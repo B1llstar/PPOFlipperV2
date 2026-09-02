@@ -2,6 +2,7 @@ package net.runelite.client.plugins.microbot.ppoflipperstar;
 
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
+import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Singleton;
 import java.util.HashMap;
@@ -19,9 +20,12 @@ import java.util.Map;
  * implicitly on every read - a read here is deliberately non-blocking and never walks/opens
  * anything itself.
  *
- * <p><b>Noted items are normalized to their unnoted id</b> in {@link #snapshotByItemId()}, for the
- * same reason and via the same approach as {@link InventoryManager} - see its class javadoc. The
- * bank routinely holds noted stock (that's the entire point of noting - compact storage), so this
+ * <p><b>Noted items are normalized to their unnoted id</b> in {@link #snapshotByItemId()} - see
+ * {@link InventoryManager#canonicalItemId}'s javadoc for the full story, including a real,
+ * confirmed bug in {@code Rs2ItemModel.getUnNotedId()} itself (it returns the noted id unchanged
+ * for a genuinely noted item, not the true unnoted id) and why this resolves via
+ * {@link Rs2ItemManager#getItemIdByName(String, boolean)} on the item's name instead. The bank
+ * routinely holds noted stock (that's the entire point of noting - compact storage), so this
  * matters here at least as much as it does for inventory.
  */
 @Singleton
@@ -48,10 +52,18 @@ public class BankManager {
     public Map<Integer, Integer> snapshotByItemId() {
         Map<Integer, Integer> holdings = new HashMap<>();
         for (Rs2ItemModel item : Rs2Bank.bankItems()) {
-            int unnotedId = item.getUnNotedId();
-            holdings.merge(unnotedId != -1 ? unnotedId : item.getId(), item.getQuantity(), Integer::sum);
+            holdings.merge(canonicalItemId(item), item.getQuantity(), Integer::sum);
         }
         return holdings;
+    }
+
+    /** See {@link InventoryManager#canonicalItemId}'s javadoc - identical fix, same reasoning. */
+    private int canonicalItemId(Rs2ItemModel item) {
+        if (!item.isNoted()) {
+            return item.getId();
+        }
+        int resolvedId = Rs2ItemManager.getItemIdByName(item.getName(), true);
+        return resolvedId > 0 ? resolvedId : item.getId();
     }
 
     public boolean withdrawX(String itemName, int quantity) {

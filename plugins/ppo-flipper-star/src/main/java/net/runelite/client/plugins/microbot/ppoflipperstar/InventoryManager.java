@@ -2,6 +2,7 @@ package net.runelite.client.plugins.microbot.ppoflipperstar;
 
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
+import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Singleton;
 import java.util.HashMap;
@@ -16,17 +17,14 @@ import java.util.Map;
  * call site, and so a slot/snapshot query only has one place to change if the backing API ever
  * does.
  *
- * <p><b>Noted items are normalized to their unnoted id.</b> Verified via bytecode decompilation:
- * {@code Rs2ItemModel.getId()} returns the item's raw, as-held id - a noted stack's id is the
- * game's genuinely distinct noted-variant item id, never folded back to the unnoted id by the
- * model itself. {@code Rs2Inventory.itemQuantity(int)} matches strictly on that exact id (unlike
- * its {@code itemQuantity(String)} overload, separately confirmed to sum noted+unnoted by display
- * name - see {@code PPOFlipperStarScript#withdrawPreferringNotes}'s javadoc), so passing an
- * unnoted id would silently miss noted stock entirely rather than counting it. Every quantity
- * method here resolves noted ids down to their unnoted counterpart before counting/keying, since
+ * <p><b>Noted items are normalized to their unnoted id.</b> {@code Rs2ItemModel.getId()} returns
+ * the item's raw, as-held id - a noted stack's id is the game's genuinely distinct noted-variant
+ * item id, never folded back to the unnoted id by the model itself. Every quantity method here
+ * resolves a noted item down to its unnoted counterpart before counting/keying (see
+ * {@link #canonicalItemId}'s javadoc for exactly how, and a real bug that approach avoids), since
  * every other id this plugin deals with (the GE, the wiki price API, the watchlist, guardrails)
- * is unnoted - without this, a noted holding would be invisible to portfolio/guardrail checks
- * keyed by the unnoted id.
+ * is unnoted - without this, a noted holding is invisible to portfolio/guardrail checks keyed by
+ * the unnoted id.
  */
 @Singleton
 public class InventoryManager {
@@ -43,10 +41,41 @@ public class InventoryManager {
     public Map<Integer, Integer> snapshotByItemId() {
         Map<Integer, Integer> holdings = new HashMap<>();
         for (Rs2ItemModel item : Rs2Inventory.all()) {
-            int unnotedId = item.getUnNotedId();
-            holdings.merge(unnotedId != -1 ? unnotedId : item.getId(), item.getQuantity(), Integer::sum);
+            holdings.merge(canonicalItemId(item), item.getQuantity(), Integer::sum);
         }
         return holdings;
+    }
+
+    /**
+     * Resolves {@code item} to its canonical (unnoted) id - see class javadoc's noted-item
+     * section for why this exists at all, and this method's own javadoc for why it does NOT use
+     * {@link Rs2ItemModel#getUnNotedId()} despite that method existing for exactly this purpose.
+     *
+     * <p><b>{@code getUnNotedId()} is confirmed broken for a genuinely noted item</b> - found live
+     * (a real, confirmed-noted 3x Marrentill and a noted Rune pickaxe both read back as 0 held
+     * despite this class already normalizing noted ids). Traced via bytecode decompilation: for a
+     * noted item, {@code getUnNotedId()}'s noted branch reads {@code ItemComposition.getLinkedNoteId()}
+     * - but that field is the FORWARD link (unnoted composition -&gt; its noted variant's id), not the
+     * reverse. On an already-noted item's own composition, that field is unset/wrong, so the method
+     * falls back to {@code item.getId()} - returning the noted id itself, unchanged, not the true
+     * unnoted id. Every downstream consumer keyed off that "unnoted id" was actually keying off the
+     * noted id instead, so a held quantity keyed by the real unnoted id (e.g. 251 for Marrentill)
+     * found nothing.
+     *
+     * <p>Fix: resolve via {@link Rs2ItemManager#getItemIdByName(String, boolean)} on the item's own
+     * display name instead - separately confirmed correct for both noted and unnoted items (a
+     * noted item's {@code ItemComposition.getName()} is the plain unnoted display name, e.g.
+     * "Marrentill", not "Marrentill (noted)" - the client only appends that in tooltips, not the
+     * composition itself). Only takes this path when {@link Rs2ItemModel#isNoted()} is true - an
+     * unnoted item's own id is already canonical, no resolution needed, and skipping the extra
+     * lookup keeps the common case cheap.
+     */
+    private int canonicalItemId(Rs2ItemModel item) {
+        if (!item.isNoted()) {
+            return item.getId();
+        }
+        int resolvedId = Rs2ItemManager.getItemIdByName(item.getName(), true);
+        return resolvedId > 0 ? resolvedId : item.getId();
     }
 
     public Rs2ItemModel getItemInSlot(int slot) {
