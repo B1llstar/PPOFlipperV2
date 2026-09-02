@@ -95,6 +95,14 @@ public class PortfolioManager {
             CostBasisEntry entry = new CostBasisEntry(remote.itemId);
             if (remote.quantityHeld > 0) {
                 entry.recordBuy(remote.quantityHeld, remote.totalCostBasis, remote.weightedAcquisitionTimestampMillis);
+                // Pre-warms getItemName's cache here, on this already-background reconcile thread
+                // (see this method's caller javadoc: "never the client thread"), rather than
+                // leaving the panel's first refresh to resolve potentially hundreds of names one
+                // blocking client-thread round-trip at a time from the AWT Event Dispatch Thread -
+                // see getItemName's own javadoc for the real freeze this avoids. Only for items
+                // with a real open position (quantityHeld > 0) since those are the only ones
+                // getOpenPositions()/the portfolio panel will ever actually display.
+                getItemName(remote.itemId);
             }
             if (remote.realizedProfit != 0) {
                 entry.addRealizedProfit(remote.realizedProfit);
@@ -264,8 +272,35 @@ public class PortfolioManager {
             .collect(Collectors.toList());
     }
 
+    // Caches resolved names since an item's display name never changes - see getItemName's
+    // javadoc for the real freeze this avoids.
+    private final Map<Integer, String> itemNameCache = new HashMap<>();
+
+    /**
+     * Display name for an item id, cached after the first resolution.
+     *
+     * <p><b>Caching added after a real incident:</b> {@code Rs2ItemManager.getItemComposition(int)}
+     * does a blocking client-thread round-trip per call, with no internal caching (same class of
+     * bug as {@code Rs2GrandExchange.getActiveOfferSlots()} and the static
+     * {@code Rs2ItemModel.getUnNotedId(int)} overload, both fixed earlier for the same reason).
+     * This method is called once per open position from {@code PPOFlipperStarPanel#buildPositionRow},
+     * itself invoked from the panel's Swing refresh {@code Timer} on the AWT Event Dispatch
+     * Thread - with several hundred tracked portfolio positions (this project reconciles from a
+     * shared Firestore ledger, so the count isn't bounded by what's watchlisted locally), that's
+     * several hundred sequential blocking client-thread hops from the UI thread on every single
+     * refresh tick, which froze the client window on startup exactly the way the earlier
+     * incidents did. An item's display name is permanently fixed, so caching it after the first
+     * resolution turns "every refresh, forever" into "once per item, ever, for the life of this
+     * plugin instance."
+     */
     public String getItemName(int itemId) {
+        String cached = itemNameCache.get(itemId);
+        if (cached != null) {
+            return cached;
+        }
         ItemComposition composition = itemManager.getItemComposition(itemId);
-        return composition != null ? composition.getName() : ("item " + itemId);
+        String name = composition != null ? composition.getName() : ("item " + itemId);
+        itemNameCache.put(itemId, name);
+        return name;
     }
 }
