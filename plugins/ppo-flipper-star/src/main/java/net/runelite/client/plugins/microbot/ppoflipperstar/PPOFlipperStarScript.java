@@ -979,6 +979,8 @@ public class PPOFlipperStarScript extends Script {
                     // the next tick's monitorOffers pass retries it.
                     log.warn("PPOFlipperStar: collectOffer failed for slot {} - {}, will retry next tick", slot, order);
                 }
+            } else if (filled == 0 && isStale(order)) {
+                abortStaleOffer(slot, order);
             }
             queue.notifyChanged();
         }
@@ -990,6 +992,43 @@ public class PPOFlipperStarScript extends Script {
         } else if (!activeOrders.isEmpty()) {
             state = State.MONITORING_OFFERS;
         }
+    }
+
+    /**
+     * True if {@code order} has been SUBMITTED for longer than {@code staleOfferTimeoutMinutes}
+     * (0 disables this - never stale). Only ever consulted for a fully-unfilled offer (see the
+     * {@code filled == 0} guard at this method's one call site in {@link #monitorOffers()}) - a
+     * partial fill is never considered stale regardless of age, since aborting it would strand
+     * the already-filled portion's exit strategy along with the cancelled remainder.
+     */
+    private boolean isStale(PPOFlipperOrder order) {
+        int timeoutMinutes = config.staleOfferTimeoutMinutes();
+        if (timeoutMinutes <= 0 || order.getSubmittedAtMillis() <= 0) {
+            return false;
+        }
+        long ageMillis = System.currentTimeMillis() - order.getSubmittedAtMillis();
+        return ageMillis >= timeoutMinutes * 60_000L;
+    }
+
+    /**
+     * Aborts a stale, fully-unfilled offer and collects whatever comes back (nothing, since
+     * nothing filled - this is really just freeing the GE slot) via
+     * {@code Rs2GrandExchange.cancelSpecificOffers}, which aborts then internally collects in one
+     * call - no separate {@code collectOffer} needed afterward. Deliberately does NOT requeue the
+     * order itself: per {@code staleOfferTimeoutMinutes}'s config description, the point is to let
+     * the item go back through a fresh DECIDE tick and get re-evaluated with the model's current
+     * judgment (spread/volatility/momentum/holding-duration), not to blindly resubmit the same
+     * stale price - a hardcoded reprice-and-retry here would defeat that purpose. The order is
+     * marked SKIPPED (an audit trail explaining why it vanished from the queue) rather than left
+     * QUEUED, since re-queuing it verbatim would just recreate the same stale price/quantity the
+     * model may no longer agree with.
+     */
+    private void abortStaleOffer(GrandExchangeSlots slot, PPOFlipperOrder order) {
+        log.info("PPOFlipperStar: aborting stale unfilled offer in slot {} - {} (submitted {} min ago)",
+            slot, order, (System.currentTimeMillis() - order.getSubmittedAtMillis()) / 60_000L);
+        Rs2GrandExchange.cancelSpecificOffers(List.of(slot), config.collectToBank());
+        markSkipped(order, "Aborted - stale, unfilled after " + config.staleOfferTimeoutMinutes() + " min");
+        activeOrders.remove(slot);
     }
 
     /**
