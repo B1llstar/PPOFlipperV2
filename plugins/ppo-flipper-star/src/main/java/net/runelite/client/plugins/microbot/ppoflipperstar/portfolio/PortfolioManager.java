@@ -114,6 +114,47 @@ public class PortfolioManager {
             entry.getRealizedProfit(), entry.getWeightedAcquisitionTimestampMillis());
     }
 
+    /**
+     * Pushes every currently-held item's REAL live quantity (inventory + bank, per
+     * {@link #getAllHoldings()}) to Firestore, so the web dashboard reflects actual holdings
+     * rather than only what this ledger has itself recorded through {@link #recordBuy}/
+     * {@link #recordSell}.
+     *
+     * <p>This was a real gap: {@link #pushToFirestore} above only ever fires from a completed
+     * trade going through this plugin, so any stock that predates this ledger (bought manually,
+     * held before the plugin was ever run, or otherwise never recorded here) never reached
+     * Firestore at all - the dashboard showed 0 for it indefinitely, even while a guardrail check
+     * on this same machine (reading the same live {@link #getAllHoldings()}) correctly saw it.
+     *
+     * <p>Deliberately read-only against the local ledger - this never calls {@link CostBasisEntry}
+     * mutators, so it cannot corrupt real cost-basis/realized-profit accounting. For an item with
+     * an existing ledger entry, the live quantity is pushed alongside that entry's own cost-basis
+     * fields unchanged (a live-quantity/ledger-quantity mismatch is visible on the dashboard as
+     * "average cost per unit looks off for this item," which is the honest state of affairs for
+     * untracked stock, not something to paper over here). For an item with no ledger entry at all,
+     * cost-basis fields push as 0 (average cost shows as unknown), matching
+     * {@link #getAverageCost}'s existing behavior for untracked items exactly.
+     *
+     * <p>Called periodically from {@code PPOFlipperStarScript}, not on every holdings read - see
+     * that class's own call site for the cadence this runs on.
+     */
+    public void pushLiveHoldingsToFirestore() {
+        if (!firestoreSync.isEnabled()) return;
+        for (Map.Entry<Integer, Integer> holding : getAllHoldings().entrySet()) {
+            int itemId = holding.getKey();
+            int liveQuantity = holding.getValue();
+            if (liveQuantity <= 0) continue;
+
+            CostBasisEntry entry = ledger.get(itemId);
+            long totalCostBasis = entry != null ? entry.getTotalCostBasis() : 0;
+            long realizedProfit = entry != null ? entry.getRealizedProfit() : 0;
+            long weightedAcquisitionTimestampMillis = entry != null ? entry.getWeightedAcquisitionTimestampMillis() : 0;
+
+            firestoreSync.pushPortfolioEntryAsync(itemId, liveQuantity, totalCostBasis, realizedProfit,
+                weightedAcquisitionTimestampMillis);
+        }
+    }
+
     private Map<Integer, CostBasisEntry> loadLedger() {
         String json = configManager.getConfiguration(CONFIG_GROUP, LEDGER_KEY);
         if (json == null || json.isEmpty()) {

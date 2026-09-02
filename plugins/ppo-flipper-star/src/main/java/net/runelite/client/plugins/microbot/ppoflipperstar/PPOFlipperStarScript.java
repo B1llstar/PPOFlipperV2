@@ -106,6 +106,12 @@ public class PPOFlipperStarScript extends Script {
     // holdings is trustworthy for the first time.
     private long nextBankRefreshAtMillis = 0;
 
+    // Fixed cadence (not user-configurable - see maybeSyncLiveHoldings' javadoc) for pushing real
+    // live holdings to Firestore, independent of bankRefreshIntervalSeconds so this still runs
+    // for a user with inventory-only mode on or bank refresh disabled.
+    private static final long LIVE_HOLDINGS_SYNC_INTERVAL_MILLIS = 60_000L;
+    private long nextLiveHoldingsSyncAtMillis = 0;
+
     // Last time a BUY suggestion for this item id was surfaced (shown in the panel, or
     // auto-submitted) - see maybeApplyBuyCooldown()'s javadoc for why this exists. Keyed by item
     // id, never touched for SELL suggestions. Read/written only from the DECIDE executor thread.
@@ -142,6 +148,7 @@ public class PPOFlipperStarScript extends Script {
         this.needsReconcile = true;
         this.nextDecisionTickAtMillis = 0;
         this.nextBankRefreshAtMillis = 0;
+        this.nextLiveHoldingsSyncAtMillis = 0;
         this.lastBuySuggestionAtMillis.clear();
         this.decideInFlight.set(false);
         if (this.decideExecutor != null) {
@@ -326,6 +333,7 @@ public class PPOFlipperStarScript extends Script {
 
         maybeRunDecideTick();
         maybeRefreshBank();
+        maybeSyncLiveHoldings();
 
         switch (state) {
             case IDLE:
@@ -458,10 +466,53 @@ public class PPOFlipperStarScript extends Script {
 
         if (Rs2Bank.isOpen()) return;
 
-        if (!Rs2Bank.openBank()) return;
-        sleepUntil(Rs2Bank::isOpen);
+        // Diagnostic logging added after a real incident: openBank() was silently returning false
+        // every 30s for an entire session (confirmed via bytecode research - it can fail for
+        // several reasons: no bank/GE-booth object found within Rs2GameObject's 20-tile scan, an
+        // out-of-range clickObject triggering a walk and returning false for that attempt, the
+        // bank interface not opening within its internal 5s timeout, or an exception mid-call) -
+        // with no way to tell which, the bank-held portion of holdings silently stayed stale for
+        // the entire session (see Guardrails/PortfolioManager - a real item held only in the bank,
+        // like a confirmed-in-bank Pie dish, read back as 0 held and had its SELL rejected). This
+        // log line exists so a repeat is diagnosable from client.log instead of invisible.
+        boolean opened = Rs2Bank.openBank();
+        if (!opened) {
+            log.warn("PPOFlipperStar: proactive bank refresh failed - Rs2Bank.openBank() returned false " +
+                "(GE open: {}, near GE: unknown - see openBank's own internal logging for the specific cause).",
+                Rs2GrandExchange.isOpen());
+            return;
+        }
+        boolean actuallyOpen = sleepUntil(Rs2Bank::isOpen);
+        if (!actuallyOpen) {
+            log.warn("PPOFlipperStar: proactive bank refresh failed - openBank() returned true but the bank " +
+                "interface never actually opened within the wait.");
+            return;
+        }
         Rs2Bank.closeBank();
         sleepUntil(() -> !Rs2Bank.isOpen());
+    }
+
+    /**
+     * Pushes real live holdings (inventory + bank) to Firestore on a fixed cadence, so the web
+     * dashboard reflects actual current stock rather than only what {@link PortfolioManager}'s
+     * own cost-basis ledger has recorded through a completed trade. See
+     * {@link PortfolioManager#pushLiveHoldingsToFirestore}'s javadoc for the full "why" - this was
+     * a real gap where physical bank/inventory stock that predated this ledger (or was never
+     * bought through this plugin) never reached Firestore and never showed up on the dashboard,
+     * even though the same live read correctly informed local guardrail checks.
+     *
+     * <p>Deliberately its own fixed-interval timer, not reusing {@code bankRefreshIntervalSeconds}
+     * - this should keep running even for a user with inventory-only mode on or bank refresh
+     * disabled, since inventory-only holdings still deserve to reach the dashboard. Not user-
+     * configurable: unlike the bank refresh (which has a real cost - opening/closing the bank
+     * interface in-game), this is a cheap Firestore write with no in-game action, so there's no
+     * meaningful tradeoff to expose as a setting.
+     */
+    private void maybeSyncLiveHoldings() {
+        long now = System.currentTimeMillis();
+        if (now < nextLiveHoldingsSyncAtMillis) return;
+        nextLiveHoldingsSyncAtMillis = now + LIVE_HOLDINGS_SYNC_INTERVAL_MILLIS;
+        portfolio.pushLiveHoldingsToFirestore();
     }
 
     /**
