@@ -80,9 +80,13 @@ public interface PPOFlipperStarConfig extends Config {
     @ConfigItem(
         keyName = "bankRefreshIntervalSeconds",
         name = "Bank refresh interval (seconds)",
-        description = "How often PortfolioManager proactively opens/refreshes the bank to keep inventory+bank " +
-            "holdings trustworthy. 0 disables proactive refresh (bank data then only updates when something else " +
-            "happens to open the bank). No effect while inventory-only mode is on.",
+        description = "How often the script proactively opens then immediately closes the bank (a pure read, never " +
+            "a withdrawal) to keep inventory+bank holdings trustworthy - only takes effect once the GE is open, " +
+            "matching this plugin's stay-at-the-GE operating assumption. 0 disables proactive refresh entirely " +
+            "(bank data then only updates when something else happens to open the bank, e.g. a withdrawal - so " +
+            "anything held only in the bank will read as 0 until then). No effect while inventory-only mode is on. " +
+            "A short interval (e.g. 30-60s) is recommended if you keep meaningful stock in the bank and want the " +
+            "portfolio panel/model to actually see it.",
         position = 3,
         section = ordersSection
     )
@@ -205,6 +209,26 @@ public interface PPOFlipperStarConfig extends Config {
         return 1;
     }
 
+    @ConfigItem(
+        keyName = "staleOfferTimeoutMinutes",
+        name = "Stale offer timeout (minutes)",
+        description = "An offer that's been live on the GE this long without fully filling is aborted and " +
+            "collected back to inventory/bank, freeing that GE slot for something else - rather than a hardcoded " +
+            "reprice rule, the item is simply left to the next DECIDE tick, which re-evaluates it using the same " +
+            "model judgment (spread/volatility/momentum/holding-duration) as any fresh HOLD/BUY/SELL decision. If " +
+            "the model still thinks the trade is worthwhile it'll naturally requeue at a then-current price; if " +
+            "conditions changed it can just as easily propose HOLD instead. A PARTIALLY filled offer is left alone " +
+            "regardless of age - only a fully-unfilled offer is ever aborted this way, since pulling a partial fill " +
+            "would strand the already-filled portion's exit strategy. 0 disables this entirely (offers wait " +
+            "indefinitely, matching behavior before this setting existed). Applies to both BUY and SELL offers, " +
+            "manual or autonomous - this is about GE slot hygiene, not a trading strategy.",
+        position = 3,
+        section = behaviorSection
+    )
+    default int staleOfferTimeoutMinutes() {
+        return 10;
+    }
+
     @ConfigSection(
         name = "PPO",
         description = "The PPO policy, consulted every decision tick over Firestore (PROPOSAL.md §3.6). By " +
@@ -248,13 +272,33 @@ public interface PPOFlipperStarConfig extends Config {
     }
 
     @ConfigItem(
+        keyName = "buySuggestionCooldownSeconds",
+        name = "BUY suggestion cooldown (seconds)",
+        description = "The trained policy's buy-size formula scales with an item's GE buy limit (see env.py's " +
+            "_apply_buy), which biases it toward repeatedly proposing cheap, high-buy-limit staples (Flax, Steel " +
+            "knives, arrowheads, etc.) over the rest of the watchlist - a real bias in the model, not something " +
+            "fixable on this side without a retrain. This setting dampens the symptom: once a BUY suggestion for " +
+            "an item has been shown or auto-submitted, no new BUY suggestion for that same item is surfaced again " +
+            "until this many seconds have passed, giving other watchlisted items room to appear instead. Applies " +
+            "identically to the panel's \"Model suggestions\" display and to autonomous submission - one filter, " +
+            "same as the confidence threshold above. Never applies to SELL suggestions (you should always see a " +
+            "SELL proposal the moment the model makes one, since it concerns stock you already hold). 0 disables " +
+            "this filter entirely, restoring the model's raw, unthrottled suggestion behavior.",
+        position = 2,
+        section = ppoSection
+    )
+    default int buySuggestionCooldownSeconds() {
+        return 120;
+    }
+
+    @ConfigItem(
         keyName = "shadowMode",
         name = "Shadow mode",
         description = "Documentation of the staged-rollout design (see PROPOSAL.md §3.7) - this setting itself " +
             "does not change plugin behavior and is not read anywhere. The real on/off switch for autonomous " +
             "execution is \"Autonomous mode (LIVE TRADING)\" below; whether or not a suggestion requires a manual " +
             "Confirm click is controlled entirely by that setting, independent of this one.",
-        position = 2,
+        position = 3,
         section = ppoSection
     )
     default boolean shadowMode() {
@@ -276,10 +320,30 @@ public interface PPOFlipperStarConfig extends Config {
             "Turning this off immediately stops any NEW autonomous order from being submitted, but does not cancel " +
             "offers already live on the GE - use \"Cancel all offers\" for that. Read PROPOSAL.md §3.7's staged " +
             "rollout recommendation before ever turning this on with real GP.",
-        position = 3,
+        position = 4,
         section = ppoSection
     )
     default boolean autonomousModeEnabled() {
+        return false;
+    }
+
+    @ConfigItem(
+        keyName = "sellOffModeEnabled",
+        name = "Sell-off mode (test SELL path)",
+        description = "Automatically submits every SELL the model recommends for items already held in your " +
+            "portfolio, using the exact same model suggestions as autonomous mode - but BUY suggestions are " +
+            "dropped before they're ever shown or submitted, and every BUY order (autonomous or manual) is " +
+            "rejected outright by Guardrails while this is on, regardless of the guardrails master switch. Meant " +
+            "for verifying the SELL execution path actually works end-to-end (ideally at a profit) without risking " +
+            "a fresh BUY going out at the same time. Independent of \"Autonomous mode (LIVE TRADING)\" above - " +
+            "sell-off mode auto-submits SELLs even if that setting is off, since the whole point is exercising the " +
+            "SELL path without a manual Confirm click. Still passes through every other Guardrails check (held-" +
+            "quantity, price deviation) exactly like any other order. Turning this off does not cancel offers " +
+            "already live on the GE - use \"Cancel all offers\" for that.",
+        position = 5,
+        section = ppoSection
+    )
+    default boolean sellOffModeEnabled() {
         return false;
     }
 

@@ -36,13 +36,15 @@ import java.util.stream.Collectors;
  * plugin's whole point, once later milestones wire it up) needs to reason about total exposure
  * across inventory AND bank to size new positions sensibly - treating banked stock as invisible
  * would make it buy more of something it already holds a pile of in the bank. To make that
- * trustworthy rather than repeating ge-star-v2's stale-cache risk, {@link BankManager} is used
- * to proactively open/refresh the bank on a slow, configurable interval (see
- * {@code PPOFlipperStarConfig#bankRefreshIntervalSeconds()}, off/0 by default so no unnecessary
- * bank trips happen unless the user opts in) specifically so this class's bank-side numbers are
- * kept fresh instead of read-and-hope. For a user who prefers the old, more conservative
- * behavior, {@code PPOFlipperStarConfig#inventoryOnlyMode()} makes this class fall back to
- * inventory-only holdings, matching ge-star-v2 exactly.
+ * trustworthy rather than repeating ge-star-v2's stale-cache risk,
+ * {@code PPOFlipperStarScript#maybeRefreshBank()} proactively opens/closes the bank on a slow,
+ * configurable interval (see {@code PPOFlipperStarConfig#bankRefreshIntervalSeconds()}, off/0 by
+ * default so no unnecessary bank trips happen unless the user opts in) specifically so this
+ * class's bank-side numbers are kept fresh instead of read-and-hope - without that, {@link
+ * BankManager}'s cache stays exactly what it is by default: empty until something else happens to
+ * open the bank first. For a user who prefers the old, more conservative behavior, {@code
+ * PPOFlipperStarConfig#inventoryOnlyMode()} makes this class fall back to inventory-only holdings,
+ * matching ge-star-v2 exactly.
  *
  * <p><b>Persistence:</b> hand-rolled JSON via Gson through {@link ConfigManager}'s plain
  * {@code String} overloads, never its generic {@code setConfiguration(group, key, Object)}

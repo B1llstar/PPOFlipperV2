@@ -14,9 +14,15 @@ import java.util.Map;
  * the bank interface has actually been opened this session - {@link #snapshotByItemId()} can
  * legitimately be stale or empty if the bank hasn't been opened (or opened recently). Callers
  * that need trustworthy bank contents (see {@link PortfolioManager}) are responsible for opening
- * the bank first (directly, or via this plugin's bank-refresh behavior) rather than assuming
- * this class does it implicitly on every read - a read here is deliberately non-blocking and
- * never walks/opens anything itself.
+ * the bank first (directly, or via this plugin's bank-refresh behavior, see
+ * {@code PPOFlipperStarScript#maybeRefreshBank()}) rather than assuming this class does it
+ * implicitly on every read - a read here is deliberately non-blocking and never walks/opens
+ * anything itself.
+ *
+ * <p><b>Noted items are normalized to their unnoted id</b> in {@link #snapshotByItemId()}, for the
+ * same reason and via the same approach as {@link InventoryManager} - see its class javadoc. The
+ * bank routinely holds noted stock (that's the entire point of noting - compact storage), so this
+ * matters here at least as much as it does for inventory.
  */
 @Singleton
 public class BankManager {
@@ -38,10 +44,12 @@ public class BankManager {
         return Rs2Bank.bankItems();
     }
 
+    /** Aggregated quantity-by-item-id snapshot, keyed by unnoted id - see class javadoc. */
     public Map<Integer, Integer> snapshotByItemId() {
         Map<Integer, Integer> holdings = new HashMap<>();
         for (Rs2ItemModel item : Rs2Bank.bankItems()) {
-            holdings.merge(item.getId(), item.getQuantity(), Integer::sum);
+            int unnotedId = item.getUnNotedId();
+            holdings.merge(unnotedId != -1 ? unnotedId : item.getId(), item.getQuantity(), Integer::sum);
         }
         return holdings;
     }

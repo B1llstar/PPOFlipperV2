@@ -49,6 +49,14 @@ public class Guardrails {
      * was rejected.
      */
     public String check(PPOFlipperOrder order) {
+        // Sell-off mode (see its config description) is a deliberate SELL-path test - reject
+        // every BUY outright while it's on, autonomous or manual, regardless of the guardrails
+        // master switch. Same "always rejected" category as the checks below: this is a mode
+        // invariant, not a tunable safety threshold.
+        if (config.sellOffModeEnabled() && order.getAction() == GrandExchangeAction.BUY) {
+            return "sell-off mode is on - BUY orders are rejected until it's turned off";
+        }
+
         // Not a risk/safety tradeoff like the checks below - an order to sell more than is held
         // anywhere can never succeed, it would just sit forever failing a bank-withdrawal step.
         // Always rejected regardless of the guardrails master switch.

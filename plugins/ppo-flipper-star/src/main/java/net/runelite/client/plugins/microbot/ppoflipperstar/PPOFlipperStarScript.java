@@ -24,6 +24,7 @@ import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Inject;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -98,6 +99,18 @@ public class PPOFlipperStarScript extends Script {
     // decide-tick is due, read/written only from this script's own scheduled-executor thread.
     private long nextDecisionTickAtMillis = 0;
 
+    // Proactive bank refresh runs on its own cadence (bankRefreshIntervalSeconds), independent of
+    // everything else - see maybeRefreshBank()'s javadoc for why this exists at all. 0 means "due
+    // immediately" so the very first tick after Execute always gets one refresh in regardless of
+    // the configured interval, rather than waiting a full interval before the bank-held portion of
+    // holdings is trustworthy for the first time.
+    private long nextBankRefreshAtMillis = 0;
+
+    // Last time a BUY suggestion for this item id was surfaced (shown in the panel, or
+    // auto-submitted) - see maybeApplyBuyCooldown()'s javadoc for why this exists. Keyed by item
+    // id, never touched for SELL suggestions. Read/written only from the DECIDE executor thread.
+    private final Map<Integer, Long> lastBuySuggestionAtMillis = new HashMap<>();
+
     // A single-thread executor DECIDE ticks run on, kept separate from the main tick loop's
     // scheduledExecutorService so a slow/blocked Firestore round-trip (bounded by
     // decisionResponseTimeoutSeconds, but still up to several seconds) never delays order
@@ -128,6 +141,8 @@ public class PPOFlipperStarScript extends Script {
         this.lastFundsShortfallOrder = null;
         this.needsReconcile = true;
         this.nextDecisionTickAtMillis = 0;
+        this.nextBankRefreshAtMillis = 0;
+        this.lastBuySuggestionAtMillis.clear();
         this.decideInFlight.set(false);
         if (this.decideExecutor != null) {
             this.decideExecutor.shutdownNow();
@@ -237,6 +252,14 @@ public class PPOFlipperStarScript extends Script {
                 PPOFlipperOrder adopted = new PPOFlipperOrder(liveAction, itemId, details.getItemName(), details.getTotalQuantity(), details.getPrice());
                 adopted.setSlot(slot);
                 adopted.setStatus(PPOFlipperOrder.Status.SUBMITTED);
+                // Approximation: an adopted offer's real GE submission time is unrecoverable (it
+                // predates this plugin ever knowing about it - left over from a previous session,
+                // another tool, or a manual placement). Stamping "now" understates its true age
+                // for staleness purposes (checkStaleOffers), but there's no live-offer API that
+                // exposes actual placement time - starting its staleness clock now, rather than
+                // never, is the safer failure mode (an old offer just needs one extra staleness-
+                // window's worth of ticks before this catches up to it).
+                adopted.setSubmittedAtMillis(System.currentTimeMillis());
                 adopted.setQuantityFilled(liveAction == GrandExchangeAction.BUY
                     ? Rs2GrandExchange.getItemsBoughtFromOffer(slot)
                     : Rs2GrandExchange.getItemsSoldFromOffer(slot));
@@ -302,6 +325,7 @@ public class PPOFlipperStarScript extends Script {
         }
 
         maybeRunDecideTick();
+        maybeRefreshBank();
 
         switch (state) {
             case IDLE:
@@ -398,6 +422,49 @@ public class PPOFlipperStarScript extends Script {
     }
 
     /**
+     * Proactively opens and immediately closes the bank on {@code bankRefreshIntervalSeconds}, for
+     * no reason other than to populate/refresh {@code Rs2Bank}'s cache - purely a read, never a
+     * withdrawal or deposit. This exists because {@link PortfolioManager#getHeldQuantity} and
+     * {@link PortfolioManager#getAllHoldings} (used by the panel's portfolio display,
+     * {@link Guardrails}, and {@link DecisionEngine}'s state vector) read that cache directly, and
+     * it is <b>only ever populated reactively once the bank has actually been opened this
+     * session</b> - see {@link BankManager}'s javadoc. Without this, anything held in the bank
+     * silently reads as 0 for the entire session until something else happens to open the bank
+     * first (e.g. {@link #prepareFundsOrItems()} mid-withdrawal) - which is exactly backwards,
+     * since that withdrawal path itself only ever triggers off an order that was never generated
+     * in the first place, because the model/guardrails already believed the item wasn't held.
+     *
+     * <p>Deliberately does nothing beyond open-then-close: this method must never withdraw,
+     * deposit, or otherwise decide what to do with bank contents - refreshing the holdings number
+     * used for display/guardrails is a completely separate concern from deciding what to sell,
+     * which stays gated entirely by {@link WatchlistManager} (see {@link DecisionEngine}). Holding
+     * an item in the bank does not, by itself, make this plugin try to sell it.
+     *
+     * <p>No-ops entirely when {@code bankRefreshIntervalSeconds} is 0 (the default) or
+     * {@code inventoryOnlyMode} is on (bank contents aren't consulted at all in that mode, so
+     * refreshing them would be pure overhead), and skips a cycle if the bank happens to already be
+     * open for another reason (e.g. {@link #prepareFundsOrItems()} mid-withdrawal) rather than
+     * interfering with it.
+     */
+    private void maybeRefreshBank() {
+        if (config.inventoryOnlyMode()) return;
+        int intervalSeconds = config.bankRefreshIntervalSeconds();
+        if (intervalSeconds <= 0) return;
+        if (!Rs2GrandExchange.isOpen()) return;
+
+        long now = System.currentTimeMillis();
+        if (now < nextBankRefreshAtMillis) return;
+        nextBankRefreshAtMillis = now + (intervalSeconds * 1000L);
+
+        if (Rs2Bank.isOpen()) return;
+
+        if (!Rs2Bank.openBank()) return;
+        sleepUntil(Rs2Bank::isOpen);
+        Rs2Bank.closeBank();
+        sleepUntil(() -> !Rs2Bank.isOpen());
+    }
+
+    /**
      * The DECIDE phase (PROPOSAL.md §2.4/§3.6): builds a state vector for every watchlisted item
      * via {@link DecisionEngine}, writes it to {@code decision/request}, and waits (bounded by
      * {@code decisionResponseTimeoutSeconds}, defaulting to "no suggestions this tick" on
@@ -432,6 +499,14 @@ public class PPOFlipperStarScript extends Script {
      * panel accurately reflects "already submitted" vs. "awaiting your decision." Every
      * autonomous submission gets its own distinct, clearly-labeled log line for audit purposes,
      * separate from the manual-confirm log path.
+     *
+     * <p><b>{@code config.sellOffModeEnabled()} is a separate switch that auto-submits SELL
+     * suggestions independent of {@code autonomousModeEnabled}</b> - meant for exercising the
+     * SELL execution path end-to-end using the model's own recommendations (rather than a
+     * hardcoded "sell everything held" rule), without a concurrent BUY going out. While it's on,
+     * every BUY suggestion is filtered out of {@code suggestions} before it's shown or submitted,
+     * and {@link Guardrails#check} independently hard-rejects any BUY order regardless of origin
+     * as a second layer - see its javadoc.
      */
     private void runDecideTick(PPOFlipperStarConfig configSnapshot) {
         long timeoutMillis = Math.max(0, configSnapshot.decisionResponseTimeoutSeconds()) * 1000L;
@@ -452,10 +527,19 @@ public class PPOFlipperStarScript extends Script {
         // code path for both purposes.
         double confidenceThreshold = Math.max(0.0, configSnapshot.modelConfidenceThreshold());
 
+        boolean sellOffMode = configSnapshot.sellOffModeEnabled();
+
         List<PPOFlipperDecision> suggestions = decision.actions.stream()
             .filter(a -> a.confidence >= confidenceThreshold)
             .map(a -> toDecision(decision.tickId, a, decision.checkpointVersion))
             .filter(PPOFlipperDecision::isActionable)
+            .filter(this::passesBuyCooldown)
+            // Sell-off mode (see its config description): drop BUY suggestions before they're
+            // ever shown or auto-submitted - Guardrails also hard-rejects any BUY that somehow
+            // still reached order submission, but filtering here keeps the panel's "Model
+            // suggestions" display honest about what will actually happen instead of showing a
+            // BUY the user could Confirm only to have it bounce.
+            .filter(d -> !sellOffMode || d.getGeAction() != GrandExchangeAction.BUY)
             .collect(Collectors.toList());
 
         // Always populate DecisionSuggestions first, regardless of autonomous mode, so the panel
@@ -467,9 +551,54 @@ public class PPOFlipperStarScript extends Script {
                 decision.tickId, suggestions.size());
         }
 
-        if (configSnapshot.autonomousModeEnabled()) {
+        // Sell-off mode auto-submits SELL suggestions on its own, independent of
+        // autonomousModeEnabled - the whole point is exercising the SELL path without a manual
+        // Confirm click, and BUY suggestions have already been filtered out above (Guardrails
+        // would reject them anyway). Checked as its own branch rather than folded into the
+        // autonomousModeEnabled branch below so the two switches compose correctly if both
+        // happen to be on at once - autonomouslySubmit is idempotent-safe to call at most once
+        // per tick either way, so an early return avoids ever calling it twice on the same list.
+        if (sellOffMode) {
+            autonomouslySubmit(suggestions);
+        } else if (configSnapshot.autonomousModeEnabled()) {
             autonomouslySubmit(suggestions);
         }
+    }
+
+    /**
+     * Dampens the trained policy's real bias toward repeatedly proposing cheap, high-buy-limit
+     * staples (see {@code buySuggestionCooldownSeconds}'s config description for the root cause -
+     * {@code env.py}'s buy-size formula scales with an item's GE buy limit, so items like Flax,
+     * Steel knives, and arrowheads win disproportionately often). A BUY suggestion for an item
+     * still within its cooldown is dropped before it ever reaches {@link DecisionSuggestions} or
+     * autonomous submission, giving other watchlisted items a chance to surface instead. A
+     * suggestion that passes marks that item's cooldown as starting now - so repeated ticks that
+     * keep proposing the same item don't each reset a "last shown" clock that never actually
+     * lets the cooldown expire; the intent is "this item gets a turn periodically," not "this
+     * item is silenced only while the model is silent about it too."
+     *
+     * <p>SELL suggestions are never subject to this - {@code order.getGeAction()} for a SELL is
+     * about stock already held, and suppressing it on a cooldown would mean sometimes NOT telling
+     * the user (or the autonomous path) that the model wants to sell something they own, which is
+     * a materially worse failure mode than seeing the same BUY idea again.
+     */
+    private boolean passesBuyCooldown(PPOFlipperDecision decision) {
+        if (decision.getGeAction() != GrandExchangeAction.BUY) {
+            return true;
+        }
+        int cooldownSeconds = config.buySuggestionCooldownSeconds();
+        if (cooldownSeconds <= 0) {
+            return true;
+        }
+
+        long now = System.currentTimeMillis();
+        Long lastSuggestedAt = lastBuySuggestionAtMillis.get(decision.getItemId());
+        if (lastSuggestedAt != null && now - lastSuggestedAt < cooldownSeconds * 1000L) {
+            return false;
+        }
+
+        lastBuySuggestionAtMillis.put(decision.getItemId(), now);
+        return true;
     }
 
     // How large OrderQueue's QUEUED+SUBMITTED backlog is allowed to get before autonomous mode
@@ -747,6 +876,7 @@ public class PPOFlipperStarScript extends Script {
             order.setSlot(slot);
             order.setSubmittedPrice(submitPrice);
             order.setStatus(PPOFlipperOrder.Status.SUBMITTED);
+            order.setSubmittedAtMillis(System.currentTimeMillis());
             queue.notifyChanged();
             if (slot != null) {
                 activeOrders.put(slot, order);

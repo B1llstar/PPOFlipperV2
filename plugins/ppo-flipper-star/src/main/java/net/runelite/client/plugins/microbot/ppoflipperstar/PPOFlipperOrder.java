@@ -63,6 +63,17 @@ public class PPOFlipperOrder {
     @Setter
     private volatile GrandExchangeSlots slot;
 
+    /**
+     * When this order's status last became SUBMITTED (0 if never submitted), used by
+     * {@code PPOFlipperStarScript#checkStaleOffers} to age out an offer that's sat on the GE too
+     * long without filling - see {@code staleOfferTimeoutMinutes}'s config description. Reset
+     * (not left at an old value) every time an order is resubmitted, e.g. after
+     * {@link OrderQueue}'s reconcile-on-startup re-queues an orphaned SUBMITTED order - a fresh
+     * submission gets a fresh staleness clock, not one inherited from a previous attempt.
+     */
+    @Setter
+    private volatile long submittedAtMillis = 0;
+
     public PPOFlipperOrder(GrandExchangeAction action, int itemId, String itemName, int quantity, int price) {
         this.action = action;
         this.itemId = itemId;
