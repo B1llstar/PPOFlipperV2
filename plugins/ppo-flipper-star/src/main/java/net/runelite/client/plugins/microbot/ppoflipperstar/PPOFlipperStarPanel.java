@@ -546,7 +546,14 @@ public class PPOFlipperStarPanel extends PluginPanel {
             return;
         }
 
-        int itemId = itemManager.getItemId(name);
+        // Rs2ItemManager.getItemId(String) does a plain substring search with no exact-match
+        // filter - a real bug found live: typing "Pie dish" silently resolved to "Unfired pie
+        // dish" (id 1789) instead of the real "Pie dish" (id 2313), since the latter's name
+        // contains the former as a substring and happened to win the underlying map's iteration
+        // order. getItemIdByName(name, true) does an equalsIgnoreCase pass (and checks held
+        // inventory/bank items by exact name first) instead of taking whatever substring match
+        // comes first.
+        int itemId = Rs2ItemManager.getItemIdByName(name, true);
         queue.add(new PPOFlipperOrder(action, itemId, name, quantity, price));
         itemNameField.setText("");
     }

@@ -185,8 +185,17 @@ public class PortfolioManager {
         return held;
     }
 
+    /**
+     * Deliberately uses {@link Rs2ItemManager#getItemIdByName(String, boolean)} (exact,
+     * case-insensitive match), NOT {@code Rs2ItemManager#getItemId(String)} - the latter is a
+     * plain substring search with no exact-match filter, confirmed live to silently resolve
+     * "Pie dish" to "Unfired pie dish" (a real, differently-priced item whose name happens to
+     * contain the query as a substring) instead of the real "Pie dish". {@link Guardrails}'s
+     * sell-quantity-exceeds-held check calls this exact method, so that bug meant a real,
+     * confirmed-in-bank item read back as 0 held and had every SELL for it rejected.
+     */
     public int getHeldQuantity(String itemName) {
-        int itemId = itemManager.getItemId(itemName);
+        int itemId = Rs2ItemManager.getItemIdByName(itemName, true);
         return itemId > 0 ? getHeldQuantity(itemId) : 0;
     }
 

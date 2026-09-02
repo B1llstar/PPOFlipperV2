@@ -255,7 +255,11 @@ public class PPOFlipperStarScript extends Script {
                 activeOrders.put(slot, match);
                 log.info("PPOFlipperStar: reconciled SUBMITTED order {} to live slot {}", match, slot);
             } else {
-                int itemId = itemManager.getItemId(details.getItemName());
+                // getItemIdByName(name, true) does an exact (equalsIgnoreCase) match, unlike
+                // getItemId(String)'s plain substring search - see PPOFlipperStarPanel's
+                // onAddOrderClicked javadoc for the real "Pie dish" vs "Unfired pie dish" bug this
+                // avoids.
+                int itemId = Rs2ItemManager.getItemIdByName(details.getItemName(), true);
                 PPOFlipperOrder adopted = new PPOFlipperOrder(liveAction, itemId, details.getItemName(), details.getTotalQuantity(), details.getPrice());
                 adopted.setSlot(slot);
                 adopted.setStatus(PPOFlipperOrder.Status.SUBMITTED);
@@ -495,14 +499,6 @@ public class PPOFlipperStarScript extends Script {
                 "interface never actually opened within the wait.");
             return;
         }
-        // Temporary targeted diagnostic: openBank()/sleepUntil both report success, but a real,
-        // confirmed-in-bank item (Pie dish) still reads back as 0 held after this refresh - log
-        // what the cache actually contains for it right now, while the bank is still open, to
-        // find out whether the cache genuinely captured it or the interface opened without
-        // actually refreshing Rs2BankData's snapshot underneath it.
-        int pieDishId = itemManager.getItemId("Pie dish");
-        log.info("PPOFlipperStar: bank refresh succeeded (openBank+isOpen both true) - Pie dish (id {}) held: {}",
-            pieDishId, pieDishId > 0 ? portfolio.getHeldQuantity(pieDishId) : "unresolved");
         Rs2Bank.closeBank();
         sleepUntil(() -> !Rs2Bank.isOpen());
     }
@@ -963,7 +959,7 @@ public class PPOFlipperStarScript extends Script {
      * price unchanged rather than blocking submission on a missing lookup.
      */
     private int clampToLivePrice(PPOFlipperOrder order) {
-        int itemId = order.getItemId() > 0 ? order.getItemId() : itemManager.getItemId(order.getItemName());
+        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
         if (itemId <= 0) return order.getPrice();
 
         WikiPriceClient.Price price = wikiPriceClient.getLatestPrice(itemId);
@@ -1021,7 +1017,7 @@ public class PPOFlipperStarScript extends Script {
         double marginPercent = config.minSellProfitMarginPercent();
         if (marginPercent <= 0) return candidatePrice;
 
-        int itemId = order.getItemId() > 0 ? order.getItemId() : itemManager.getItemId(order.getItemName());
+        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
         int averageCost = itemId > 0 ? portfolio.getAverageCost(itemId) : 0;
         if (averageCost <= 0) return candidatePrice;
 

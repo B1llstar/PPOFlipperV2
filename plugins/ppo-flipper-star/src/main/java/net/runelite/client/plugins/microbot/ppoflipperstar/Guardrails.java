@@ -23,7 +23,6 @@ public class Guardrails {
     private final PortfolioManager portfolio;
     private final BuyLimitLedger buyLimitLedger;
     private final OrderQueue queue;
-    private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
 
     @Getter
@@ -137,7 +136,7 @@ public class Guardrails {
      * {@code >= 1000}, is the item's genuine GE buy limit and must be enforced as such.
      */
     private String checkBuyLimit(PPOFlipperOrder order) {
-        int itemId = order.getItemId() > 0 ? order.getItemId() : itemManager.getItemId(order.getItemName());
+        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
         if (itemId <= 0) {
             return null;
         }
@@ -182,7 +181,7 @@ public class Guardrails {
     }
 
     private String checkPriceDeviation(PPOFlipperOrder order, int maxDeviationPercent) {
-        int itemId = order.getItemId() > 0 ? order.getItemId() : itemManager.getItemId(order.getItemName());
+        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
         if (itemId <= 0) {
             // Can't resolve the item to check its guide price - let the GE search itself be the
             // source of truth for whether the name is valid, don't block on this.
