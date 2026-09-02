@@ -73,6 +73,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
     private JButton cancelAllButton;
     private JLabel statusValueLabel;
     private JLabel stateValueLabel;
+    private JLabel modelUnresponsiveLabel;
     private JLabel gpSpentValueLabel;
     private JLabel realizedPnlValueLabel;
     private JLabel goldValueLabel;
@@ -238,6 +239,21 @@ public class PPOFlipperStarPanel extends PluginPanel {
         realizedPnlValueLabel = new JLabel();
         goldValueLabel = new JLabel();
         netWorthDeltaValueLabel = new JLabel();
+
+        // Deliberately a standalone banner, not another quiet statusRow among six others - see
+        // refreshFromScriptState's javadoc for why: a real incident (the Python inference worker
+        // killed and never restarted) left DECIDE ticks silently timing out and defaulting every
+        // item to HOLD, visible only as a log line. Hidden entirely (setVisible(false)) unless
+        // PPOFlipperStarScript#isModelUnresponsive is true, so it never adds visual noise while
+        // everything is actually working.
+        modelUnresponsiveLabel = new JLabel("MODEL NOT RESPONDING - check the inference worker");
+        modelUnresponsiveLabel.setFont(FontManager.getRunescapeSmallFont());
+        modelUnresponsiveLabel.setForeground(FAILED_RED);
+        modelUnresponsiveLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        modelUnresponsiveLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        modelUnresponsiveLabel.setBorder(new EmptyBorder(0, 0, 6, 0));
+        modelUnresponsiveLabel.setVisible(false);
+        panel.add(modelUnresponsiveLabel);
 
         panel.add(statusRow("Status", statusValueLabel));
         panel.add(statusRow("State", stateValueLabel));
@@ -609,6 +625,8 @@ public class PPOFlipperStarPanel extends PluginPanel {
     private void refreshFromScriptState() {
         boolean running = script.isRunning();
         boolean cancelling = script.isCancellingAll();
+
+        modelUnresponsiveLabel.setVisible(running && script.isModelUnresponsive());
 
         executeButton.setEnabled(!running);
         stopButton.setEnabled(running);

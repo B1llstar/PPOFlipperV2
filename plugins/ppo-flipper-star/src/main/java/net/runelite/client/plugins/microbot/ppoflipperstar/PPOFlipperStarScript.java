@@ -33,6 +33,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -137,6 +138,17 @@ public class PPOFlipperStarScript extends Script {
     private ExecutorService decideExecutor;
     private final AtomicBoolean decideInFlight = new AtomicBoolean(false);
 
+    // Counts consecutive DecisionEngine timeouts (the model not responding at all, per
+    // DecisionEngine#didLastDecideTimeOut's javadoc) - reset to 0 the moment a real response
+    // comes back. Read by PPOFlipperStarPanel via isModelUnresponsive() to show a visible warning
+    // instead of only a log line - a real incident (the Python inference worker got killed and
+    // never restarted) left this plugin silently defaulting every tick to HOLD with nothing in
+    // the UI to notice it by. MODEL_UNRESPONSIVE_THRESHOLD ticks must fail in a row before the
+    // warning shows, so a single transient network hiccup doesn't flash a scary warning for no
+    // reason - only a genuinely stuck/dead worker does.
+    private static final int MODEL_UNRESPONSIVE_THRESHOLD = 4;
+    private final AtomicInteger consecutiveDecideTimeouts = new AtomicInteger(0);
+
     @Inject
     public PPOFlipperStarScript(OrderQueue queue, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
                                  GoldManager goldManager, PPOFlipperStarFirestoreSync firestoreSync,
@@ -165,6 +177,7 @@ public class PPOFlipperStarScript extends Script {
         this.lastBuySuggestionAtMillis.clear();
         this.lastAutonomousRejectionAtMillis.clear();
         this.decideInFlight.set(false);
+        this.consecutiveDecideTimeouts.set(0);
         if (this.decideExecutor != null) {
             this.decideExecutor.shutdownNow();
         }
@@ -216,6 +229,18 @@ public class PPOFlipperStarScript extends Script {
     /** True while a cancel-all is in progress (requested but not yet finished). */
     public boolean isCancellingAll() {
         return state == State.CANCELLING_ALL;
+    }
+
+    /**
+     * True once {@link #MODEL_UNRESPONSIVE_THRESHOLD} or more DECIDE ticks in a row have timed
+     * out waiting for a {@code decision/response} - see {@code consecutiveDecideTimeouts}' javadoc
+     * for the incident this exists to make visible. Read by {@code PPOFlipperStarPanel} to show a
+     * warning; not itself a behavior change - the script already handled a timeout safely
+     * (defaulting to HOLD) before this existed, this only makes a stuck/dead Python inference
+     * worker obvious in the UI instead of only in the log.
+     */
+    public boolean isModelUnresponsive() {
+        return consecutiveDecideTimeouts.get() >= MODEL_UNRESPONSIVE_THRESHOLD;
     }
 
     @Override
@@ -587,6 +612,16 @@ public class PPOFlipperStarScript extends Script {
     private void runDecideTick(PPOFlipperStarConfig configSnapshot) {
         long timeoutMillis = Math.max(0, configSnapshot.decisionResponseTimeoutSeconds()) * 1000L;
         Optional<DecisionEngine.DecisionResult> result = decisionEngine.decide(timeoutMillis, configSnapshot.maxActiveOffers());
+
+        if (decisionEngine.didLastDecideTimeOut()) {
+            consecutiveDecideTimeouts.incrementAndGet();
+        } else if (result.isPresent()) {
+            // Only a genuine response resets the streak - the other Optional.empty() causes
+            // (empty watchlist, sync disabled) are neither a timeout nor a real answer, so they
+            // deliberately leave the counter exactly where it was rather than resetting it.
+            consecutiveDecideTimeouts.set(0);
+        }
+
         if (!result.isPresent()) {
             // No watchlisted items, sync unavailable, or a timeout - PROPOSAL.md §3.6: "a slow/
             // unreachable model must never block the trading loop." Nothing to show; leave

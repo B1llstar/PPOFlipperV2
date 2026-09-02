@@ -74,6 +74,24 @@ public class DecisionEngine {
 
     private final AtomicLong tickIdGenerator = new AtomicLong(0);
 
+    /**
+     * True only when the most recent {@link #decide} call ended in {@link #pollForResponse}
+     * timing out (a real request was written but no matching response ever arrived) - distinct
+     * from the other reasons {@code decide} can return {@link Optional#empty()} (an empty
+     * watchlist, sync disabled/no account hash yet), which aren't a sign anything is actually
+     * wrong. Exists so {@code PPOFlipperStarScript} can tell "the model stopped responding" apart
+     * from those benign cases and surface a real warning - see its own
+     * {@code consecutiveDecideTimeouts} field/{@code maybeWarnModelUnresponsive} for why: a real
+     * incident where the Python inference worker was killed and never restarted left the plugin
+     * silently defaulting every tick to HOLD, visible only as a log line nobody was watching.
+     */
+    private volatile boolean lastDecideTimedOut = false;
+
+    /** See {@link #lastDecideTimedOut}'s javadoc. */
+    public boolean didLastDecideTimeOut() {
+        return lastDecideTimedOut;
+    }
+
     @Inject
     public DecisionEngine(PortfolioManager portfolio, BuyLimitLedger buyLimitLedger, GoldManager goldManager,
                            WatchlistManager watchlistManager, PPOFlipperStarFirestoreSync firestoreSync,
@@ -154,6 +172,10 @@ public class DecisionEngine {
     private Optional<DecisionResult> pollForResponse(long tickId, long timeoutMillis) throws InterruptedException {
         long deadline = System.currentTimeMillis() + Math.max(0, timeoutMillis);
         long pollIntervalMillis = 300;
+        // Reset at the start of every real polling attempt (a request was actually written) - see
+        // lastDecideTimedOut's javadoc. Set true only if this specific attempt exhausts its
+        // deadline below; a response arriving in time clears it back to false immediately.
+        lastDecideTimedOut = false;
 
         while (System.currentTimeMillis() < deadline) {
             Optional<PPOFlipperStarFirestoreClient.DecisionResponse> response = firestoreSync.getDecisionResponse();
@@ -165,6 +187,7 @@ public class DecisionEngine {
         }
 
         log.info("PPOFlipperStar: no matching decision/response for tickId={} within {}ms, defaulting to HOLD this tick.", tickId, timeoutMillis);
+        lastDecideTimedOut = true;
         return Optional.empty();
     }
 
