@@ -24,6 +24,7 @@ import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Inject;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -761,14 +762,25 @@ public class PPOFlipperStarScript extends Script {
      * expected, frequent, normal backpressure once the queue has real depth, not an error
      * condition) so they don't spam the log the way 1,500 "AUTONOMOUS submit" lines did.
      *
-     * <p><b>Known limitation, not fixed here:</b> {@link WatchlistManager#getAll} returns a
-     * {@code LinkedHashSet} (insertion order), and {@code suggestions} is built by iterating that
-     * same order every tick - once the queue-depth cap is hit mid-list, the items processed so
-     * far (earliest-added to the watchlist) always win the remaining backlog headroom, and
-     * later-added items are more likely to be the ones held off. A fair-rotation scheme (e.g.
-     * round-robin starting point per tick) would address this but is real additional complexity
-     * not justified by this fix's actual goal - stopping unbounded backlog growth - so it's left
-     * as a known, documented tradeoff rather than silently ignored.</p>
+     * <p><b>SELL-before-BUY ordering, added after a real incident:</b> {@link WatchlistManager#getAll}
+     * returns a {@code LinkedHashSet} (insertion order), and {@code suggestions} originally kept
+     * that same order every tick - once the queue-depth cap was hit mid-list, whatever came first
+     * always won the remaining backlog headroom regardless of action type. Found live: with a
+     * large, BUY-heavy watchlist, BUY suggestions consistently exhausted the cap before the loop
+     * ever reached SELL suggestions, so the same real SELL (stock already held, real GP already
+     * spent on it) got silently held off tick after tick while new speculative BUYs kept winning.
+     * A SELL represents capital already committed that could be freed up; a missed BUY is just a
+     * missed new opportunity - leaving real holdings stuck unsold is the worse outcome, so
+     * {@code suggestions} is now sorted SELL-first (stable sort - within each action type, the
+     * original per-tick order is preserved, so this doesn't introduce a new fairness problem
+     * within either group, only resolves the BUY-vs-SELL priority question).</p>
+     *
+     * <p><b>Still a known limitation, not fixed here:</b> within the SELL group and within the BUY
+     * group, the original watchlist-insertion-order tradeoff described above still applies - once
+     * the queue-depth cap is hit mid-list, earlier-inserted items within the same action type
+     * still win over later ones. A fair-rotation scheme (e.g. round-robin starting point per tick)
+     * would address that but is real additional complexity not justified here - the SELL-vs-BUY
+     * starvation this fix addresses was the actual observed problem, not intra-group fairness.</p>
      *
      * <p>Removes each submitted suggestion from {@link DecisionSuggestions} immediately (the same
      * "confirmed, no longer pending" transition {@code onConfirmSuggestionClicked} performs) so
@@ -777,7 +789,10 @@ public class PPOFlipperStarScript extends Script {
     private void autonomouslySubmit(List<PPOFlipperDecision> suggestions) {
         int maxQueueDepth = Math.max(1, config.maxActiveOffers()) * AUTONOMOUS_QUEUE_DEPTH_MULTIPLIER;
 
-        for (PPOFlipperDecision decision : suggestions) {
+        List<PPOFlipperDecision> ordered = new ArrayList<>(suggestions);
+        ordered.sort(Comparator.comparingInt(d -> d.getGeAction() == GrandExchangeAction.SELL ? 0 : 1));
+
+        for (PPOFlipperDecision decision : ordered) {
             long currentBacklog = queue.countByStatus(PPOFlipperOrder.Status.QUEUED)
                 + queue.countByStatus(PPOFlipperOrder.Status.SUBMITTED);
             if (currentBacklog >= maxQueueDepth) {
