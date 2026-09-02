@@ -472,6 +472,13 @@ public class PPOFlipperStarScript extends Script {
         }
     }
 
+    // How large OrderQueue's QUEUED+SUBMITTED backlog is allowed to get before autonomous mode
+    // stops adding more, as a multiple of maxActiveOffers - see autonomouslySubmit's javadoc for
+    // why this exists. 3x gives some real headroom over the 8 physical GE slots (room for orders
+    // waiting on funds/items, or waiting for a slot to free up) without letting the backlog grow
+    // unbounded the way it did before this cap existed.
+    private static final int AUTONOMOUS_QUEUE_DEPTH_MULTIPLIER = 3;
+
     /**
      * Submits every suggestion in {@code suggestions} directly onto {@link OrderQueue}, mirroring
      * {@code PPOFlipperStarPanel#onConfirmSuggestionClicked}'s exact
@@ -483,12 +490,73 @@ public class PPOFlipperStarScript extends Script {
      * it - this method only ever calls {@link OrderQueue#add}, the same single entry point manual
      * orders use; there is no bypass of that check anywhere in this path.
      *
+     * <p><b>Two gates added after a real live-testing finding, both checked before the
+     * pre-existing {@code queue.add} call, not instead of anything already there:</b> the DECIDE
+     * phase re-evaluates the ENTIRE watchlist every {@code decisionTickIntervalSeconds} (as fast
+     * as every 1 second) with no memory of what it already proposed - live testing (300+ item
+     * watchlist, ~300 items above the confidence threshold most ticks) showed this queuing over
+     * 1,500 orders in a matter of minutes against a GE that physically has 8 slots, with only
+     * ~39 ever actually reaching a real submission and 11 ever filling. The existing
+     * {@code Guardrails.checkDuplicateBuy} only rejects an exact-duplicate BUY for an item that
+     * already has one queued/submitted ahead of it (and only for BUYs) - it runs too late (after
+     * the order is already sitting in the queue taking up space) and doesn't cover SELL or the
+     * "queue is already far bigger than the GE could ever drain" case at all.
+     * <ul>
+     *   <li><b>Per-item/action dedup</b>: skip a suggestion if {@link OrderQueue} already has a
+     *   {@code QUEUED} or {@code SUBMITTED} order for the same item id AND the same
+     *   {@link GrandExchangeAction} (BUY vs SELL kept separate - an existing BUY doesn't block a
+     *   new SELL of the same item, they're not the same intent). This is what actually stops the
+     *   exact-same-price repeat-spam behavior found live (Maple logs, Iron platebody proposed
+     *   and queued again every tick while an equivalent order was already pending).</li>
+     *   <li><b>Queue-depth cap</b>: skip ALL remaining suggestions this tick once
+     *   {@code QUEUED + SUBMITTED} count already reaches
+     *   {@code maxActiveOffers * AUTONOMOUS_QUEUE_DEPTH_MULTIPLIER} - a hard backstop against
+     *   unbounded growth regardless of how diverse the proposed items are, independent of the
+     *   per-item dedup above (which alone wouldn't have stopped 300 genuinely distinct items from
+     *   still piling up 300 orders deep in one tick).</li>
+     * </ul>
+     * Neither gate touches {@link Guardrails} or changes what executes once an order is actually
+     * submitted - both are pre-filters on whether an order is worth queuing at all, applied
+     * identically regardless of confidence/item, and both are logged at debug (not warn - this is
+     * expected, frequent, normal backpressure once the queue has real depth, not an error
+     * condition) so they don't spam the log the way 1,500 "AUTONOMOUS submit" lines did.
+     *
+     * <p><b>Known limitation, not fixed here:</b> {@link WatchlistManager#getAll} returns a
+     * {@code LinkedHashSet} (insertion order), and {@code suggestions} is built by iterating that
+     * same order every tick - once the queue-depth cap is hit mid-list, the items processed so
+     * far (earliest-added to the watchlist) always win the remaining backlog headroom, and
+     * later-added items are more likely to be the ones held off. A fair-rotation scheme (e.g.
+     * round-robin starting point per tick) would address this but is real additional complexity
+     * not justified by this fix's actual goal - stopping unbounded backlog growth - so it's left
+     * as a known, documented tradeoff rather than silently ignored.</p>
+     *
      * <p>Removes each submitted suggestion from {@link DecisionSuggestions} immediately (the same
      * "confirmed, no longer pending" transition {@code onConfirmSuggestionClicked} performs) so
      * the panel never shows a Confirm button for something that has already been queued.
      */
     private void autonomouslySubmit(List<PPOFlipperDecision> suggestions) {
+        int maxQueueDepth = Math.max(1, config.maxActiveOffers()) * AUTONOMOUS_QUEUE_DEPTH_MULTIPLIER;
+
         for (PPOFlipperDecision decision : suggestions) {
+            long currentBacklog = queue.countByStatus(PPOFlipperOrder.Status.QUEUED)
+                + queue.countByStatus(PPOFlipperOrder.Status.SUBMITTED);
+            if (currentBacklog >= maxQueueDepth) {
+                log.debug("PPOFlipperStar: autonomous queue backlog at {} (cap {}), holding off on {} this tick.",
+                    currentBacklog, maxQueueDepth, decision);
+                break;
+            }
+
+            boolean alreadyPending = queue.getAll().stream()
+                .anyMatch(o -> o.getItemId() == decision.getItemId()
+                    && o.getAction() == decision.getGeAction()
+                    && (o.getStatus() == PPOFlipperOrder.Status.QUEUED || o.getStatus() == PPOFlipperOrder.Status.SUBMITTED));
+            if (alreadyPending) {
+                log.debug("PPOFlipperStar: skipping autonomous {} - an equivalent order for {} is already queued/submitted.",
+                    decision, decision.getItemName());
+                decisionSuggestions.remove(decision.getId());
+                continue;
+            }
+
             queue.add(new PPOFlipperOrder(decision.getGeAction(), decision.getItemId(), decision.getItemName(),
                 decision.getQuantity(), decision.getPrice()));
             decisionSuggestions.remove(decision.getId());
