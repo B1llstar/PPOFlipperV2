@@ -1,5 +1,5 @@
 <script setup>
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { useAccounts } from '@/composables/useAccounts'
@@ -10,12 +10,37 @@ import ErrorState from '@/components/ErrorState.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 
 const route = useRoute()
-const { user, authReady, authError, signingIn, signInWithGoogle, signOut, isLikelyAllowlisted } = useAuth()
+const {
+  user,
+  authReady,
+  authError,
+  signingIn,
+  signInWithGoogle,
+  signInWithEmail,
+  signUpWithEmail,
+  signOut,
+  isLikelyAllowlisted,
+} = useAuth()
 const { accounts, loading: accountsLoading, error: accountsError, selectedAccountHash, discoverAccounts, selectAccount } =
   useAccounts()
 const { isOnline, lastSeenMillis } = usePresence(selectedAccountHash)
 
 const isPermissionDenied = computed(() => accountsError.value?.code === 'permission-denied')
+
+// Email/password sign-in form state - a plain alternative to the Google popup, toggled between
+// sign-in and sign-up mode by the same form.
+const emailFormMode = ref('signin') // 'signin' | 'signup'
+const emailInput = ref('')
+const passwordInput = ref('')
+
+function submitEmailForm() {
+  if (!emailInput.value || !passwordInput.value) return
+  if (emailFormMode.value === 'signin') {
+    signInWithEmail(emailInput.value, passwordInput.value)
+  } else {
+    signUpWithEmail(emailInput.value, passwordInput.value)
+  }
+}
 
 watch(
   user,
@@ -63,6 +88,45 @@ const navItems = [
           </svg>
           {{ signingIn ? 'Signing in…' : 'Sign in with Google' }}
         </button>
+
+        <div class="w-full flex items-center gap-3">
+          <div class="h-px flex-1 bg-[var(--color-border)]" />
+          <span class="text-xs text-[var(--color-text-faint)]">or</span>
+          <div class="h-px flex-1 bg-[var(--color-border)]" />
+        </div>
+
+        <form class="w-full flex flex-col gap-3" @submit.prevent="submitEmailForm">
+          <input
+            v-model="emailInput"
+            type="email"
+            autocomplete="email"
+            placeholder="Email"
+            required
+            class="w-full rounded-lg bg-[var(--color-surface-3)] border border-[var(--color-border-strong)] px-3 py-2 text-sm text-left focus:outline-none focus:border-[var(--color-accent)]"
+          />
+          <input
+            v-model="passwordInput"
+            type="password"
+            :autocomplete="emailFormMode === 'signin' ? 'current-password' : 'new-password'"
+            placeholder="Password"
+            required
+            class="w-full rounded-lg bg-[var(--color-surface-3)] border border-[var(--color-border-strong)] px-3 py-2 text-sm text-left focus:outline-none focus:border-[var(--color-accent)]"
+          />
+          <button
+            type="submit"
+            class="w-full rounded-lg bg-[var(--color-accent)] text-[var(--color-base)] px-4 py-2.5 text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+            :disabled="signingIn"
+          >
+            {{ signingIn ? 'Working…' : emailFormMode === 'signin' ? 'Sign in' : 'Create account' }}
+          </button>
+          <button
+            type="button"
+            class="text-xs text-[var(--color-text-dim)] hover:text-[var(--color-text)] underline underline-offset-2"
+            @click="emailFormMode = emailFormMode === 'signin' ? 'signup' : 'signin'"
+          >
+            {{ emailFormMode === 'signin' ? "Need an account? Sign up" : 'Already have an account? Sign in' }}
+          </button>
+        </form>
 
         <p v-if="authError" class="text-xs text-[var(--color-loss)]">{{ authError.message }}</p>
         <p class="text-xs text-[var(--color-text-faint)]">
