@@ -55,6 +55,10 @@ CHECKPOINTS_DIR = MODELS_DIR / "checkpoints"
 BEST_PATH = MODELS_DIR / "best.pth"
 BEST_SIDECAR_PATH = MODELS_DIR / "best.json"
 METRICS_LOG_PATH = MODELS_DIR / "training_log.csv"
+# SB3-native full-state resume checkpoints (see CheckpointAndEvalCallback._save_pth's javadoc) -
+# a separate directory from CHECKPOINTS_DIR so these .zip files are never confused with the
+# deployment-facing .pth files there.
+RESUME_DIR = MODELS_DIR / "resume"
 
 
 def push_trained_items_to_firestore(dataset: MarketDataset, git_commit: str) -> None:
@@ -249,10 +253,12 @@ class CheckpointAndEvalCallback(BaseCallback):
         self.total_timesteps = total_timesteps
         self.best_val_reward = -np.inf
         self._run_checkpoints: list[pathlib.Path] = []
+        self._run_resume_checkpoints: list[pathlib.Path] = []
         self._last_checkpoint_step = 0
         self._firestore_db = self._connect_firestore()
 
         CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+        RESUME_DIR.mkdir(parents=True, exist_ok=True)
         if BEST_SIDECAR_PATH.exists():
             try:
                 prior_best = json.loads(BEST_SIDECAR_PATH.read_text())
@@ -355,17 +361,37 @@ class CheckpointAndEvalCallback(BaseCallback):
             "trained_item_ids": self.dataset.item_ids(),
         }, indent=2))
 
+        # SB3-native full-state resume checkpoint (policy + optimizer + hyperparameters),
+        # SEPARATE from the .pth above - added after a real need: a rented GPU run has a real
+        # chance of being interrupted (disconnect, preemption, host issue) partway through a
+        # multi-hour run, and the .pth-only checkpoint above is deliberately weights-only (per
+        # PROPOSAL.md 3.4's explicit ".pth for deployment" convention) - resuming FROM weights
+        # alone would silently drop the optimizer's momentum state and reset the step counter,
+        # not a true "continue where it left off." model.save()/PPO.load() round-trips the
+        # complete training state instead. Kept in its own resume/ subdirectory so it's never
+        # confused with (or accidentally loaded by) the inference-facing .pth files, and pruned
+        # the same way periodic .pth checkpoints are - see _prune_old_checkpoints.
+        resume_path = RESUME_DIR / f"resume_{step}.zip"
+        self.model.save(resume_path)
+        self._run_resume_checkpoints.append(resume_path)
+
     def _prune_old_checkpoints(self) -> None:
         """Keeps best.pth (handled separately, never touched here) plus the last
         `keep_last_n` periodic checkpoints from this run; deletes older ones -
-        per PROPOSAL.md's Decisions section ("Checkpoint retention: pruned")."""
-        if len(self._run_checkpoints) <= self.keep_last_n:
-            return
-        to_delete = self._run_checkpoints[:-self.keep_last_n]
-        self._run_checkpoints = self._run_checkpoints[-self.keep_last_n:]
-        for ckpt in to_delete:
-            ckpt.unlink(missing_ok=True)
-            ckpt.with_suffix(".json").unlink(missing_ok=True)
+        per PROPOSAL.md's Decisions section ("Checkpoint retention: pruned"). Applies the same
+        retention to the SB3-native resume checkpoints in RESUME_DIR."""
+        if len(self._run_checkpoints) > self.keep_last_n:
+            to_delete = self._run_checkpoints[:-self.keep_last_n]
+            self._run_checkpoints = self._run_checkpoints[-self.keep_last_n:]
+            for ckpt in to_delete:
+                ckpt.unlink(missing_ok=True)
+                ckpt.with_suffix(".json").unlink(missing_ok=True)
+
+        if len(self._run_resume_checkpoints) > self.keep_last_n:
+            to_delete = self._run_resume_checkpoints[:-self.keep_last_n]
+            self._run_resume_checkpoints = self._run_resume_checkpoints[-self.keep_last_n:]
+            for ckpt in to_delete:
+                ckpt.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -387,6 +413,19 @@ def main() -> None:
                               "against a plain file copy with no .git directory (e.g. code deployed via scp/tarball "
                               "to a rented GPU instance rather than a git clone), otherwise every checkpoint silently "
                               "gets tagged 'unknown'. Pass the local machine's `git rev-parse HEAD` output.")
+    parser.add_argument("--resume-from", type=str, default=None,
+                         help="Path to an SB3-native resume_<step>.zip checkpoint (written every --checkpoint-freq "
+                              "steps under models/ppo/resume/ - see CheckpointAndEvalCallback._save_pth) to continue "
+                              "training from, instead of starting a fresh model. Unlike the deployment-facing .pth "
+                              "checkpoints, this round-trips the complete training state (policy + optimizer + "
+                              "hyperparameters) via PPO.load(), so resuming is a true continuation, not a fresh "
+                              "optimizer restarted from good weights. --timesteps is still the TOTAL step count for "
+                              "the full run (not an additional amount on top of what's already done) - e.g. resuming "
+                              "a run that stopped at step 3,000,000 with --timesteps 10000000 trains 7,000,000 more "
+                              "steps. This is computed explicitly (remaining = --timesteps - already-elapsed steps) "
+                              "rather than relying on SB3's own reset_num_timesteps=False handling of the "
+                              "total_timesteps argument, which is additive (adds it to the already-elapsed count) "
+                              "not absolute - verified directly against SB3's source before relying on it.")
     args = parser.parse_args()
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -434,19 +473,23 @@ def main() -> None:
     # fix). n_epochs lowered from SB3's default 10 to reduce overfitting each
     # rollout batch before the next collection pass, standard PPO stability advice
     # for a small, fast-to-collect env like this one.
-    model = PPO(
-        "MlpPolicy",
-        vec_env,
-        policy_kwargs=policy_kwargs,
-        n_steps=256,
-        batch_size=64,
-        n_epochs=4,
-        gamma=0.95,
-        ent_coef=0.02,
-        learning_rate=3e-4,
-        verbose=1,
-        seed=args.seed,
-    )
+    if args.resume_from:
+        print(f"Resuming from {args.resume_from} (full training state - policy, optimizer, hyperparameters)...")
+        model = PPO.load(args.resume_from, env=vec_env)
+    else:
+        model = PPO(
+            "MlpPolicy",
+            vec_env,
+            policy_kwargs=policy_kwargs,
+            n_steps=256,
+            batch_size=64,
+            n_epochs=4,
+            gamma=0.95,
+            ent_coef=0.02,
+            learning_rate=3e-4,
+            verbose=1,
+            seed=args.seed,
+        )
 
     callback = CheckpointAndEvalCallback(
         dataset=dataset,
@@ -459,9 +502,24 @@ def main() -> None:
         total_timesteps=args.timesteps,
     )
 
-    print(f"Starting training for {args.timesteps:,} timesteps "
-          f"({args.n_envs} envs, backend={args.vec_backend}, checkpoint every {args.checkpoint_freq:,} steps)...")
-    model.learn(total_timesteps=args.timesteps, callback=callback, progress_bar=False)
+    if args.resume_from:
+        # SB3's own reset_num_timesteps=False semantics ADD the total_timesteps argument to the
+        # loaded model's already-elapsed num_timesteps (verified directly against
+        # BaseAlgorithm._setup_learn's source: "total_timesteps += self.num_timesteps") - NOT an
+        # absolute target. --timesteps is kept meaning "the absolute total step count for the
+        # whole run" (the more intuitive, harder-to-misuse semantic - "I want a 10M-step run",
+        # full stop, whether fresh or resumed) by computing the correct remaining-steps figure
+        # here instead, rather than passing --timesteps straight through in resume mode.
+        remaining_timesteps = max(0, args.timesteps - model.num_timesteps)
+        print(f"Resumed at step {model.num_timesteps:,} - training {remaining_timesteps:,} more to reach "
+              f"{args.timesteps:,} total ({args.n_envs} envs, backend={args.vec_backend}, "
+              f"checkpoint every {args.checkpoint_freq:,} steps)...")
+        model.learn(total_timesteps=remaining_timesteps, callback=callback,
+                    reset_num_timesteps=False, progress_bar=False)
+    else:
+        print(f"Starting training for {args.timesteps:,} timesteps "
+              f"({args.n_envs} envs, backend={args.vec_backend}, checkpoint every {args.checkpoint_freq:,} steps)...")
+        model.learn(total_timesteps=args.timesteps, callback=callback, progress_bar=False)
 
     # Always checkpoint/evaluate once at the very end, even if it doesn't land
     # exactly on a checkpoint_freq boundary, so a short run always produces at
