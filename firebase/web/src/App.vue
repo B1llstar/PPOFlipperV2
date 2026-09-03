@@ -29,6 +29,7 @@ const navItems = [
   { to: '/', label: 'Dashboard' },
   { to: '/history', label: 'Trade History' },
   { to: '/performance', label: 'Performance' },
+  { to: '/training', label: 'Training' },
 ]
 </script>
 

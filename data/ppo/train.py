@@ -98,6 +98,60 @@ def push_trained_items_to_firestore(dataset: MarketDataset, git_commit: str) -> 
         print(f"Warning: failed to push trained-item list to Firestore - {e}")
 
 
+def push_training_progress_to_firestore(db, git_commit: str, step: int, total_timesteps: int,
+                                         train_mean_reward: float, val_metrics: dict, is_best: bool) -> None:
+    """Records this checkpoint's metrics to a project-wide (not per-account) Firestore
+    collection, so the web dashboard can show a live training-progress view instead of a rented
+    GPU box's raw SSH log being the only way to watch a run - requested after a real run's
+    progress was only visible by tailing a remote log file.
+
+    One document per (git_commit, step) under trainingRuns/{git_commit}/checkpoints/{step}, plus a
+    parent trainingRuns/{git_commit} document holding run-level fields (total_timesteps, latest
+    step/is_best) that update on every checkpoint - lets the dashboard show "run in progress, N%
+    done, latest metrics" from the parent doc alone without needing to list every checkpoint, while
+    the full per-checkpoint history is still there for a progress chart if wanted later.
+
+    Best-effort and silent on missing setup, same as push_trained_items_to_firestore: a training
+    run's own progress is never gated on this succeeding. Takes an already-constructed `db` client
+    (unlike push_trained_items_to_firestore's one-off connection) since this fires once per
+    checkpoint over a long run, not once at startup - reconnecting/re-authenticating every time
+    would be wasteful and, on a flaky connection, a needless extra failure point per checkpoint.
+    """
+    if db is None:
+        return
+    try:
+        from google.cloud import firestore
+        now = firestore.SERVER_TIMESTAMP
+        progress_pct = min(100.0, 100.0 * step / max(total_timesteps, 1))
+
+        run_ref = db.collection("trainingRuns").document(git_commit)
+        run_ref.set({
+            "gitCommit": git_commit,
+            "totalTimesteps": total_timesteps,
+            "latestStep": step,
+            "progressPct": progress_pct,
+            "latestValMeanEpisodeReward": val_metrics["mean_episode_reward"],
+            "latestValMeanRealizedPnl": val_metrics["mean_realized_pnl"],
+            "latestValMeanWinRate": val_metrics["mean_win_rate"],
+            "latestValMeanGuardrailViolations": val_metrics["mean_guardrail_violations"],
+            "isBest": is_best,
+            "updatedAt": now,
+        }, merge=True)
+
+        run_ref.collection("checkpoints").document(str(step)).set({
+            "step": step,
+            "trainMeanEpReward": train_mean_reward,
+            "valMeanEpisodeReward": val_metrics["mean_episode_reward"],
+            "valMeanRealizedPnl": val_metrics["mean_realized_pnl"],
+            "valMeanWinRate": val_metrics["mean_win_rate"],
+            "valMeanGuardrailViolations": val_metrics["mean_guardrail_violations"],
+            "isBest": is_best,
+            "recordedAt": now,
+        })
+    except Exception as e:
+        print(f"Warning: failed to push training progress to Firestore - {e}")
+
+
 def get_git_commit(override: str | None = None) -> str:
     """Tags a checkpoint with the git commit of the env/reward code that
     produced it, per PROPOSAL.md 3.4's "agent versioning" requirement - reward/
@@ -182,7 +236,7 @@ class CheckpointAndEvalCallback(BaseCallback):
     def __init__(
         self, dataset: MarketDataset, checkpoint_freq: int, watchlist_size: int,
         episode_length: int, keep_last_n: int = 3, n_eval_episodes: int = 5, verbose: int = 1,
-        git_commit_override: str | None = None,
+        git_commit_override: str | None = None, total_timesteps: int = 0,
     ):
         super().__init__(verbose)
         self.dataset = dataset
@@ -192,9 +246,11 @@ class CheckpointAndEvalCallback(BaseCallback):
         self.keep_last_n = keep_last_n
         self.n_eval_episodes = n_eval_episodes
         self.git_commit = get_git_commit(git_commit_override)
+        self.total_timesteps = total_timesteps
         self.best_val_reward = -np.inf
         self._run_checkpoints: list[pathlib.Path] = []
         self._last_checkpoint_step = 0
+        self._firestore_db = self._connect_firestore()
 
         CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
         if BEST_SIDECAR_PATH.exists():
@@ -211,6 +267,23 @@ class CheckpointAndEvalCallback(BaseCallback):
                     "val_mean_episode_reward", "val_mean_realized_pnl",
                     "val_mean_win_rate", "val_mean_guardrail_violations", "is_best",
                 ])
+
+    @staticmethod
+    def _connect_firestore():
+        """One connection attempt at callback construction, reused for every checkpoint's push -
+        see push_training_progress_to_firestore's javadoc for why this isn't reconnected per
+        checkpoint. Returns None (silently) on any failure, same best-effort stance as the rest of
+        this project's Firestore usage - never a dependency of training itself."""
+        service_account_path = pathlib.Path(__file__).parent.parent.parent / "ppoflipperopus-firebase-adminsdk-fbsvc-4e78117dde.json"
+        if not service_account_path.exists():
+            print(f"Skipping training-progress Firestore push - no service account key at {service_account_path}")
+            return None
+        try:
+            from google.cloud import firestore
+            return firestore.Client.from_service_account_json(str(service_account_path))
+        except Exception as e:
+            print(f"Skipping training-progress Firestore push - {e}")
+            return None
 
     def _on_step(self) -> bool:
         if self.num_timesteps - self._last_checkpoint_step < self.checkpoint_freq:
@@ -248,6 +321,11 @@ class CheckpointAndEvalCallback(BaseCallback):
                 val_metrics["mean_episode_reward"], val_metrics["mean_realized_pnl"],
                 val_metrics["mean_win_rate"], val_metrics["mean_guardrail_violations"], is_best,
             ])
+
+        push_training_progress_to_firestore(
+            self._firestore_db, self.git_commit, step, self.total_timesteps,
+            train_mean_reward, val_metrics, is_best,
+        )
 
         if self.verbose:
             print(f"[step {step}] train_ep_reward={train_mean_reward:.4f} "
@@ -378,6 +456,7 @@ def main() -> None:
         keep_last_n=args.keep_last_n,
         n_eval_episodes=args.n_eval_episodes,
         git_commit_override=args.git_commit,
+        total_timesteps=args.timesteps,
     )
 
     print(f"Starting training for {args.timesteps:,} timesteps "

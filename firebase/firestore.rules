@@ -148,6 +148,46 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Training-run progress (data/ppo/train.py's push_training_progress_to_firestore) -
+    // project-wide, NOT under accounts/{accountHash}/, since this describes a model training run
+    // itself, not any single account's live state (same reasoning as modelTrainedItems below).
+    // Written directly by the training script's own service-account credentials from wherever it
+    // runs (a rented GPU box, most often), bypassing these rules the same way every other admin
+    // write in this file does - never through a client SDK. Reads opened up to the allowlisted
+    // dashboard viewer so a training run's progress is visible without SSH-tailing a remote log.
+    match /trainingRuns/{gitCommit} {
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
+    }
+
+    match /trainingRuns/{gitCommit}/checkpoints/{step} {
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
+    }
+
+    // Collection-group counterpart of the direct-path rule above, REQUIRED for the dashboard's
+    // collectionGroup(db, 'checkpoints') query (useTrainingRuns.js) to work at all - verified
+    // against Firebase's own docs (firebase.google.com/docs/firestore/security/rules-query) after
+    // this exact class of mistake already burned this project once (see the presence/heartbeat
+    // collection-group rule elsewhere in this file): a direct-path match, no matter how precisely
+    // its path shape matches a document, does NOT authorize a collection-group query against that
+    // same collection id - Firestore requires a separate rule written with the recursive
+    // `{path=**}` wildcard form specifically for collection-group queries to be authorized at all.
+    // Without this, the query would silently return zero results (or permission-denied), not "just
+    // work" because a same-shape direct rule already existed above.
+    match /{path=**}/checkpoints/{step} {
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
+    }
+
+    // The exact item universe a training run used (data/ppo/train.py's
+    // push_trained_items_to_firestore) - project-wide for the same reason as trainingRuns above.
+    // Same admin-write-only/allowlisted-read-only shape as everything else in this file.
+    match /modelTrainedItems/{gitCommit} {
+      allow read: if isAllowlistedDashboardViewer();
+      allow write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

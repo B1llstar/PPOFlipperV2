@@ -126,12 +126,32 @@ HOLD, BUY_SMALL, BUY_MEDIUM, BUY_LARGE, SELL_25, SELL_50, SELL_100 = range(7)
 ACTION_NAMES = ["HOLD", "BUY_SMALL", "BUY_MEDIUM", "BUY_LARGE", "SELL_25%", "SELL_50%", "SELL_100%"]
 NUM_ACTIONS = 7
 
-# Buy sizing tiers, as a fraction of (remaining buy-limit headroom this window).
-# Chosen so SMALL/MEDIUM/LARGE give the policy a genuine small/medium/large
-# choice without ever being able to blow the whole 4h limit in one order at the
-# LARGE tier (capped at 50% of headroom) - documented choice, not derived from
-# the proposal (which leaves exact sizing to the implementation).
-BUY_SIZE_FRACTIONS = {BUY_SMALL: 0.10, BUY_MEDIUM: 0.25, BUY_LARGE: 0.50}
+# Buy sizing tiers, as a fraction of CURRENT AVAILABLE GP (self._gp at the time of the
+# action) - deliberately NOT a fraction of the item's buy limit, which was the
+# original design and is now known to be a real bias, not a neutral choice.
+#
+# Why this changed: sizing off buy limit means desired_qty for a cheap, high-limit
+# staple (e.g. Flax, limit 13,000) is enormous in absolute terms next to a low-limit
+# expensive item (e.g. a rare herb or high-value equipment, limit in the hundreds) at
+# the identical tier - and since reward is raw realized P&L, a policy trained this way
+# earns more apparent reward per action from high-limit cheap items purely through
+# volume, regardless of whether that trade was actually the better one. Confirmed live
+# after deployment: the trained policy repeatedly proposed the same handful of cheap,
+# high-limit staples and effectively never proposed low-limit, higher-value items,
+# even when a live GP-price/margin signal would have favored them - a real reward-
+# signal distortion, not a deliberate preference, and not fixable from the live
+# plugin side (a client-side cooldown on repeat suggestions only dampens the
+# symptom, it can't teach the model to value a trade it was never rewarded for).
+#
+# Sizing off available GP instead makes "small/medium/large" mean "spend a
+# small/medium/large fraction of current capital" - price-agnostic and buy-limit-
+# agnostic, so a low-limit expensive item gets a properly-sized (correspondingly
+# small unit-count, large gp-value) BUY_SMALL exactly like a cheap item would, instead
+# of being structurally sized down to irrelevance by the old formula. Still capped by
+# headroom (the real GE buy limit) exactly as before - this only changes the natural
+# *target* size before that cap (and the existing cost_if_full-vs-gp affordability
+# cap) apply.
+BUY_SIZE_FRACTIONS = {BUY_SMALL: 0.02, BUY_MEDIUM: 0.05, BUY_LARGE: 0.10}
 SELL_SIZE_FRACTIONS = {SELL_25: 0.25, SELL_50: 0.50, SELL_100: 1.00}
 
 # Price offset per action tier, as a fraction of the current spread, applied
@@ -417,11 +437,15 @@ class GEMarketEnv(gym.Env):
         if headroom <= 0:
             return self._reject(info, "buy limit exceeded")
 
-        desired_qty = max(1, int(round(limit * BUY_SIZE_FRACTIONS[action])))
-        qty_requested = min(desired_qty, headroom)
-
         spread = max(series.avg_high_price[t] - series.avg_low_price[t], 0.0)
         offer_price = series.avg_low_price[t] + BUY_PRICE_OFFSET_FRAC[action] * spread
+
+        # Sized off current available GP, not the item's buy limit - see
+        # BUY_SIZE_FRACTIONS' module-level comment for why. Still capped by headroom
+        # (the real GE buy limit) exactly as the old formula was.
+        gp_budget_for_action = self._gp * BUY_SIZE_FRACTIONS[action]
+        desired_qty = max(1, int(gp_budget_for_action // max(offer_price, 1e-6)))
+        qty_requested = min(desired_qty, headroom)
 
         cost_if_full = offer_price * qty_requested
         if cost_if_full > self._gp:

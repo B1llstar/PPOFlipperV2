@@ -108,6 +108,7 @@ from env import (  # noqa: E402
     SELL_50,
     SELL_PRICE_OFFSET_FRAC,
     SELL_SIZE_FRACTIONS,
+    STARTING_GP,
     _normalize_market_features,
 )
 from features import MARKET_FEATURE_COLUMNS  # noqa: E402
@@ -297,8 +298,10 @@ def _action_to_order(action: int, item: dict) -> dict:
     response schema wants, mirroring env.py's own sizing/pricing tiers
     (BUY_SIZE_FRACTIONS/SELL_SIZE_FRACTIONS/xxx_PRICE_OFFSET_FRAC) exactly so a
     given action id means the same real-world order shape here as it did during
-    training/backtesting. Quantity/price are computed from fields the plugin
-    already includes in the request (avgLowPrice/avgHighPrice/buyLimit/
+    training/backtesting - including BUY_SIZE_FRACTIONS' current available-GP
+    basis (see env.py's module-level comment on that constant), not the item's
+    buy limit. Quantity/price are computed from fields the plugin already
+    includes in the request (avgLowPrice/avgHighPrice/availableGpNorm/
     limitHeadroomQty/heldQuantity) - see PPOFlipperStarScript's request-building
     code for where these come from on the Java side.
     """
@@ -312,10 +315,19 @@ def _action_to_order(action: int, item: dict) -> dict:
 
     if action in _BUY_ACTIONS:
         headroom = max(int(item.get("limitHeadroomQty", 0)), 0)
-        buy_limit = max(int(item.get("buyLimit", 0)), 0)
-        desired_qty = max(1, int(round(buy_limit * BUY_SIZE_FRACTIONS[action]))) if buy_limit > 0 else 0
-        quantity = min(desired_qty, headroom)
         price = avg_low + BUY_PRICE_OFFSET_FRAC[action] * spread
+
+        # Sized off current available GP, not the item's buy limit - mirrors
+        # env.py's _apply_buy exactly (see BUY_SIZE_FRACTIONS' module-level comment
+        # there for why this changed from the original buy-limit-based formula).
+        # availableGpNorm is already availableGp / STARTING_GP (see
+        # DecisionEngine.java's GP_NORMALIZATION_DENOMINATOR, which matches
+        # STARTING_GP exactly) - undo that normalization to recover the real gp
+        # figure this tick, same value env.py's self._gp represents during training.
+        available_gp = float(item.get("availableGpNorm", 0.0)) * STARTING_GP
+        gp_budget_for_action = available_gp * BUY_SIZE_FRACTIONS[action]
+        desired_qty = max(1, int(gp_budget_for_action // max(price, 1e-6))) if price > 0 else 0
+        quantity = min(desired_qty, headroom)
         return {"action": action_name, "quantity": max(quantity, 0), "price": int(round(price))}
 
     # SELL tier
