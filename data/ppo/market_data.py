@@ -39,7 +39,21 @@ FEATURE_LOOKBACK_BLOCKS = 288
 # old pipeline used for its watchlist/candidate filtering), applied here as "median
 # volume_1h over the item's history" rather than per-row, since eligibility is
 # decided once at load time, not per block.
-MIN_MEDIAN_VOLUME_1H = 1000.0
+#
+# Lowered from 1000.0 to 250.0 deliberately: at 1000/hr, roughly 85% of all
+# tradeable items (measured against the actual raw dataset - ~3,800 of ~4,500)
+# never became eligible for training at all, no matter how large --max-items was
+# set, which directly excluded genuinely rare/low-liquidity items from ever being
+# proposed for a BUY - the model can't learn to "snipe" an item it never once saw
+# during training. 250/hr roughly triples the eligible pool (~674 -> ~1,000 items)
+# while stopping short of thresholds low enough that the env's fill simulation
+# (filled_qty capped by that block's actual traded volume) would mostly produce
+# empty fills for the newly-included items - that risks teaching "this item never
+# fills, don't bother" rather than real trading skill, so this wasn't dropped all
+# the way to zero. A genuinely lower floor is a plausible future experiment, but
+# should be evaluated on its own after this change's effect is understood, not
+# combined with it blind.
+MIN_MEDIAN_VOLUME_1H = 250.0
 MIN_MEDIAN_PRICE = 1.0
 
 
