@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { Line } from 'vue-chartjs'
 import { useTrainingRuns } from '@/composables/useTrainingRuns'
+import { useInterpolatedStep } from '@/composables/useInterpolatedStep'
 import { CHART_COLORS } from '@/composables/useChartTheme'
 import { formatGp, formatPercent, formatNumber, formatDateTime } from '@/composables/useFormat'
 import StatCard from '@/components/StatCard.vue'
@@ -20,6 +21,13 @@ const latestRun = computed(() => runs.value[0] ?? null)
 const olderRuns = computed(() => runs.value.slice(1))
 
 const latestCheckpoints = computed(() => checkpointsByRun.value[latestRun.value?.gitCommit] ?? [])
+
+// Client-side interpolation between real checkpoint updates (every --checkpoint-freq steps, which
+// for a real run is minutes apart) - see useInterpolatedStep's own doc for why: without this the
+// step count/progress bar would sit dead-still between checkpoints, reading as "did this stall?"
+// even while training is actively running. No extra Firestore reads - purely derived from data
+// already in hand (the two most recent checkpoints already loaded).
+const { interpolatedStep, interpolatedProgressPct, stepsPerSecond } = useInterpolatedStep(latestRun, latestCheckpoints)
 
 const isInProgress = computed(() => {
   const run = latestRun.value
@@ -160,13 +168,20 @@ const winRateChartOptions = {
 
         <div class="flex flex-col gap-1.5">
           <div class="flex items-center justify-between text-xs text-[var(--color-text-dim)]">
-            <span>{{ formatNumber(latestRun.latestStep) }} / {{ formatNumber(latestRun.totalTimesteps) }} steps</span>
-            <span>{{ formatPercent((latestRun.progressPct ?? 0) / 100, 1) }}</span>
+            <span class="font-mono-nums">
+              {{ formatNumber(Math.round(interpolatedStep)) }} / {{ formatNumber(latestRun.totalTimesteps) }} steps
+            </span>
+            <span class="flex items-center gap-2">
+              <span v-if="isInProgress && stepsPerSecond > 0" class="text-[var(--color-text-faint)]">
+                ~{{ formatNumber(Math.round(stepsPerSecond)) }} steps/s
+              </span>
+              <span class="font-mono-nums">{{ formatPercent(interpolatedProgressPct / 100, 1) }}</span>
+            </span>
           </div>
           <div class="h-2 rounded-full bg-[var(--color-surface-3)] overflow-hidden">
             <div
-              class="h-full rounded-full bg-[var(--color-accent)] transition-all duration-500"
-              :style="{ width: `${Math.min(100, latestRun.progressPct ?? 0)}%` }"
+              class="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-1000 ease-linear"
+              :style="{ width: `${Math.min(100, interpolatedProgressPct)}%` }"
             />
           </div>
         </div>
