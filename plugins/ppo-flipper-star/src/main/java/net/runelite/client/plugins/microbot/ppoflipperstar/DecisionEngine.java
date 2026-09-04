@@ -172,6 +172,25 @@ public class DecisionEngine {
     }
 
     /**
+     * The item's display name from the same bulk-fetched mapping cache {@link #getBuyLimit} reads,
+     * or {@code null} if not yet known (an item genuinely missing from the bulk response, or not
+     * yet warmed). Added for {@code PPOFlipperStarScript#toDecision} to resolve a suggestion's item
+     * name from - a real incident (confirmed live via jstack): that method previously called
+     * {@code Rs2ItemManager.getItemComposition(itemId)} (a blocking client-thread round trip)
+     * TWICE per suggestion (once for a null check, once for {@code .getName()}), inside a
+     * {@code .map()} over every action in a tick's response. A single tick with hundreds of
+     * suggestions (a large watchlist scores every item every tick) meant hundreds of sequential
+     * blocking calls stalling the DECIDE thread for minutes, the same disease already fixed for
+     * {@code getActiveOfferSlots}/wiki prices/item mapping/gold/holdings elsewhere in this class -
+     * this was the one remaining per-item blocking call, only exposed once ticks started
+     * succeeding and producing real suggestion volumes again.
+     */
+    public String getItemName(int itemId) {
+        ItemMappingData mapping = itemMappingCache.get(itemId);
+        return (mapping != null && mapping.name != null && !mapping.name.isEmpty()) ? mapping.name : null;
+    }
+
+    /**
      * True only when the most recent {@link #decide} call ended in {@link #pollForResponse}
      * timing out (a real request was written but no matching response ever arrived) - distinct
      * from the other reasons {@code decide} can return {@link Optional#empty()} (an empty
@@ -264,10 +283,28 @@ public class DecisionEngine {
             // Rs2GrandExchange.getItemMappingData(itemId) call buildRequestItem used to make.
             refreshItemMappings();
 
+            // Same "compute once, not per item" fix shape as getActiveOfferSlots() and
+            // refreshAllPrices() above - a real incident, confirmed live via jstack:
+            // goldManager.getTotalGold() (-> getInventoryGold() -> InventoryManager's bank-item
+            // scan -> Rs2ItemManager.getItemIdByName() -> Rs2Bank.hasBankItem() -> Rs2Bank.isOpen()
+            // -> handleBankPin()/isBankPinWidgetVisible()) does a blocking round-trip onto the
+            // real RuneLite client thread, exactly like getActiveOfferSlots() - it's the same
+            // "how much gold do I have right now" global fact for every item in this tick, not
+            // something that varies per item. Calling it once per watchlisted item left the DECIDE
+            // thread stuck 100+ seconds on a single item's worth of this call alone on a 900+ item
+            // watchlist, well past decisionResponseTimeoutSeconds, so the tick never got anywhere
+            // near writing decision/request at all.
+            double availableGpNorm = goldManager.getTotalGold() / GP_NORMALIZATION_DENOMINATOR;
+
+            // Same reasoning as availableGpNorm just above - portfolio.getAllHoldings() is one
+            // bank+inventory scan for the whole tick, reused for every item below instead of each
+            // one independently re-scanning the bank via getHeldQuantity(itemId).
+            Map<Integer, Integer> allHoldings = portfolio.getAllHoldings();
+
             long tickId = tickIdGenerator.incrementAndGet();
             List<PPOFlipperStarFirestoreClient.DecisionRequestItem> items = new ArrayList<>();
             for (int itemId : watchedIds) {
-                buildRequestItem(itemId, maxActiveOffers, freeSlotsNorm).ifPresent(items::add);
+                buildRequestItem(itemId, maxActiveOffers, freeSlotsNorm, availableGpNorm, allHoldings).ifPresent(items::add);
             }
             if (items.isEmpty()) {
                 log.debug("PPOFlipperStar: no watchlisted item had usable live price data this tick, skipping decision request.");
@@ -315,7 +352,7 @@ public class DecisionEngine {
      * scored - skipped for this tick rather than sent with fabricated zeros, matching
      * {@link WikiPriceClient#getLatestPrice}'s own "return null, let the caller decide" contract).
      */
-    private Optional<PPOFlipperStarFirestoreClient.DecisionRequestItem> buildRequestItem(int itemId, int maxActiveOffers, double freeSlotsNorm) {
+    private Optional<PPOFlipperStarFirestoreClient.DecisionRequestItem> buildRequestItem(int itemId, int maxActiveOffers, double freeSlotsNorm, double availableGpNorm, Map<Integer, Integer> allHoldings) {
         WikiPriceClient.Price price = wikiPriceClient.getLatestPrice(itemId);
         if (price == null || price.instaBuyPrice <= 0 || price.instaSellPrice <= 0) {
             return Optional.empty();
@@ -327,7 +364,12 @@ public class DecisionEngine {
 
         Map<String, Double> marketFeatures = buildMarketFeatures(itemId, avgHigh, avgLow, midPrice);
 
-        int heldQuantity = portfolio.getHeldQuantity(itemId);
+        // Same "compute once per tick, not per item" fix shape as getActiveOfferSlots()/
+        // getTotalGold() above - portfolio.getHeldQuantity(itemId) independently scans the bank
+        // (via BankManager.snapshotByItemId(), a blocking client-thread round trip, same disease
+        // as getTotalGold's) on every call; PortfolioManager.getAllHoldings() already exists as
+        // its bulk equivalent, one bank scan for the whole tick, passed in from decide().
+        int heldQuantity = allHoldings.getOrDefault(itemId, 0);
         long avgCost = portfolio.getAverageCost(itemId);
         double unrealizedPct = (heldQuantity > 0 && avgCost > 0) ? (midPrice - avgCost) / avgCost : 0.0;
 
@@ -361,9 +403,8 @@ public class DecisionEngine {
         double limitHeadroomUsed = buyLimit > 0 ? (double) alreadyBought / buyLimit : 0.0;
         double positionSizeNorm = buyLimit > 0 ? (double) heldQuantity / buyLimit : 0.0;
 
-        double availableGpNorm = goldManager.getTotalGold() / GP_NORMALIZATION_DENOMINATOR;
-        // freeSlotsNorm is now a parameter, computed once per tick by decide() - see that
-        // method's comment for why this moved out of the per-item loop.
+        // availableGpNorm and freeSlotsNorm are now parameters, both computed once per tick by
+        // decide() - see that method's comments for why each moved out of this per-item method.
 
         return Optional.of(new PPOFlipperStarFirestoreClient.DecisionRequestItem(
             itemId, marketFeatures, midPrice, avgLow, avgHigh,

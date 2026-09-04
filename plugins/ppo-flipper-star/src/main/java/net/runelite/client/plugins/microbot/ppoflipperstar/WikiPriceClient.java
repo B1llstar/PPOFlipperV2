@@ -11,6 +11,8 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Direct client for the OSRS Wiki's real-time prices API (prices.runescape.wiki). Used by
@@ -29,6 +31,19 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Cached briefly per item (30s) since this can be called on every order submission tick and
  * the wiki's own data only updates on real trades anyway - no need to hit the API more often
  * than that.
+ *
+ * <p><b>Non-blocking by design:</b> {@link #getLatestPrice(int)} is a pure, instant cache read -
+ * it never performs network I/O on the calling thread. A real incident found this client called
+ * directly from {@code PPOFlipperStarScript}'s main tick thread (submission-time price clamp) and
+ * from {@link Guardrails} (price-deviation check), each holding its own independent instance with
+ * its own cold cache - unlike {@link DecisionEngine}'s copy, which warms itself via
+ * {@link #refreshAllPrices()} before ever calling {@link #getLatestPrice(int)}, those two call
+ * sites had no such warm-up and would fall through to a genuine synchronous HTTP round-trip (up to
+ * the connect timeout) directly on the tick thread on every cache miss - stalling order
+ * submission/guardrail checks, and with them every in-game GE action this script drives, for
+ * however long that request took. A miss now kicks off a best-effort async refresh (deduped so
+ * only one is ever in flight per item) and returns {@code null}/stale data immediately rather than
+ * waiting on it - the next call, moments later, sees the warmed cache.
  */
 @Slf4j
 public class WikiPriceClient {
@@ -48,6 +63,17 @@ public class WikiPriceClient {
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(5))
         .build();
+
+    // Shared by every WikiPriceClient instance (each caller - the script, Guardrails,
+    // DecisionEngine - constructs its own) so a background refresh triggered by any one of them
+    // warms the cache for all of them, and so at most one single-item async fetch is ever in
+    // flight for a given item at a time regardless of how many instances ask for it concurrently.
+    private static final ExecutorService BACKGROUND_EXECUTOR = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "PPOFlipperStar-WikiPriceRefresh");
+        t.setDaemon(true);
+        return t;
+    });
+    private static final Map<Integer, Boolean> FETCH_IN_FLIGHT = new ConcurrentHashMap<>();
 
     public static final class Price {
         public final int instaBuyPrice;
@@ -143,10 +169,18 @@ public class WikiPriceClient {
     }
 
     /**
-     * Live insta-buy/insta-sell reference for one item, or null if the item has no recent
-     * trade data or the request failed for any reason (network error, malformed response,
-     * etc). Never throws - a failed lookup should fall back to the caller's own price/quantity
-     * decision, not block it.
+     * Live insta-buy/insta-sell reference for one item, or null if nothing is cached for it yet
+     * (or the item has no recent trade data). <b>Never blocks and never performs network I/O on
+     * the calling thread</b> - this is a pure, instant cache read. A cache miss (or an entry
+     * older than {@link #CACHE_TTL_MILLIS}) triggers a best-effort async refresh on
+     * {@link #BACKGROUND_EXECUTOR} (deduped via {@link #FETCH_IN_FLIGHT} so at most one fetch per
+     * item is ever in flight at a time) and immediately returns whatever's cached right now - a
+     * stale price if one exists, otherwise {@code null}. Callers on a real-time path (order
+     * submission, guardrail checks) must already treat {@code null}/stale as "fall back to the
+     * order's own price" per this method's pre-existing contract; the only change is that a miss
+     * no longer stalls the caller waiting for the network to answer - it answers on a later call
+     * once the background fetch lands, same as {@link #refreshAllPrices()}'s bulk warm-up already
+     * does for {@link DecisionEngine}.
      */
     public Price getLatestPrice(int itemId) {
         CachedPrice cached = cache.get(itemId);
@@ -154,6 +188,35 @@ public class WikiPriceClient {
             return cached.price;
         }
 
+        triggerBackgroundFetch(itemId);
+        return cached != null ? cached.price : null;
+    }
+
+    private void triggerBackgroundFetch(int itemId) {
+        if (FETCH_IN_FLIGHT.putIfAbsent(itemId, Boolean.TRUE) != null) {
+            // Another call (from this instance or a sibling one - the executor/in-flight map are
+            // shared statics) already has a fetch for this item in flight; don't pile up a second
+            // one on top of it.
+            return;
+        }
+
+        try {
+            BACKGROUND_EXECUTOR.execute(() -> {
+                try {
+                    fetchOne(itemId);
+                } finally {
+                    FETCH_IN_FLIGHT.remove(itemId);
+                }
+            });
+        } catch (Exception e) {
+            // Executor rejected the task (e.g. shut down) - drop it, not fatal, just means this
+            // item's cache stays stale/empty until the next call retries.
+            FETCH_IN_FLIGHT.remove(itemId);
+        }
+    }
+
+    /** The actual blocking HTTP call - runs only on {@link #BACKGROUND_EXECUTOR}, never on a caller's thread. */
+    private void fetchOne(int itemId) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(String.format(LATEST_URL, itemId)))
@@ -165,13 +228,13 @@ public class WikiPriceClient {
             HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 log.warn("PPOFlipperStar: wiki price lookup for item {} returned HTTP {}", itemId, response.statusCode());
-                return cached != null ? cached.price : null;
+                return;
             }
 
             JsonObject data = new JsonParser().parse(response.body()).getAsJsonObject().getAsJsonObject("data");
             JsonObject itemPrice = data != null ? data.getAsJsonObject(String.valueOf(itemId)) : null;
             if (itemPrice == null) {
-                return cached != null ? cached.price : null;
+                return;
             }
 
             // The wiki's "high" is the most recent insta-buy trade (what buyers are currently
@@ -179,14 +242,12 @@ public class WikiPriceClient {
             // getting) - do not swap these. See parsePrice() - same convention, shared logic.
             Price price = parsePrice(itemPrice);
             if (price == null) {
-                return cached != null ? cached.price : null;
+                return;
             }
 
             cache.put(itemId, new CachedPrice(price, System.currentTimeMillis()));
-            return price;
         } catch (Exception e) {
             log.warn("PPOFlipperStar: wiki price lookup failed for item {} - {}", itemId, e.getMessage());
-            return cached != null ? cached.price : null;
         }
     }
 }

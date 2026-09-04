@@ -441,4 +441,22 @@ public interface PPOFlipperStarConfig extends Config {
     default String firestoreServiceAccountPath() {
         return "/Users/b1llstar/Documents/GitHub/BotStar/ppoflipperopus-firebase-adminsdk-fbsvc-4e78117dde.json";
     }
+
+    @ConfigItem(
+        keyName = "marketHistoryCloudSyncEnabled",
+        name = "Enable shared market-history cloud sync",
+        description = "Experiment flag: gates ONLY WikiHistoryBuffer's shared marketHistory/{itemId} Firestore " +
+            "calls (per-item cold-start seed reads, and the periodic full-buffer push) - specifically the part " +
+            "of this plugin's Firestore usage that a future middleman/batching server would take over, unlike " +
+            "'Enable Firestore sync' above (which also gates decision/request-response, the actual model round " +
+            "trip, and would leave DECIDE producing nothing at all). Off means every item's rolling-feature " +
+            "history is built purely from this session's own live wiki polling, with no cross-session/cross-" +
+            "machine seed and no shared-cache push - a cold-start-only mode, useful for isolating how much of " +
+            "any observed lag traces back to this specific Firestore usage versus everything else.",
+        position = 2,
+        section = cloudSyncSection
+    )
+    default boolean marketHistoryCloudSyncEnabled() {
+        return true;
+    }
 }

@@ -6,7 +6,6 @@ import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.BuyLimitLed
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
-import net.runelite.client.plugins.microbot.util.grandexchange.models.ItemMappingData;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 /**
@@ -23,16 +22,19 @@ public class Guardrails {
     private final PortfolioManager portfolio;
     private final BuyLimitLedger buyLimitLedger;
     private final OrderQueue queue;
+    private final DecisionEngine decisionEngine;
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
 
     @Getter
     private long gpSpentThisSession = 0;
 
-    public Guardrails(PPOFlipperStarConfig config, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger, OrderQueue queue) {
+    public Guardrails(PPOFlipperStarConfig config, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
+                       OrderQueue queue, DecisionEngine decisionEngine) {
         this.config = config;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
         this.queue = queue;
+        this.decisionEngine = decisionEngine;
     }
 
     public void reset() {
@@ -148,6 +150,17 @@ public class Guardrails {
      * plain {@code int} with {@code -1} as its "no data" sentinel (see
      * {@code Rs2GrandExchange.fetchItemMappingData}'s bytecode) - any other value, including one
      * {@code >= 1000}, is the item's genuine GE buy limit and must be enforced as such.
+     *
+     * <p><b>Reads {@link DecisionEngine#getBuyLimit}, NOT {@code Rs2GrandExchange.getItemMappingData}
+     * directly</b> - a real incident (see {@code incident-notes/2026-09-03-decide-tick-bug-hunt.md}
+     * item #13): the wiki has no per-item mapping endpoint, so {@code getItemMappingData(itemId)}
+     * downloads the entire ~4,700-item, ~860KB mapping file on every single call regardless of
+     * which item was asked for, and its own cache is keyed per-item so it never benefits from the
+     * bulk download it just did. This guardrail runs on every BUY submission attempt (the main
+     * tick thread, not a background one) - re-fetching that whole file per order is exactly the
+     * same disease {@link DecisionEngine#refreshItemMappings} already fixed once for the DECIDE
+     * loop's own per-item mapping lookups; routing through its shared, already-bulk-warmed cache
+     * here closes the one remaining call site still bypassing that fix.
      */
     private String checkBuyLimit(PPOFlipperOrder order) {
         int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
@@ -155,12 +168,11 @@ public class Guardrails {
             return null;
         }
 
-        ItemMappingData mapping = Rs2GrandExchange.getItemMappingData(itemId);
-        if (mapping == null || mapping.tradeLimitPer4Hours <= 0) {
+        int limit = decisionEngine.getBuyLimit(itemId);
+        if (limit <= 0) {
             return null;
         }
 
-        int limit = mapping.tradeLimitPer4Hours;
         int alreadyBought = buyLimitLedger.quantityBoughtInWindow(itemId, System.currentTimeMillis());
         if (alreadyBought + order.getQuantity() > limit) {
             return String.format(

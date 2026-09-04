@@ -342,11 +342,17 @@ public class PPOFlipperStarFirestoreSync {
      * Fire-and-forget push of one item's full current candle buffer, replacing whatever was
      * there. Called periodically (not on every poll) by {@code WikiHistoryBuffer} - best-effort,
      * same failure handling as every other async push in this class.
+     *
+     * @return true if the push was actually accepted onto the background executor (sync enabled,
+     * executor alive and not rejecting) - NOT whether the write itself later succeeds, only
+     * whether it was queued at all. {@code WikiHistoryBuffer} uses this to know exactly how many
+     * of a push cycle's items it can wait to drain via {@link #runAfterPendingMarketHistoryPushes}
+     * - a push that was never even queued here would otherwise be silently uncounted forever.
      */
-    public void pushMarketHistoryAsync(int itemId, PPOFlipperStarFirestoreClient.RemoteMarketHistory history) {
+    public boolean pushMarketHistoryAsync(int itemId, PPOFlipperStarFirestoreClient.RemoteMarketHistory history) {
         PPOFlipperStarFirestoreClient clientRef = client;
         ExecutorService executorRef = executor;
-        if (clientRef == null || executorRef == null || executorRef.isShutdown()) return;
+        if (clientRef == null || executorRef == null || executorRef.isShutdown()) return false;
 
         try {
             executorRef.execute(() -> {
@@ -356,8 +362,37 @@ public class PPOFlipperStarFirestoreSync {
                     log.warn("PPOFlipperStar: failed to push shared market history for item {} - {}", itemId, e.getMessage());
                 }
             });
+            return true;
         } catch (Exception e) {
             log.debug("PPOFlipperStar: could not schedule market history push for item {} - {}", itemId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Runs {@code onDrained} once every market-history push already submitted via
+     * {@link #pushMarketHistoryAsync} has finished (success or failure) - relies on the
+     * background executor being single-threaded/FIFO (see its construction in {@link #start}), so
+     * a no-op marker task queued after N real pushes only runs once all N have completed.
+     * {@code onDrained} itself runs ON the background executor thread, not the caller's - keep it
+     * cheap (e.g. just clearing a flag), matching every other callback in this class.
+     *
+     * <p>Used by {@code WikiHistoryBuffer} to know when it's safe to start a new push cycle rather
+     * than piling more pushes onto one that's still draining - see that class's
+     * {@code pushAllToFirestore} javadoc for the incident this prevents. A no-op (never calls
+     * {@code onDrained}) if sync isn't running - {@code WikiHistoryBuffer}'s own caller already
+     * treats "cycle never completed" as leaving its in-flight flag set, which is fine: with sync
+     * disabled there's nothing to push anyway, so no push cycle would have queued anything for
+     * this marker to follow in the first place.
+     */
+    public void runAfterPendingMarketHistoryPushes(Runnable onDrained) {
+        ExecutorService executorRef = executor;
+        if (executorRef == null || executorRef.isShutdown()) return;
+
+        try {
+            executorRef.execute(onDrained);
+        } catch (Exception e) {
+            log.debug("PPOFlipperStar: could not schedule market-history drain marker - {}", e.getMessage());
         }
     }
 

@@ -75,7 +75,6 @@ public class PPOFlipperStarScript extends Script {
     private final PPOFlipperStarFirestoreSync firestoreSync;
     private final DecisionEngine decisionEngine;
     private final DecisionSuggestions decisionSuggestions;
-    private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
 
     private PPOFlipperStarConfig config;
@@ -169,7 +168,7 @@ public class PPOFlipperStarScript extends Script {
 
     public boolean run(PPOFlipperStarConfig config) {
         this.config = config;
-        this.guardrails = new Guardrails(config, portfolio, buyLimitLedger, queue);
+        this.guardrails = new Guardrails(config, portfolio, buyLimitLedger, queue, decisionEngine);
         this.guardrails.reset();
         this.state = State.GOING_TO_GE;
         this.activeOrders.clear();
@@ -901,12 +900,26 @@ public class PPOFlipperStarScript extends Script {
             System.currentTimeMillis());
     }
 
-    /** Converts one raw {@code decision/response} action entry into a {@link PPOFlipperDecision}, resolving the item's display name via {@link Rs2ItemManager} and mapping the action-name string onto a {@link GrandExchangeAction} for BUY/SELL tiers (null for HOLD). */
+    /**
+     * Converts one raw {@code decision/response} action entry into a {@link PPOFlipperDecision},
+     * resolving the item's display name and mapping the action-name string onto a
+     * {@link GrandExchangeAction} for BUY/SELL tiers (null for HOLD).
+     *
+     * <p>Resolves the name via {@link DecisionEngine#getItemName}, NOT
+     * {@code Rs2ItemManager.getItemComposition} - a real incident, confirmed live via jstack: the
+     * old code called {@code getItemComposition} (a blocking client-thread round trip) TWICE per
+     * suggestion, inside the {@code .map()} this method backs (see {@code runDecideTick}) over
+     * every action in a tick's response - hundreds of suggestions per tick on a large watchlist
+     * meant hundreds of sequential blocking calls stalling the DECIDE thread for minutes.
+     * {@link DecisionEngine} already bulk-fetches every tradeable item's name once per tick
+     * (see its {@code refreshItemMappings} javadoc) for exactly this kind of lookup - reusing that
+     * cache here is a plain, instant map read instead of a second per-item network/client-thread
+     * round trip.
+     */
     private PPOFlipperDecision toDecision(long tickId, PPOFlipperStarFirestoreClient.DecisionAction action,
                                            String checkpointVersion) {
-        String itemName = itemManager.getItemComposition(action.itemId) != null
-            ? itemManager.getItemComposition(action.itemId).getName()
-            : ("item " + action.itemId);
+        String resolvedName = decisionEngine.getItemName(action.itemId);
+        String itemName = resolvedName != null ? resolvedName : ("item " + action.itemId);
 
         GrandExchangeAction geAction = null;
         if (action.action != null) {

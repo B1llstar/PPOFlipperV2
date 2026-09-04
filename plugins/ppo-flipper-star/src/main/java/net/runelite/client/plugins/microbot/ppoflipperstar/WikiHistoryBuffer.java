@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -145,7 +146,18 @@ public class WikiHistoryBuffer {
         }
     }
 
+    // Backs maybeSeedFromFirestore - a small fixed pool (not unbounded) since each seed fetch is
+    // its own independent, cache-miss-only, at-most-once-per-item network call, never anything
+    // the DECIDE thread waits on. See maybeSeedFromFirestore's javadoc for the incident this
+    // fixes (that call used to run inline on the DECIDE thread itself).
+    private static final ExecutorService SEED_EXECUTOR = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "PPOFlipperStar-HistorySeed");
+        t.setDaemon(true);
+        return t;
+    });
+
     private final PPOFlipperStarFirestoreSync firestoreSync;
+    private final PPOFlipperStarConfig config;
 
     private final Map<Integer, Deque<Candle>> history = new ConcurrentHashMap<>();
     // Items already checked against the shared Firestore cache (seeded from it or confirmed to
@@ -158,8 +170,9 @@ public class WikiHistoryBuffer {
     private final AtomicBoolean started = new AtomicBoolean(false);
 
     @Inject
-    public WikiHistoryBuffer(PPOFlipperStarFirestoreSync firestoreSync) {
+    public WikiHistoryBuffer(PPOFlipperStarFirestoreSync firestoreSync, PPOFlipperStarConfig config) {
         this.firestoreSync = firestoreSync;
+        this.config = config;
     }
 
     /**
@@ -295,6 +308,33 @@ public class WikiHistoryBuffer {
      * {@link #firestoreSeedChecked}) - once this machine has ANY local history for an item
      * (whether from a seed or its own live polling), there's no reason to keep re-checking
      * Firestore for it on every decision tick.
+     *
+     * <p><b>Dispatched onto {@link #SEED_EXECUTOR}, never run inline - a real incident.</b> This
+     * used to call {@link PPOFlipperStarFirestoreSync#pullMarketHistory} (a blocking Firestore
+     * HTTP GET, up to a 10s timeout) directly on whatever thread called
+     * {@link #computeRollingFeatures}, which is always {@code DecisionEngine}'s DECIDE-tick
+     * thread. On a large (900+ item) watchlist, every item is unseeded the first time DECIDE ever
+     * runs, so a single {@code decide()} call fanned out into hundreds of sequential blocking
+     * Firestore reads inline in the DECIDE loop - confirmed live: the DECIDE thread spent over 10
+     * minutes straight seeding one item at a time (some individual seeds took 10-20+ seconds,
+     * consistent with lock contention against {@code PPOFlipperStarGoogleAuth.getAccessToken()},
+     * which is shared with - and was simultaneously being hammered by - a separate, permanently
+     * backlogged flood of {@link #pushAllToFirestore} market-history writes). With
+     * {@code decideInFlight} held the entire time, no DECIDE tick could ever complete within
+     * {@code decisionResponseTimeoutSeconds}, so the model never got a chance to produce a real
+     * suggestion - every tick simply timed out to HOLD. Seeding now returns immediately: a miss
+     * (or a fetch already in flight, deduped via {@link #firestoreSeedChecked} being added to
+     * up-front) just means this call sees empty/thinner local history for now, exactly the same
+     * documented cold-start behavior {@link #computeRollingFeatures} already tolerates - the seed
+     * lands for the NEXT call once the background fetch completes, rather than ever blocking this
+     * one.
+     *
+     * <p><b>Experiment flag:</b> a no-op entirely when {@code config.marketHistoryCloudSyncEnabled()}
+     * is off - see that flag's description. Still marks the item as seed-checked (so this doesn't
+     * re-evaluate the flag every tick for the same item), it just never dispatches the fetch -
+     * every item cold-starts from empty local history exactly like a permanently-unreachable
+     * Firestore would look, purely to isolate this one call site's contribution to any observed
+     * lag from the rest of this plugin's Firestore usage.
      */
     private void maybeSeedFromFirestore(int itemId) {
         if (!firestoreSeedChecked.add(itemId)) {
@@ -303,36 +343,87 @@ public class WikiHistoryBuffer {
         if (history.containsKey(itemId)) {
             return;
         }
+        if (!config.marketHistoryCloudSyncEnabled()) {
+            return;
+        }
 
-        firestoreSync.pullMarketHistory(itemId).ifPresent(remote -> {
-            int count = remote.timestamps.size();
-            if (count == 0) return;
+        try {
+            SEED_EXECUTOR.execute(() -> {
+                firestoreSync.pullMarketHistory(itemId).ifPresent(remote -> {
+                    int count = remote.timestamps.size();
+                    if (count == 0) return;
 
-            Deque<Candle> deque = new ArrayDeque<>();
-            for (int i = 0; i < count; i++) {
-                deque.addLast(new Candle(
-                    remote.timestamps.get(i),
-                    i < remote.avgHighPrices.size() ? remote.avgHighPrices.get(i) : 0.0,
-                    i < remote.highPriceVolumes.size() ? remote.highPriceVolumes.get(i) : 0.0,
-                    i < remote.avgLowPrices.size() ? remote.avgLowPrices.get(i) : 0.0,
-                    i < remote.lowPriceVolumes.size() ? remote.lowPriceVolumes.get(i) : 0.0));
-            }
-            while (deque.size() > MAX_HISTORY_BLOCKS) {
-                deque.removeFirst();
-            }
+                    Deque<Candle> deque = new ArrayDeque<>();
+                    for (int i = 0; i < count; i++) {
+                        deque.addLast(new Candle(
+                            remote.timestamps.get(i),
+                            i < remote.avgHighPrices.size() ? remote.avgHighPrices.get(i) : 0.0,
+                            i < remote.highPriceVolumes.size() ? remote.highPriceVolumes.get(i) : 0.0,
+                            i < remote.avgLowPrices.size() ? remote.avgLowPrices.get(i) : 0.0,
+                            i < remote.lowPriceVolumes.size() ? remote.lowPriceVolumes.get(i) : 0.0));
+                    }
+                    while (deque.size() > MAX_HISTORY_BLOCKS) {
+                        deque.removeFirst();
+                    }
 
-            history.put(itemId, deque);
-            log.info("PPOFlipperStar: seeded {} candle(s) for item {} from the shared Firestore market-history cache.",
-                deque.size(), itemId);
-        });
+                    // Only install the seed if live polling hasn't already started accumulating
+                    // real candles for this item in the meantime (this fetch can take a while,
+                    // and pollOnce runs concurrently on its own schedule) - local, freshly-polled
+                    // data must never be clobbered by a slower-to-arrive historical seed.
+                    history.putIfAbsent(itemId, deque);
+                    log.info("PPOFlipperStar: seeded {} candle(s) for item {} from the shared Firestore market-history cache.",
+                        deque.size(), itemId);
+                });
+            });
+        } catch (Exception e) {
+            // Executor rejected the task (e.g. shut down) - not fatal, this item just stays
+            // unseeded and falls back to cold-start-from-empty like Firestore was unreachable.
+            log.debug("PPOFlipperStar: could not schedule Firestore seed for item {} - {}", itemId, e.getMessage());
+        }
     }
+
+    // Set true right before dispatching a push cycle's items, cleared once every push this cycle
+    // submitted has actually finished (success or failure) - see pushAllToFirestore's javadoc for
+    // why this exists.
+    private final AtomicBoolean pushCycleInFlight = new AtomicBoolean(false);
 
     /**
      * Pushes every currently-tracked item's full candle buffer to the shared Firestore cache -
      * see {@link #FIRESTORE_PUSH_INTERVAL_MINUTES}. Best-effort per item; one failure doesn't
      * stop the rest from being pushed.
+     *
+     * <p><b>Skips the whole cycle if the previous one hasn't finished draining yet - a real
+     * incident.</b> Each push is a genuine blocking Firestore HTTP write, all funneled through
+     * {@link PPOFlipperStarFirestoreSync}'s single-thread executor (shared with every other async
+     * push that class does). For a 900+ item watchlist, one cycle alone can take far longer than
+     * {@link #FIRESTORE_PUSH_INTERVAL_MINUTES} to drain - confirmed live: with the previous
+     * cycle's items still queued, the next {@code scheduleWithFixedDelay} firing added hundreds
+     * more on top, every 10 minutes, forever, with the queue never once catching up (observed:
+     * ~15,000 failed pushes accumulated over a single hour, most timing out rather than ever
+     * completing). That permanently-saturated executor thread and the resulting constant
+     * request/token-refresh load were themselves enough to stall unrelated Firestore calls made
+     * elsewhere (see {@link #maybeSeedFromFirestore}'s javadoc for the DECIDE-thread-starvation
+     * incident this contributed to). Without this guard, a slow network stretch turns "occasional
+     * best-effort background sync" into an unbounded, ever-growing backlog instead of just a
+     * delayed one. Cleared via {@link PPOFlipperStarFirestoreSync#runAfterPendingMarketHistoryPushes}
+     * once every push actually queued below has finished draining through that class's
+     * single-thread (FIFO) executor.
+     *
+     * <p><b>Experiment flag:</b> a complete no-op when {@code config.marketHistoryCloudSyncEnabled()}
+     * is off - see that flag's description. Checked first, before even attempting the in-flight
+     * guard below, so toggling the flag off has zero residual cost (not even the empty-cycle
+     * bookkeeping this method otherwise does).
      */
     private void pushAllToFirestore() {
+        if (!config.marketHistoryCloudSyncEnabled()) {
+            return;
+        }
+        if (!pushCycleInFlight.compareAndSet(false, true)) {
+            log.debug("PPOFlipperStar: skipping market-history push cycle - the previous one is still draining.");
+            return;
+        }
+
+        boolean queuedAny = false;
         for (Map.Entry<Integer, Deque<Candle>> entry : new HashMap<>(history).entrySet()) {
             int itemId = entry.getKey();
             Candle[] candles;
@@ -354,9 +445,21 @@ public class WikiHistoryBuffer {
                 lowPriceVolumes.add(c.lowPriceVolume);
             }
 
-            firestoreSync.pushMarketHistoryAsync(itemId, new PPOFlipperStarFirestoreClient.RemoteMarketHistory(
-                timestamps, avgHighPrices, highPriceVolumes, avgLowPrices, lowPriceVolumes));
+            if (firestoreSync.pushMarketHistoryAsync(itemId, new PPOFlipperStarFirestoreClient.RemoteMarketHistory(
+                    timestamps, avgHighPrices, highPriceVolumes, avgLowPrices, lowPriceVolumes))) {
+                queuedAny = true;
+            }
         }
+
+        if (!queuedAny) {
+            // Sync disabled, or every item's buffer was empty - nothing was actually queued, so
+            // no drain marker will ever fire. Clear the flag immediately rather than waiting
+            // forever for a completion signal that was never coming.
+            pushCycleInFlight.set(false);
+            return;
+        }
+
+        firestoreSync.runAfterPendingMarketHistoryPushes(() -> pushCycleInFlight.set(false));
     }
 
     /** How many candles are currently buffered for an item - 0 if never seen. Useful for callers deciding whether there's enough history to trust a rolling feature yet. */

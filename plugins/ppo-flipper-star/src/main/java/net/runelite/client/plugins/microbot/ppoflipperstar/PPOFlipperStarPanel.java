@@ -44,6 +44,9 @@ import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Sidebar control panel: an add-order form feeds the shared {@link OrderQueue}, a live list
@@ -91,6 +94,17 @@ public class PPOFlipperStarPanel extends PluginPanel {
     private JPanel suggestionsListPanel;
 
     private final Timer refreshTimer;
+
+    // Backs the gold/net-worth figures refreshFromScriptState() displays - see that method's
+    // javadoc for why these are read from here rather than calling GoldManager directly on the
+    // EDT. Volatile since written from goldPollExecutor's background thread, read from the EDT.
+    private final ScheduledExecutorService goldPollExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "PPOFlipperStar-PanelGoldPoll");
+        t.setDaemon(true);
+        return t;
+    });
+    private volatile long cachedTotalGold = 0;
+    private volatile long cachedSessionNetWorthDelta = 0;
 
     @Inject
     public PPOFlipperStarPanel(PPOFlipperStarPlugin plugin, PPOFlipperStarScript script, OrderQueue queue,
@@ -144,6 +158,20 @@ public class PPOFlipperStarPanel extends PluginPanel {
 
         queue.addListener(() -> SwingUtilities.invokeLater(this::refreshOrderList));
         decisionSuggestions.addListener(() -> SwingUtilities.invokeLater(this::refreshSuggestions));
+
+        // Started before the first refreshFromScriptState() call below so the cache isn't empty
+        // for that first render any longer than necessary - see refreshFromScriptState's javadoc
+        // for why this poll exists at all (a real incident: GoldManager.getTotalGold() blocking
+        // the EDT).
+        goldPollExecutor.scheduleWithFixedDelay(() -> {
+            try {
+                cachedTotalGold = goldManager.getTotalGold();
+                cachedSessionNetWorthDelta = goldManager.getSessionNetWorthDelta();
+            } catch (Exception e) {
+                // Best-effort - a transient failure just means the panel keeps showing its last
+                // known value until the next poll succeeds, never worth crashing this thread over.
+            }
+        }, 0, 1, TimeUnit.SECONDS);
 
         refreshFromScriptState();
         refreshOrderList();
@@ -625,6 +653,22 @@ public class PPOFlipperStarPanel extends PluginPanel {
         SwingUtilities.invokeLater(this::refreshFromScriptState);
     }
 
+    /**
+     * <p><b>Reads {@link #cachedTotalGold}/{@link #cachedSessionNetWorthDelta}, NOT
+     * {@link GoldManager} directly - a real incident, confirmed live via jstack.</b> This method
+     * runs on the Swing EDT, both once synchronously in the constructor and every second
+     * thereafter via {@link #refreshTimer}, with no Execute click required at all -
+     * {@code GoldManager.getTotalGold()} -&gt; {@code getInventoryGold()} -&gt;
+     * {@code InventoryManager.getQuantity()} resolves the coin item id through
+     * {@code Rs2Bank.hasBankItem()}/{@code isOpen()}, a blocking round-trip onto the RuneLite
+     * client thread. The EDT is shared with all of RuneLite's own UI rendering/input handling, not
+     * just this plugin's panel - a single slow round trip (confirmed live: 155+ seconds, most
+     * likely to happen during the client's own busy startup/login window, the same window this was
+     * reported freezing) stalls the entire client's UI responsiveness, independent of whether the
+     * script has ever been started. {@link #goldPollExecutor} now polls both values on its own
+     * background thread every second; this method just reads whatever was cached last, at most 1s
+     * stale, which is indistinguishable from live at this display's resolution.
+     */
     private void refreshFromScriptState() {
         boolean running = script.isRunning();
         boolean cancelling = script.isCancellingAll();
@@ -644,9 +688,9 @@ public class PPOFlipperStarPanel extends PluginPanel {
 
         refreshLastDecideLabel(running);
 
-        goldValueLabel.setText(String.format("%,d gp", goldManager.getTotalGold()));
+        goldValueLabel.setText(String.format("%,d gp", cachedTotalGold));
 
-        long netWorthDelta = goldManager.getSessionNetWorthDelta();
+        long netWorthDelta = cachedSessionNetWorthDelta;
         netWorthDeltaValueLabel.setText(String.format("%+,d gp", netWorthDelta));
         netWorthDeltaValueLabel.setForeground(netWorthDelta >= 0 ? DONE_GREEN : FAILED_RED);
 
