@@ -138,6 +138,22 @@ function Test-GradleCompatibleJdk($javaHomePath) {
     return $compatible
 }
 
+function Get-JdkMajorVersion($javaHomePath) {
+    # Same release-file approach as Test-GradleCompatibleJdk, factored out since the client-launch
+    # step below needs the exact major version number (must be 11, the RuneLite/Microbot client's
+    # own requirement) rather than Test-GradleCompatibleJdk's broader "8-20, good enough for
+    # Gradle's launcher" range check.
+    $releaseFile = Join-Path $javaHomePath "release"
+    if (-not (Test-Path $releaseFile)) { return $null }
+    $releaseContent = Get-Content -Path $releaseFile -Raw
+    if ($releaseContent -notmatch 'JAVA_VERSION="([^"]+)"') { return $null }
+    $parts = $Matches[1] -split '[.\-+_]'
+    if ($parts[0] -eq '1' -and $parts.Length -gt 1) {
+        return [int]$parts[1]
+    }
+    return [int]$parts[0]
+}
+
 function Get-CompatibleJavaHome {
     $CacheDir = Join-Path $env:USERPROFILE "microbot-client\jdk-17"
 
@@ -298,24 +314,54 @@ if (-not $SkipClient) {
             Write-Host "    -> $($_.Name)"
         }
 
-    Write-Step "Launching MicroBot client $Version"
+    Write-Step "Looking for a JDK 11 to launch the RuneLite/Microbot client with"
+    # The client itself (unlike Gradle's launcher, which just needs 8-20 - see
+    # Get-CompatibleJavaHome above) specifically wants JDK 11, matching launch.sh's own
+    # `"$JAVA_BIN" -version 2>&1 | grep -q '"11'` check on macOS/Linux.
+    #
+    # This previously searched %USERPROFILE%\.gradle\jdks for a folder name containing "jdk-11" -
+    # that pattern can never match: Gradle's real toolchain cache folder naming (confirmed against
+    # DefaultJdkCacheDirectory.java in Gradle's own source) is
+    # "<vendor>-<majorVersion>-<arch>-<os>.2", e.g. "temurin-11-x86_64-windows.2" - no "jdk-"
+    # substring anywhere in it. That guaranteed this fallback always failed on a real machine,
+    # even right after a build that had genuinely just provisioned a real JDK 11 (this repo's
+    # build.gradle targets JDK 11 specifically - see targetJdkVersion in build.gradle - so a
+    # successful build always means one exists in that cache by the time we get here). Confirmed
+    # live: a user hit exactly this after a successful build with only JDK 25 on PATH.
     $JavaBin = $null
+
     $systemJava = Get-Command java -ErrorAction SilentlyContinue
     if ($systemJava) {
-        $verOutput = & $systemJava.Source -version 2>&1 | Out-String
-        if ($verOutput -match '"11') {
+        $systemMajor = Get-JdkMajorVersion (Split-Path -Parent (Split-Path -Parent $systemJava.Source))
+        Write-Host "    system java major version: $systemMajor"
+        if ($systemMajor -eq 11) {
             $JavaBin = $systemJava.Source
         }
     }
+
     if (-not $JavaBin) {
-        $toolchainJava = Get-ChildItem -Path (Join-Path $env:USERPROFILE ".gradle\jdks") -Recurse -Filter "java.exe" -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match "jdk-11" } | Select-Object -First 1
-        if ($toolchainJava) {
-            $JavaBin = $toolchainJava.FullName
+        $GradleJdksDir = Join-Path $env:USERPROFILE ".gradle\jdks"
+        if (Test-Path $GradleJdksDir) {
+            # Each toolchain JDK is one level down from jdks\ itself (jdks\<vendor-ver-arch-os.2>\),
+            # so check every immediate subdirectory as its own candidate JAVA_HOME rather than
+            # pattern-matching names that don't encode "jdk-<N>" the way this used to assume.
+            $candidates = Get-ChildItem -Path $GradleJdksDir -Directory -ErrorAction SilentlyContinue
+            Write-Host "    checking $($candidates.Count) cached toolchain JDK(s) under $GradleJdksDir"
+            foreach ($candidate in $candidates) {
+                $major = Get-JdkMajorVersion $candidate.FullName
+                Write-Host "        $($candidate.Name) -> major version $major"
+                if ($major -eq 11) {
+                    $JavaBin = Join-Path $candidate.FullName "bin\java.exe"
+                    break
+                }
+            }
+        } else {
+            Write-Host "    $GradleJdksDir does not exist"
         }
     }
+
     if (-not $JavaBin) {
-        Write-Error "No JDK 11 found on PATH or in %USERPROFILE%\.gradle\jdks. Run '.\gradlew.bat build' once first to let Gradle provision one."
+        Write-Error "No JDK 11 found on PATH or under %USERPROFILE%\.gradle\jdks (see the diagnostic lines above for what was actually checked). The build above should have provisioned one via Gradle's toolchain support since build.gradle targets JDK 11 - if it's genuinely missing, run '.\gradlew.bat build' again and watch for a 'Downloading toolchain' message."
     }
 
     Write-Host "    using java: $JavaBin"
