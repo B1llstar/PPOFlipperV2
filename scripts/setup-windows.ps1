@@ -82,6 +82,74 @@ function Write-Warn2($msg) {
     Write-Host "==> $msg" -ForegroundColor Yellow
 }
 
+# Gradle 8.2 (this repo's wrapper version) cannot itself RUN under a JDK newer than ~20 - it
+# fails at startup with "Unsupported class file major version <N>" before build.gradle's own
+# toolchain config (which auto-provisions whatever JDK the actual COMPILE step needs) ever gets a
+# chance to matter. This is a separate concern from that toolchain: a fresh Windows machine with
+# a modern system JDK (25+ is common as of 2026) will hit this immediately, with nothing already
+# on disk for the script to fall back to (the ~/.gradle/jdks toolchain cache only gets populated
+# AFTER a successful Gradle run - a chicken-and-egg problem the first run on a new machine hits
+# head-on). Confirmed the actual failure mode live: "Could not open cp_settings generic cache...
+# unsupported class file major version 69" (69 = Java 25) when JAVA_HOME/PATH pointed at a
+# too-new JDK.
+function Get-CompatibleJavaHome {
+    $CacheDir = Join-Path $env:USERPROFILE "microbot-client\jdk-17"
+    $CachedJavaExe = Join-Path $CacheDir "bin\java.exe"
+
+    function Test-GradleCompatible($javaExePath) {
+        if (-not (Test-Path $javaExePath)) { return $false }
+        try {
+            $verOutput = & $javaExePath -version 2>&1 | Out-String
+            if ($verOutput -match 'version "(\d+)') {
+                $major = [int]$Matches[1]
+                # Gradle 8.2 supports running on JDK 8-20 (project compile toolchain is separate,
+                # handled by build.gradle - this check is purely "can Gradle's own launcher start").
+                return ($major -ge 8 -and $major -le 20)
+            }
+        } catch { }
+        return $false
+    }
+
+    if ($env:JAVA_HOME) {
+        $candidate = Join-Path $env:JAVA_HOME "bin\java.exe"
+        if (Test-GradleCompatible $candidate) {
+            return $env:JAVA_HOME
+        }
+        Write-Warn2 "JAVA_HOME ($env:JAVA_HOME) is not compatible with Gradle 8.2's own launcher (too new/too old) - looking for an alternative."
+    }
+
+    $systemJava = Get-Command java -ErrorAction SilentlyContinue
+    if ($systemJava -and (Test-GradleCompatible $systemJava.Source)) {
+        return (Split-Path -Parent (Split-Path -Parent $systemJava.Source))
+    }
+
+    if (Test-GradleCompatible $CachedJavaExe) {
+        Write-Step "Using previously-downloaded portable JDK 17 at $CacheDir"
+        return $CacheDir
+    }
+
+    Write-Step "No Gradle-compatible JDK found (need JDK 8-20 to run Gradle itself) - downloading a portable JDK 17"
+    $TmpZip = Join-Path $env:TEMP "temurin17-windows-x64.zip"
+    # Eclipse Temurin's own API resolves "latest" within a feature version - pinning the major
+    # version (17) rather than an exact patch release so this doesn't need updating by hand.
+    $DownloadUrl = "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jdk/hotspot/normal/eclipse"
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpZip -UseBasicParsing
+    New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+    $ExtractTmp = Join-Path $env:TEMP "temurin17-extract"
+    if (Test-Path $ExtractTmp) { Remove-Item -Recurse -Force $ExtractTmp }
+    Expand-Archive -Path $TmpZip -DestinationPath $ExtractTmp -Force
+    # Adoptium's zip contains one top-level "jdk-17.x.x+y" folder - flatten it into $CacheDir so
+    # the path stays stable across whatever exact patch version got resolved.
+    $ExtractedRoot = Get-ChildItem -Path $ExtractTmp -Directory | Select-Object -First 1
+    Copy-Item -Path (Join-Path $ExtractedRoot.FullName "*") -Destination $CacheDir -Recurse -Force
+    Remove-Item -Recurse -Force $ExtractTmp, $TmpZip -ErrorAction SilentlyContinue
+
+    if (-not (Test-GradleCompatible $CachedJavaExe)) {
+        Write-Error "Downloaded a JDK to $CacheDir but it still doesn't look usable - check $CacheDir manually."
+    }
+    return $CacheDir
+}
+
 # ---------------------------------------------------------------------------
 # 1. RuneLite client: build + sideload + launch
 # ---------------------------------------------------------------------------
@@ -134,10 +202,20 @@ if (-not $SkipClient) {
         Write-Warn2 "Could not refresh vendor/microbot-hub (offline?); using existing checkout"
     }
 
+    Write-Step "Checking for a JDK Gradle's own launcher can run on"
+    $GradleJavaHome = Get-CompatibleJavaHome
+    Write-Host "    using JAVA_HOME=$GradleJavaHome for the Gradle build step"
+
     Write-Step "Building plugins against microbot $Version"
-    & .\gradlew.bat build "-PmicrobotClientVersion=$Version" --console=plain
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Gradle build failed (exit code $LASTEXITCODE)."
+    $OldJavaHome = $env:JAVA_HOME
+    try {
+        $env:JAVA_HOME = $GradleJavaHome
+        & .\gradlew.bat build "-PmicrobotClientVersion=$Version" --console=plain
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Gradle build failed (exit code $LASTEXITCODE)."
+        }
+    } finally {
+        $env:JAVA_HOME = $OldJavaHome
     }
 
     Write-Step "Side-loading built plugin jars into $RuneLitePluginsDir"
