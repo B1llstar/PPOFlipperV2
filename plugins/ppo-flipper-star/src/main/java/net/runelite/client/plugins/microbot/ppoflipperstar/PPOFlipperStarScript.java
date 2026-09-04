@@ -734,6 +734,7 @@ public class PPOFlipperStarScript extends Script {
         double confidenceThreshold = Math.max(0.0, configSnapshot.modelConfidenceThreshold());
 
         boolean sellOffMode = configSnapshot.sellOffModeEnabled();
+        boolean inventoryOnlyMode = configSnapshot.inventoryOnlyMode();
 
         List<PPOFlipperDecision> suggestions = decision.actions.stream()
             .filter(a -> a.confidence >= confidenceThreshold)
@@ -746,6 +747,16 @@ public class PPOFlipperStarScript extends Script {
             // suggestions" display honest about what will actually happen instead of showing a
             // BUY the user could Confirm only to have it bounce.
             .filter(d -> !sellOffMode || d.getGeAction() != GrandExchangeAction.BUY)
+            // Inventory-only mode is meant to be an isolated environment scoped to inventory
+            // contents - a real ask: BUY should still range over the full watchlist (finding
+            // opportunities anywhere is the point of BUY), but SELL should only ever be considered
+            // for an item genuinely sitting in inventory right now, never something the watchlist
+            // happens to include for unrelated reasons (a bulk "seed from trained items" action,
+            // or auto-added holdings from a time before this mode was turned on). Checked directly
+            // against Rs2Inventory (a live, authoritative read), not the watchlist or the request's
+            // heldQuantity field - belt-and-suspenders against either of those drifting.
+            .filter(d -> !inventoryOnlyMode || d.getGeAction() != GrandExchangeAction.SELL
+                || Rs2Inventory.hasItem(d.getItemId()))
             .collect(Collectors.toList());
 
         if (configSnapshot.stalePositionAutoSellEnabled()) {
