@@ -858,16 +858,22 @@ public class PPOFlipperStarScript extends Script {
      * spent on it) got silently held off tick after tick while new speculative BUYs kept winning.
      * A SELL represents capital already committed that could be freed up; a missed BUY is just a
      * missed new opportunity - leaving real holdings stuck unsold is the worse outcome, so
-     * {@code suggestions} is now sorted SELL-first (stable sort - within each action type, the
-     * original per-tick order is preserved, so this doesn't introduce a new fairness problem
-     * within either group, only resolves the BUY-vs-SELL priority question).</p>
+     * {@code suggestions} is now sorted SELL-first, resolving the BUY-vs-SELL priority question.</p>
      *
-     * <p><b>Still a known limitation, not fixed here:</b> within the SELL group and within the BUY
-     * group, the original watchlist-insertion-order tradeoff described above still applies - once
-     * the queue-depth cap is hit mid-list, earlier-inserted items within the same action type
-     * still win over later ones. A fair-rotation scheme (e.g. round-robin starting point per tick)
-     * would address that but is real additional complexity not justified here - the SELL-vs-BUY
-     * starvation this fix addresses was the actual observed problem, not intra-group fairness.</p>
+     * <p><b>Confidence-descending within each action-type group, added after a second real
+     * incident:</b> the SELL-first sort above was originally a stable sort that otherwise preserved
+     * {@code suggestions}' original per-tick order - which is effectively watchlist-insertion/item-id
+     * order ({@link WatchlistManager#getAll} returns a {@code LinkedHashSet}, itself seeded from
+     * {@code modelTrainedItems} sorted by id). Once DECIDE ticks started reaching the full watchlist
+     * (500-700+ suggestions in one tick is normal on a large watchlist) but the queue-depth cap below
+     * only allows ~24 through, "first" meant lowest item id, not highest quality - live testing
+     * confirmed every autonomous submission clustering under item id ~250 (arrowtips, bolts,
+     * longbows/shortbows, herb potions), which looked exactly like a strong model preference for
+     * that item family but was pure position-in-list luck, unrelated to how good any given
+     * suggestion actually was. Sorting each action-type group by confidence descending means the
+     * cap below, once hit, always drops the LEAST confident remaining suggestions first - confirmed
+     * live after this fix: autonomous submissions immediately spanned nearly the entire item-id
+     * range with confidence values correctly ranked highest-first.</p>
      *
      * <p>Removes each submitted suggestion from {@link DecisionSuggestions} immediately (the same
      * "confirmed, no longer pending" transition {@code onConfirmSuggestionClicked} performs) so
@@ -877,7 +883,9 @@ public class PPOFlipperStarScript extends Script {
         int maxQueueDepth = Math.max(1, config.maxActiveOffers()) * AUTONOMOUS_QUEUE_DEPTH_MULTIPLIER;
 
         List<PPOFlipperDecision> ordered = new ArrayList<>(suggestions);
-        ordered.sort(Comparator.comparingInt(d -> d.getGeAction() == GrandExchangeAction.SELL ? 0 : 1));
+        ordered.sort(Comparator
+            .comparingInt((PPOFlipperDecision d) -> d.getGeAction() == GrandExchangeAction.SELL ? 0 : 1)
+            .thenComparing(Comparator.comparingDouble(PPOFlipperDecision::getConfidence).reversed()));
 
         for (PPOFlipperDecision decision : ordered) {
             long currentBacklog = queue.countByStatus(PPOFlipperOrder.Status.QUEUED)
