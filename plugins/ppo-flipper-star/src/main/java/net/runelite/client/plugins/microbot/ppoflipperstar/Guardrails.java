@@ -6,6 +6,7 @@ import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.BuyLimitLed
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 /**
@@ -85,6 +86,17 @@ public class Guardrails {
         // guardrails master switch, same reasoning as the checks above.
         if (order.getAction() == GrandExchangeAction.BUY) {
             String reason = checkDuplicateBuy(order);
+            if (reason != null) return reason;
+        }
+
+        // Inventory-space check: a filled BUY always lands in inventory (GE collection, not the
+        // bank), regardless of inventoryOnlyMode (that config only changes how holdings are
+        // COUNTED for portfolio/sell purposes, not where a BUY physically lands) - so a BUY that
+        // would need a new inventory slot can never actually complete once the inventory is full,
+        // same "can never succeed" category as the checks above. Always rejected regardless of
+        // the guardrails master switch.
+        if (order.getAction() == GrandExchangeAction.BUY) {
+            String reason = checkInventorySpace(order);
             if (reason != null) return reason;
         }
 
@@ -180,6 +192,29 @@ public class Guardrails {
                 order.getQuantity(), alreadyBought, limit);
         }
 
+        return null;
+    }
+
+    /**
+     * Rejects a BUY that would need a new inventory slot when there isn't one free. A stack of an
+     * item already held in inventory doesn't need a new slot (OSRS stacks same-item quantities
+     * into the one slot they already occupy, noted or not), so this only blocks when the item
+     * isn't already present AND inventory is full - never blocks topping up an existing stack.
+     *
+     * <p>Deliberately unconditional on {@code inventoryOnlyMode} - that config only changes how
+     * {@link PortfolioManager} COUNTS holdings (inventory-only vs. inventory+bank) for sell/
+     * portfolio purposes, it has no bearing on where a BUY's GE collection physically lands. A
+     * BUY always fills to inventory; this is a physical-space check, not a portfolio-accounting
+     * one, so it applies the same regardless of that setting.
+     */
+    private String checkInventorySpace(PPOFlipperOrder order) {
+        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
+        boolean alreadyStacking = itemId > 0 ? Rs2Inventory.hasItem(itemId) : Rs2Inventory.hasItem(order.getItemName());
+        if (!alreadyStacking && Rs2Inventory.isFull()) {
+            return String.format(
+                "inventory is full - no free slot for a new BUY of %s (not already held)",
+                order.getItemName());
+        }
         return null;
     }
 

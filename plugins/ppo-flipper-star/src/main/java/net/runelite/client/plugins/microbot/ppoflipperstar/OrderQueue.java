@@ -5,6 +5,7 @@ import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -95,8 +96,25 @@ public class OrderQueue {
         return orders;
     }
 
+    /**
+     * The next QUEUED order to submit: SELL orders first (as a group, in their own FIFO order),
+     * then BUY/COLLECT orders (also FIFO among themselves) - not plain insertion-order FIFO across
+     * everything. Mirrors the same SELL-before-BUY priority {@code PPOFlipperStarScript
+     * .autonomouslySubmit} already applies when new suggestions are first added to this queue (see
+     * its javadoc): a SELL represents capital/inventory already committed that could be freed up,
+     * a queued BUY is still just a speculative opportunity, so letting BUYs already ahead of it in
+     * the queue delay it further has the same downside that fix addressed, just one step later in
+     * the pipeline. Only reorders selection among QUEUED orders - never touches anything already
+     * SUBMITTED (an in-flight GE offer), so this has no interaction with orders already placed.
+     */
     public Optional<PPOFlipperOrder> nextQueued() {
-        return orders.stream().filter(o -> o.getStatus() == PPOFlipperOrder.Status.QUEUED).findFirst();
+        List<PPOFlipperOrder> queued = orders.stream()
+            .filter(o -> o.getStatus() == PPOFlipperOrder.Status.QUEUED)
+            .collect(Collectors.toList());
+        return queued.stream()
+            .filter(o -> o.getAction() == GrandExchangeAction.SELL)
+            .findFirst()
+            .or(() -> queued.stream().findFirst());
     }
 
     public List<PPOFlipperOrder> getByStatus(PPOFlipperOrder.Status status) {

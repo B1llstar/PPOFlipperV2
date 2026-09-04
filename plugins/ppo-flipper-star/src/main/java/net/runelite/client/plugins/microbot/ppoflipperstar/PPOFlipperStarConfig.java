@@ -264,7 +264,7 @@ public interface PPOFlipperStarConfig extends Config {
         section = behaviorSection
     )
     default int staleOfferTimeoutMinutes() {
-        return 10;
+        return 5;
     }
 
     @ConfigSection(

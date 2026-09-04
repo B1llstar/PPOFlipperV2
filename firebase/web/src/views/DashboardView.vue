@@ -54,6 +54,36 @@ const enrichedPositions = computed(() =>
     .sort((a, b) => (b.currentValue ?? b.totalCostBasis) - (a.currentValue ?? a.totalCostBasis)),
 )
 
+// Per-item profit, INCLUDING fully closed-out positions (quantityHeld === 0) that
+// enrichedPositions above deliberately excludes (that table is "what am I holding right now").
+// PortfolioManager/CostBasisEntry never deletes an item's ledger doc after it's fully sold - the
+// Firestore doc for a closed-out item persists with quantityHeld: 0 and its accumulated
+// realizedProfit intact - so this is a pure read of data that was already being synced, just never
+// surfaced once a position closed out completely.
+const itemProfitSortKey = ref('totalProfit')
+const itemProfitRows = computed(() => {
+  const currentPriceFor = (itemId) => getSellPrice(itemId)
+  const rows = positions.value.map((p) => {
+    const currentPrice = currentPriceFor(p.itemId)
+    const unrealized =
+      p.quantityHeld > 0 && currentPrice != null ? currentPrice * p.quantityHeld - p.totalCostBasis : 0
+    return {
+      itemId: p.itemId,
+      name: getName(p.itemId),
+      icon: getIconUrl(p.itemId),
+      quantityHeld: p.quantityHeld,
+      realizedProfit: p.realizedProfit ?? 0,
+      unrealizedProfit: unrealized,
+      totalProfit: (p.realizedProfit ?? 0) + unrealized,
+      closed: p.quantityHeld === 0,
+    }
+  })
+  // Hide items with no trading history at all (never bought/sold, never held) - a watchlist item
+  // with a portfolio doc but zero realized profit and nothing held isn't a "profit" row.
+  const withHistory = rows.filter((r) => r.realizedProfit !== 0 || r.quantityHeld > 0)
+  return withHistory.sort((a, b) => b[itemProfitSortKey.value] - a[itemProfitSortKey.value])
+})
+
 const totalCostBasis = computed(() => positions.value.reduce((sum, p) => sum + (p.totalCostBasis ?? 0), 0))
 const totalRealizedProfit = computed(() => positions.value.reduce((sum, p) => sum + (p.realizedProfit ?? 0), 0))
 const totalUnrealizedProfit = computed(() => {
@@ -240,6 +270,87 @@ const actionTone = (action) => {
           </ul>
         </section>
       </div>
+
+      <!-- Per-item profit, including fully closed-out positions -->
+      <section class="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+        <div class="px-5 py-4 border-b border-[var(--color-border)] flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h2 class="text-sm font-semibold">Profit by item</h2>
+            <p class="text-xs text-[var(--color-text-faint)] mt-0.5">
+              Realized profit is all-time, from closed trades. Unrealized is only priced for items still held.
+              Includes items fully sold off (0 held) — they're excluded from Portfolio holdings above.
+            </p>
+          </div>
+          <div class="flex items-center gap-1 text-xs shrink-0">
+            <span class="text-[var(--color-text-faint)] mr-1">Sort by</span>
+            <button
+              v-for="opt in [{ key: 'totalProfit', label: 'Total' }, { key: 'realizedProfit', label: 'Realized' }, { key: 'unrealizedProfit', label: 'Unrealized' }]"
+              :key="opt.key"
+              class="px-2 py-1 rounded"
+              :class="itemProfitSortKey === opt.key ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-surface-3)] text-[var(--color-text-dim)]'"
+              @click="itemProfitSortKey = opt.key"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+        </div>
+        <LoadingSpinner v-if="portfolioLoading" />
+        <EmptyState
+          v-else-if="itemProfitRows.length === 0"
+          title="No trading history yet"
+          message="No item has been bought or sold, per the portfolio ledger."
+        />
+        <div v-else class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs text-[var(--color-text-faint)] uppercase tracking-wide">
+                <th class="px-5 py-2 font-medium">Item</th>
+                <th class="px-3 py-2 font-medium text-right">Held</th>
+                <th class="px-3 py-2 font-medium text-right">Realized</th>
+                <th class="px-3 py-2 font-medium text-right">Unrealized</th>
+                <th class="px-5 py-2 font-medium text-right">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in itemProfitRows"
+                :key="row.itemId"
+                class="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-2)]"
+              >
+                <td class="px-5 py-2.5">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <ItemIcon :src="row.icon" :name="row.name" :size="20" />
+                    <span class="truncate">{{ row.name }}</span>
+                    <span v-if="row.closed" class="text-xs text-[var(--color-text-faint)] shrink-0">(closed)</span>
+                  </div>
+                </td>
+                <td class="px-3 py-2.5 text-right font-mono-nums text-[var(--color-text-dim)]">
+                  {{ row.quantityHeld > 0 ? row.quantityHeld.toLocaleString() : '—' }}
+                </td>
+                <td
+                  class="px-3 py-2.5 text-right font-mono-nums"
+                  :class="row.realizedProfit > 0 ? 'text-[var(--color-profit)]' : row.realizedProfit < 0 ? 'text-[var(--color-loss)]' : 'text-[var(--color-text-faint)]'"
+                >
+                  {{ row.realizedProfit >= 0 ? '+' : '' }}{{ formatGp(row.realizedProfit) }}
+                </td>
+                <td
+                  class="px-3 py-2.5 text-right font-mono-nums"
+                  :class="row.unrealizedProfit > 0 ? 'text-[var(--color-profit)]' : row.unrealizedProfit < 0 ? 'text-[var(--color-loss)]' : 'text-[var(--color-text-faint)]'"
+                >
+                  <template v-if="row.quantityHeld > 0">{{ row.unrealizedProfit >= 0 ? '+' : '' }}{{ formatGp(row.unrealizedProfit) }}</template>
+                  <template v-else>—</template>
+                </td>
+                <td
+                  class="px-5 py-2.5 text-right font-mono-nums font-semibold"
+                  :class="row.totalProfit > 0 ? 'text-[var(--color-profit)]' : row.totalProfit < 0 ? 'text-[var(--color-loss)]' : 'text-[var(--color-text-faint)]'"
+                >
+                  {{ row.totalProfit >= 0 ? '+' : '' }}{{ formatGp(row.totalProfit) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <!-- Buy-limit ledger -->
       <section class="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">

@@ -932,6 +932,27 @@ public class PPOFlipperStarScript extends Script {
                 }
             }
 
+            // A BUY always fills to inventory (GE collection, not the bank) - if inventory is
+            // already full and this item isn't already stacking there, this BUY can never
+            // complete, so there's no point building it just to have Guardrails.check() reject it
+            // moments later. Effectively "hold" on this suggestion: nothing is submitted, and the
+            // model gets a fresh, unbiased chance to propose it again next tick once space frees
+            // up (e.g. a SELL going through, or the item being manually banked). See
+            // Guardrails.checkInventorySpace for the same check, kept there too as the actual
+            // enforcement backstop for any BUY (manual or autonomous) - this is purely an early,
+            // quieter skip so autonomous BUYs doomed to fail don't consume a queue-depth-cap slot
+            // or log a rejection line every tick while inventory stays full.
+            if (decision.getGeAction() == GrandExchangeAction.BUY) {
+                boolean alreadyStacking = decision.getItemId() > 0
+                    ? Rs2Inventory.hasItem(decision.getItemId())
+                    : Rs2Inventory.hasItem(decision.getItemName());
+                if (!alreadyStacking && Rs2Inventory.isFull()) {
+                    log.debug("PPOFlipperStar: holding off on autonomous {} - inventory is full and {} isn't already held.",
+                        decision, decision.getItemName());
+                    continue;
+                }
+            }
+
             boolean alreadyPending = queue.getAll().stream()
                 .anyMatch(o -> o.getItemId() == decision.getItemId()
                     && o.getAction() == decision.getGeAction()
