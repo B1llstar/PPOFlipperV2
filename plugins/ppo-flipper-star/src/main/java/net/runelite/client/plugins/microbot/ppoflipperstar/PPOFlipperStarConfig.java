@@ -267,6 +267,83 @@ public interface PPOFlipperStarConfig extends Config {
         return 5;
     }
 
+    @ConfigItem(
+        keyName = "sellSlotEvictionWaitSeconds",
+        name = "SELL slot eviction wait (seconds)",
+        description = "A QUEUED SELL represents capital/inventory already committed, worth more than a still-" +
+            "speculative BUY sitting on the GE - if every slot is taken by fully-unfilled BUYs and a SELL has been " +
+            "waiting at least this long for one to free up, the oldest eligible BUY (see the minimum age setting " +
+            "below) is cancelled and collected back to make room for it, rather than waiting on " +
+            "staleOfferTimeoutMinutes' much longer timer. A short wait, not zero - avoids evicting a BUY that was " +
+            "about to fill on its own a second before a SELL happened to get queued. Only ever evicts a fully-" +
+            "unfilled BUY (a partial fill is never touched, same protection as the stale-offer check), and only " +
+            "when a SELL is genuinely queued and blocked - does nothing otherwise. 0 disables this eviction " +
+            "entirely (a blocked SELL just waits on the normal stale-offer timeout like anything else).",
+        position = 4,
+        section = behaviorSection
+    )
+    default int sellSlotEvictionWaitSeconds() {
+        return 60;
+    }
+
+    @ConfigItem(
+        keyName = "sellSlotEvictionMinBuyAgeSeconds",
+        name = "SELL slot eviction - minimum BUY age (seconds)",
+        description = "The SELL slot eviction above (see that setting's description) will never cancel a BUY " +
+            "younger than this, even if it's the oldest fully-unfilled one active - a BUY submitted a few seconds " +
+            "ago hasn't had any real chance to fill yet, so cancelling it that fast wastes the submission for no " +
+            "benefit. If no active BUY is old enough yet, the SELL keeps waiting rather than evicting a too-young " +
+            "one.",
+        position = 5,
+        section = behaviorSection
+    )
+    default int sellSlotEvictionMinBuyAgeSeconds() {
+        return 45;
+    }
+
+    @ConfigItem(
+        keyName = "guardAgainstUnexpectedBank",
+        name = "Guard against unexpected bank use",
+        description = "This script's own bank use is always either a pure read (the periodic bank refresh) or a " +
+            "withdrawal - it never deposits anything. When on, if the bank interface is ever seen open and this " +
+            "script did not open it, it's closed immediately as a precaution - added after a real incident where " +
+            "the bank opened and everything was deposited with no code path in this plugin capable of doing that " +
+            "(the actual trigger was never conclusively identified). This can't tell what opened the bank, only " +
+            "that this script didn't, so it closes on sight rather than waiting to confirm a deposit is actually " +
+            "happening (which would already be a tick too late). Turn this off if it's interfering with manual " +
+            "banking or another plugin's legitimate bank use while this script is running.",
+        position = 6,
+        section = behaviorSection
+    )
+    default boolean guardAgainstUnexpectedBank() {
+        return true;
+    }
+
+    @ConfigItem(
+        keyName = "dudFillPercentThreshold",
+        name = "Dud partial-fill threshold (%)",
+        description = "A partially-filled offer is normally NEVER touched by the stale-offer timeout, regardless " +
+            "of age - see that setting's description, and the real risk (aborting a genuine partial fill strands " +
+            "its already-filled portion's exit strategy). But a fill this small is functionally a dud, not a real " +
+            "position worth protecting - e.g. a BUY that filled 2% and then completely stalled is realistically " +
+            "never finishing on its own. This is the CEILING of a dynamic bar, not a flat one: the fill % required " +
+            "to avoid being a dud ramps linearly from 0% right when an offer is submitted up to this percentage " +
+            "once it reaches staleOfferTimeoutMinutes old - a brand-new offer isn't penalized for 0% fill in its " +
+            "first few seconds, but the tolerance for a low fill shrinks the closer it gets to that timeout, so an " +
+            "offer clearly stalling relative to its own age can be caught before the full timeout elapses at a " +
+            "flat bar the whole time. Below this ramped bar counts the same as fully-unfilled for " +
+            "staleOfferTimeoutMinutes/SELL-slot-eviction purposes (still subject to the same age/queue-pressure " +
+            "gates as those - this only changes what counts as \"unfilled enough\" to be eligible, not when " +
+            "eviction actually happens). The already-filled portion is still collected normally when this fires, " +
+            "not lost - only the unfilled remainder is cancelled. 0 disables the ramp entirely (restores the old " +
+            "strict filled==0 requirement).",
+        position = 7,
+        section = behaviorSection
+    )
+    default int dudFillPercentThreshold() {
+        return 10;
+    }
+
     @ConfigSection(
         name = "PPO",
         description = "The PPO policy, consulted every decision tick over Firestore (PROPOSAL.md §3.6). By " +

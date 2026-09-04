@@ -38,6 +38,15 @@ public class PPOFlipperOrder {
     private final int quantity;
     private final int price;
 
+    /**
+     * When this order was constructed (added to {@link OrderQueue}), never updated afterward -
+     * distinct from {@link #submittedAtMillis}, which is set (and reset on resubmission) only
+     * once this order actually reaches the GE. Used by {@code PPOFlipperStarScript}'s SELL-slot-
+     * eviction check to measure how long a QUEUED SELL has been waiting for a slot, independent
+     * of whether/when it was ever submitted.
+     */
+    private final long queuedAtMillis = System.currentTimeMillis();
+
     @Setter
     private volatile Status status = Status.QUEUED;
 

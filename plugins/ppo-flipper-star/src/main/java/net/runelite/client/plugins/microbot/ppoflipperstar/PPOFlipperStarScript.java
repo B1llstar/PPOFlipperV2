@@ -109,6 +109,14 @@ public class PPOFlipperStarScript extends Script {
     // holdings is trustworthy for the first time.
     private long nextBankRefreshAtMillis = 0;
 
+    // True only for the exact duration this script is itself deliberately driving the bank
+    // interface (maybeRefreshBank's read-only open/close, or prepareFundsOrItems' withdrawal) -
+    // see guardAgainstUnexpectedBank()'s javadoc. This script's own bank use is ALWAYS either a
+    // pure read (refresh) or a withdrawal, NEVER a deposit - so the bank ever being open while
+    // this flag is false is unexpected by definition, regardless of the actual cause (another
+    // plugin, a misclick, a keybind), and is closed on sight as a pure precaution.
+    private volatile boolean intentionalBankUseActive = false;
+
     // Fixed cadence (not user-configurable - see maybeSyncLiveHoldings' javadoc) for pushing real
     // live holdings to Firestore, independent of bankRefreshIntervalSeconds so this still runs
     // for a user with inventory-only mode on or bank refresh disabled.
@@ -375,6 +383,8 @@ public class PPOFlipperStarScript extends Script {
     }
 
     private void tick() {
+        guardAgainstUnexpectedBank();
+
         if (cancelAllRequested && state != State.CANCELLING_ALL) {
             cancelAllRequested = false;
             state = State.CANCELLING_ALL;
@@ -519,6 +529,40 @@ public class PPOFlipperStarScript extends Script {
      * open for another reason (e.g. {@link #prepareFundsOrItems()} mid-withdrawal) rather than
      * interfering with it.
      */
+    /**
+     * Precaution added after a real incident: the bank interface was observed open with a
+     * "deposit all" already executed against this script's held inventory, with no code path in
+     * this class ever calling anything but withdraw - see {@link #intentionalBankUseActive}'s
+     * javadoc. The actual trigger was never conclusively identified (ruled out: no other
+     * deposit-all-capable plugin was enabled at the time), so this is a blind precaution, not a
+     * fix for a known root cause - it can't distinguish what opened the bank, only that THIS
+     * script didn't, and closes it unconditionally on sight rather than trying to inspect intent
+     * further (by the time anything could be inspected, e.g. a shrinking inventory count, a
+     * deposit may have already completed).
+     *
+     * <p>Deliberately closes immediately rather than waiting to see whether inventory actually
+     * shrinks first - a "wait and confirm" approach reacts one tick too late by definition, after
+     * whatever deposit/withdraw already happened. Closing a bank that some OTHER legitimate actor
+     * (the player manually banking, another plugin doing real work) opened is an acceptable false-
+     * positive cost for guaranteeing this script's own holdings are never silently deposited away
+     * without its knowledge.
+     *
+     * <p>Called first thing in {@link #tick()}, before anything else - if this script itself is
+     * about to legitimately open the bank this same tick (refresh or withdrawal), it sets
+     * {@link #intentionalBankUseActive} true around that specific window, so this check passes
+     * through harmlessly during its own bank use.
+     */
+    private void guardAgainstUnexpectedBank() {
+        if (!config.guardAgainstUnexpectedBank()) return;
+        if (intentionalBankUseActive) return;
+        if (!Rs2Bank.isOpen()) return;
+
+        log.warn("PPOFlipperStar: bank interface is open but this script did not open it - closing it " +
+            "immediately as a precaution against an unexpected deposit/withdrawal (see guardAgainstUnexpectedBank's " +
+            "javadoc for the real incident this guards against).");
+        Rs2Bank.closeBank();
+    }
+
     private void maybeRefreshBank() {
         if (config.inventoryOnlyMode()) return;
         int intervalSeconds = config.bankRefreshIntervalSeconds();
@@ -547,21 +591,26 @@ public class PPOFlipperStarScript extends Script {
         // the entire session (see Guardrails/PortfolioManager - a real item held only in the bank,
         // like a confirmed-in-bank Pie dish, read back as 0 held and had its SELL rejected). This
         // log line exists so a repeat is diagnosable from client.log instead of invisible.
-        boolean opened = Rs2Bank.openBank();
-        if (!opened) {
-            log.warn("PPOFlipperStar: proactive bank refresh failed - Rs2Bank.openBank() returned false " +
-                "(GE open: {}, near GE: unknown - see openBank's own internal logging for the specific cause).",
-                Rs2GrandExchange.isOpen());
-            return;
+        intentionalBankUseActive = true;
+        try {
+            boolean opened = Rs2Bank.openBank();
+            if (!opened) {
+                log.warn("PPOFlipperStar: proactive bank refresh failed - Rs2Bank.openBank() returned false " +
+                    "(GE open: {}, near GE: unknown - see openBank's own internal logging for the specific cause).",
+                    Rs2GrandExchange.isOpen());
+                return;
+            }
+            boolean actuallyOpen = sleepUntil(Rs2Bank::isOpen);
+            if (!actuallyOpen) {
+                log.warn("PPOFlipperStar: proactive bank refresh failed - openBank() returned true but the bank " +
+                    "interface never actually opened within the wait.");
+                return;
+            }
+            Rs2Bank.closeBank();
+            sleepUntil(() -> !Rs2Bank.isOpen());
+        } finally {
+            intentionalBankUseActive = false;
         }
-        boolean actuallyOpen = sleepUntil(Rs2Bank::isOpen);
-        if (!actuallyOpen) {
-            log.warn("PPOFlipperStar: proactive bank refresh failed - openBank() returned true but the bank " +
-                "interface never actually opened within the wait.");
-            return;
-        }
-        Rs2Bank.closeBank();
-        sleepUntil(() -> !Rs2Bank.isOpen());
     }
 
     /**
@@ -658,6 +707,26 @@ public class PPOFlipperStarScript extends Script {
         }
 
         DecisionEngine.DecisionResult decision = result.get();
+
+        // Debug-only visibility into the model's RAW, pre-filter output for every SELL-shaped
+        // action this tick, regardless of confidence - added after a real question ("is the model
+        // even emitting low-confidence SELLs, or genuinely proposing nothing for held items?")
+        // that the post-filter suggestions count alone can't answer: decision.actions.size() (the
+        // diagnostics log's "sent" field) is the raw count, but nothing previously logged WHICH
+        // raw actions those were before modelConfidenceThreshold trimmed them. Deliberately
+        // debug-level, not info - a large watchlist's raw response is too big to log at info every
+        // tick, but this is exactly what's needed when specifically investigating "is a SELL just
+        // under the bar, or is the model not proposing one at all."
+        if (log.isDebugEnabled()) {
+            String rawSells = decision.actions.stream()
+                .filter(a -> a.action != null && a.action.startsWith("SELL"))
+                .sorted(Comparator.comparingDouble((PPOFlipperStarFirestoreClient.DecisionAction a) -> a.confidence).reversed())
+                .map(a -> String.format("item %d: %s conf=%.3f qty=%d price=%d", a.itemId, a.action, a.confidence, a.quantity, a.price))
+                .collect(Collectors.joining(", "));
+            log.debug("PPOFlipperStar: tick {} raw SELL-shaped actions before confidence filter ({} total): {}",
+                decision.tickId, decision.actions.size(), rawSells.isEmpty() ? "none" : rawSells);
+        }
+
         // Applied exactly once, before anything else - both the panel's "Model suggestions"
         // display and (when autonomousModeEnabled) autonomous submission below operate on this
         // same already-filtered `suggestions` list, so there is exactly one confidence-checking
@@ -1075,8 +1144,19 @@ public class PPOFlipperStarScript extends Script {
             return;
         }
 
+        // Set as soon as this flow starts needing the bank open, and only cleared once it's
+        // actually done with it (the close below) - deliberately NOT a try/finally scoped to this
+        // single call, since this method can return with the bank still legitimately open,
+        // resuming next tick (still this same withdrawal flow, still intentional) rather than
+        // finishing in one call. See guardAgainstUnexpectedBank()'s javadoc for what this flag is
+        // protecting against while it's true.
+        intentionalBankUseActive = true;
+
         if (!Rs2Bank.isOpen()) {
-            if (!Rs2Bank.openBank()) return;
+            if (!Rs2Bank.openBank()) {
+                intentionalBankUseActive = false;
+                return;
+            }
             sleepUntil(Rs2Bank::isOpen);
         }
 
@@ -1108,6 +1188,7 @@ public class PPOFlipperStarScript extends Script {
 
         Rs2Bank.closeBank();
         sleepUntil(() -> !Rs2Bank.isOpen());
+        intentionalBankUseActive = false;
         orderAwaitingFunds = null;
         state = State.SUBMITTING_ORDERS;
     }
@@ -1367,11 +1448,13 @@ public class PPOFlipperStarScript extends Script {
                     // the next tick's monitorOffers pass retries it.
                     log.warn("PPOFlipperStar: collectOffer failed for slot {} - {}, will retry next tick", slot, order);
                 }
-            } else if (filled == 0 && isStale(order) && queue.nextQueued().isPresent()) {
+            } else if (isDud(order) && isStale(order) && queue.nextQueued().isPresent()) {
                 abortStaleOffer(slot, order);
             }
             queue.notifyChanged();
         }
+
+        evictForBlockedSell();
 
         if (activeOrders.isEmpty() && !queue.nextQueued().isPresent()) {
             state = State.DONE;
@@ -1384,10 +1467,10 @@ public class PPOFlipperStarScript extends Script {
 
     /**
      * True if {@code order} has been SUBMITTED for longer than {@code staleOfferTimeoutMinutes}
-     * (0 disables this - never stale). Only ever consulted for a fully-unfilled offer (see the
-     * {@code filled == 0} guard at this method's one call site in {@link #monitorOffers()}) - a
-     * partial fill is never considered stale regardless of age, since aborting it would strand
-     * the already-filled portion's exit strategy along with the cancelled remainder.
+     * (0 disables this - never stale). Only ever consulted for a "dud" offer per {@link #isDud} -
+     * a real, meaningful partial fill is never considered stale regardless of age, since aborting
+     * it would strand the already-filled portion's exit strategy along with the cancelled
+     * remainder.
      *
      * <p>Being stale by itself is NOT sufficient to abort an offer - see that same call site's
      * additional {@code queue.nextQueued().isPresent()} check: a stale offer only actually gets
@@ -1406,11 +1489,53 @@ public class PPOFlipperStarScript extends Script {
     }
 
     /**
-     * Aborts a stale, fully-unfilled offer whose slot is genuinely wanted by something else right
-     * now (see {@link #isStale}'s javadoc for the "only if actually needed" gate this is called
-     * under), and collects whatever comes back (nothing, since nothing filled - this is really
-     * just freeing the GE slot) via {@code Rs2GrandExchange.cancelSpecificOffers}, which aborts
-     * then internally collects in one call - no separate {@code collectOffer} needed afterward.
+     * True if {@code order}'s fill percentage is low enough, RELATIVE TO HOW LONG IT'S BEEN LIVE,
+     * to be functionally a dud rather than a real partial position worth protecting - see
+     * {@code dudFillPercentThreshold}'s config description for the real incident this addresses (a
+     * BUY that filled ~2% then stalled completely, previously immune to staleness cleanup forever
+     * since the old check required EXACTLY {@code filled == 0}).
+     *
+     * <p><b>Dynamic, not a fixed bar:</b> the required fill to escape dud status ramps linearly
+     * from 0% right at submission up to {@code dudFillPercentThreshold} at
+     * {@code staleOfferTimeoutMinutes} old (and stays at that threshold beyond it - this method
+     * doesn't itself gate on age past that point, {@link #isStale} still does that separately).
+     * A brand-new order isn't penalized for having 0% fill in its first few seconds - almost
+     * anything above 0% clears the bar early on - but the tolerance for a low fill shrinks as the
+     * order approaches the point {@link #isStale} would flag it anyway, so an order that's clearly
+     * stalling relative to its own age gets caught without waiting the full fixed timeout at a
+     * flat threshold the whole time. A fully-unfilled order (0%) always counts as a dud regardless
+     * of age. {@code dudFillPercentThreshold} <= 0 restores the old strict "only filled == 0"
+     * behavior (the ramp is skipped entirely).
+     */
+    private boolean isDud(PPOFlipperOrder order) {
+        if (order.getQuantityFilled() == 0) {
+            return true;
+        }
+        int thresholdPercent = config.dudFillPercentThreshold();
+        if (thresholdPercent <= 0 || order.getQuantity() <= 0) {
+            return false;
+        }
+        double filledPercent = order.getQuantityFilled() * 100.0 / order.getQuantity();
+
+        int timeoutMinutes = config.staleOfferTimeoutMinutes();
+        if (timeoutMinutes <= 0 || order.getSubmittedAtMillis() <= 0) {
+            // Staleness is disabled entirely (or this order was never actually submitted) - no
+            // age reference to ramp against, fall back to the flat threshold.
+            return filledPercent < thresholdPercent;
+        }
+        long ageMillis = System.currentTimeMillis() - order.getSubmittedAtMillis();
+        double ageFraction = Math.min(1.0, ageMillis / (double) (timeoutMinutes * 60_000L));
+        double requiredPercent = thresholdPercent * ageFraction;
+        return filledPercent < requiredPercent;
+    }
+
+    /**
+     * Aborts a stale, dud (see {@link #isDud}) offer whose slot is genuinely wanted by something
+     * else right now (see {@link #isStale}'s javadoc for the "only if actually needed" gate this
+     * is called under), and collects whatever comes back (the already-filled portion, if any - see
+     * {@link #isDud}, this can now fire on a small-but-nonzero fill, not just a literal 0) via
+     * {@code Rs2GrandExchange.cancelSpecificOffers}, which aborts then internally collects in one
+     * call - no separate {@code collectOffer} needed afterward, and the filled portion is not lost.
      * Deliberately does NOT requeue the order itself: per {@code staleOfferTimeoutMinutes}'s config
      * description, the point is to let the item go back through a fresh DECIDE tick and get
      * re-evaluated with the model's current judgment (spread/volatility/momentum/holding-duration),
@@ -1420,11 +1545,93 @@ public class PPOFlipperStarScript extends Script {
      * same stale price/quantity the model may no longer agree with.
      */
     private void abortStaleOffer(GrandExchangeSlots slot, PPOFlipperOrder order) {
-        log.info("PPOFlipperStar: aborting stale unfilled offer in slot {} - {} (submitted {} min ago)",
-            slot, order, (System.currentTimeMillis() - order.getSubmittedAtMillis()) / 60_000L);
+        log.info("PPOFlipperStar: aborting stale dud offer in slot {} - {} ({}/{} filled, submitted {} min ago)",
+            slot, order, order.getQuantityFilled(), order.getQuantity(),
+            (System.currentTimeMillis() - order.getSubmittedAtMillis()) / 60_000L);
+        cancelAndFreeSlot(slot, order, "Aborted - stale dud (" + order.getQuantityFilled() + "/" + order.getQuantity()
+            + " filled) after " + config.staleOfferTimeoutMinutes() + " min");
+    }
+
+    /** Shared cancel/collect/mark-skipped mechanics for {@link #abortStaleOffer} and {@link #evictForBlockedSell}. */
+    private void cancelAndFreeSlot(GrandExchangeSlots slot, PPOFlipperOrder order, String skippedReason) {
         Rs2GrandExchange.cancelSpecificOffers(List.of(slot), config.collectToBank());
-        markSkipped(order, "Aborted - stale, unfilled after " + config.staleOfferTimeoutMinutes() + " min");
+        markSkipped(order, skippedReason);
         activeOrders.remove(slot);
+    }
+
+    /**
+     * A QUEUED SELL represents capital/inventory already committed - if every GE slot is tied up
+     * with dud BUYs (see {@link #isDud} - unfilled or negligibly filled, still-speculative
+     * opportunities either way) and the SELL has been waiting past {@code sellSlotEvictionWaitSeconds},
+     * this cancels the single oldest eligible BUY to make room for it, rather than making it wait
+     * on {@link #isStale}'s much longer {@code staleOfferTimeoutMinutes} timer. Deliberately
+     * narrow: only fires when {@link OrderQueue#nextQueued()} itself resolves to a SELL (i.e.
+     * nothing else already jumps the line ahead of it - see that method's javadoc) AND every slot
+     * is full AND that SELL has actually been queued long enough. "Eligible" BUY means a dud per
+     * {@link #isDud} (a real, meaningful partial fill is never touched, same protection
+     * {@link #isStale} already applies) and at least {@code sellSlotEvictionMinBuyAgeSeconds} old,
+     * so a BUY that hasn't had a fair chance to fill yet is never sacrificed just because it
+     * happens to be the only one active. If no BUY qualifies yet, the SELL simply keeps waiting -
+     * this never forces an eviction, only offers one once a genuinely reasonable candidate exists.
+     */
+    private void evictForBlockedSell() {
+        int waitSeconds = config.sellSlotEvictionWaitSeconds();
+        if (waitSeconds <= 0) {
+            log.debug("PPOFlipperStar: evictForBlockedSell - disabled (sellSlotEvictionWaitSeconds=0).");
+            return;
+        }
+        if (activeOrders.size() < Math.max(1, config.maxActiveOffers())) {
+            // A slot is already free - nextQueued() (SELL-first) will claim it on the normal
+            // SUBMITTING_ORDERS path next, no eviction needed.
+            log.debug("PPOFlipperStar: evictForBlockedSell - {} of {} slots active, a slot is already free.",
+                activeOrders.size(), Math.max(1, config.maxActiveOffers()));
+            return;
+        }
+
+        Optional<PPOFlipperOrder> nextQueued = queue.nextQueued();
+        if (!nextQueued.isPresent()) {
+            log.debug("PPOFlipperStar: evictForBlockedSell - all {} slots full, nothing QUEUED.", activeOrders.size());
+            return;
+        }
+        if (nextQueued.get().getAction() != GrandExchangeAction.SELL) {
+            log.debug("PPOFlipperStar: evictForBlockedSell - all {} slots full, but next QUEUED order is a {} not a SELL - {}.",
+                activeOrders.size(), nextQueued.get().getAction(), nextQueued.get());
+            return;
+        }
+        PPOFlipperOrder blockedSell = nextQueued.get();
+        long queuedForMillis = System.currentTimeMillis() - blockedSell.getQueuedAtMillis();
+        if (queuedForMillis < waitSeconds * 1000L) {
+            log.info("PPOFlipperStar: evictForBlockedSell - SELL {} is next in queue but all {} slots are full; " +
+                    "waiting {}s more (queued {}s ago, grace period {}s) before considering an eviction.",
+                blockedSell, activeOrders.size(), waitSeconds - (queuedForMillis / 1000L), queuedForMillis / 1000L, waitSeconds);
+            return;
+        }
+
+        long minBuyAgeMillis = Math.max(0, config.sellSlotEvictionMinBuyAgeSeconds()) * 1000L;
+        long now = System.currentTimeMillis();
+        Map.Entry<GrandExchangeSlots, PPOFlipperOrder> oldestEligibleBuy = activeOrders.entrySet().stream()
+            .filter(e -> e.getValue().getAction() == GrandExchangeAction.BUY)
+            .filter(e -> isDud(e.getValue()))
+            .filter(e -> e.getValue().getSubmittedAtMillis() > 0
+                && now - e.getValue().getSubmittedAtMillis() >= minBuyAgeMillis)
+            .min(Comparator.comparingLong(e -> e.getValue().getSubmittedAtMillis()))
+            .orElse(null);
+        if (oldestEligibleBuy == null) {
+            // No BUY is both a dud (see isDud - unfilled or negligibly filled) and old enough yet
+            // - let the SELL keep waiting rather than sacrificing one that hasn't had a fair
+            // chance, or a real partial fill worth protecting.
+            log.info("PPOFlipperStar: evictForBlockedSell - SELL {} has waited {}s past the grace period, but no " +
+                    "active BUY is both a dud (unfilled or negligibly filled) and at least {}s old yet - holding " +
+                    "off eviction this tick. Active orders: {}",
+                blockedSell, queuedForMillis / 1000L, config.sellSlotEvictionMinBuyAgeSeconds(),
+                activeOrders.values());
+            return;
+        }
+
+        log.info("PPOFlipperStar: evicting BUY in slot {} - {} - to free a slot for blocked SELL {} (queued {}s)",
+            oldestEligibleBuy.getKey(), oldestEligibleBuy.getValue(), blockedSell, queuedForMillis / 1000L);
+        cancelAndFreeSlot(oldestEligibleBuy.getKey(), oldestEligibleBuy.getValue(),
+            "Evicted to free a GE slot for a blocked SELL (" + blockedSell.getItemName() + ")");
     }
 
     /**
