@@ -191,6 +191,21 @@ public interface PPOFlipperStarConfig extends Config {
     }
 
     @ConfigItem(
+        keyName = "minOrderValueGp",
+        name = "Min total order value (gp)",
+        description = "Refuse any order (BUY or SELL) whose total value (price x quantity) is below this - a real " +
+            "incident: the model submitted a real SELL for 18x water rune @ 6gp, a 108gp total order. Not wrong on " +
+            "its own terms (both the price and quantity were individually sane), but a GE slot, a fill wait, and " +
+            "the attention needed to notice/react to it are worth more than the gp involved either way - not worth " +
+            "trading at all regardless of direction. 0 = no minimum.",
+        position = 6,
+        section = guardrailsSection
+    )
+    default long minOrderValueGp() {
+        return 10_000L;
+    }
+
+    @ConfigItem(
         keyName = "stopOnGuardrailBreach",
         name = "Stop script on guardrail breach",
         description = "If off, a rejected order is just skipped and the script moves to the next one. If on, the whole script stops. No effect on the hard checks that always apply regardless of the guardrails master switch.",
