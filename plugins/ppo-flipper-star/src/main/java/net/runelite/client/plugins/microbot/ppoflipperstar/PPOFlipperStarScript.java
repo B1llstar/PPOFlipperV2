@@ -1399,13 +1399,29 @@ public class PPOFlipperStarScript extends Script {
         int averageCost = itemId > 0 ? portfolio.getAverageCost(itemId) : 0;
         if (averageCost <= 0) return candidatePrice;
 
-        int minPrice = (int) Math.ceil(averageCost * (1.0 + marginPercent / 100.0));
+        // The margin this guardrail promises must survive GE tax (see GeTax) - a price solved
+        // purely against gross proceeds (the old formula here) overstates the real margin by
+        // however much tax actually withholds, e.g. a configured 5% margin was really landing
+        // closer to ~3% net once the standard 2% tax came out of the sale. Solved directly rather
+        // than iteratively: above GeTax's exemption floor, tax scales linearly with price
+        // (floor(price * qty * 0.02)), so the minimum GROSS unit price needed for a given NET
+        // margin is the naive gross-margin price divided by (1 - taxRate) - verified against
+        // GeTax.netProceeds below rather than trusted blindly, since the floor()/cap/exemption
+        // edge cases in the real tax function aren't exactly linear at the boundaries.
+        int quantity = Math.max(1, order.getQuantity());
+        double grossMarginPrice = averageCost * (1.0 + marginPercent / 100.0);
+        int minPrice = (int) Math.ceil(grossMarginPrice / (1.0 - GeTax.RATE));
+        // Nudge upward if floor()/cap rounding still leaves the net margin a hair short - a tight
+        // loop, not an open-ended search: minPrice is already within a gp or two of exact.
+        while (minPrice > 0 && GeTax.netProceeds(minPrice, quantity, (long) minPrice * quantity) < Math.ceil(grossMarginPrice) * quantity) {
+            minPrice++;
+        }
         if (candidatePrice >= minPrice) return candidatePrice;
 
-        log.info("PPOFlipperStar: raised sell price for {} from {} to minimum margin price {} ({}% over avg cost {})",
+        log.info("PPOFlipperStar: raised sell price for {} from {} to minimum margin price {} ({}% over avg cost {}, net of GE tax)",
             order.getItemName(), candidatePrice, minPrice, marginPercent, averageCost);
         order.setStatusDetail(String.format(
-            "Price raised to %d gp to guarantee %.1f%% margin over avg cost %d gp", minPrice, marginPercent, averageCost));
+            "Price raised to %d gp to guarantee %.1f%% margin over avg cost %d gp (net of GE tax)", minPrice, marginPercent, averageCost));
         return minPrice;
     }
 
@@ -1656,10 +1672,18 @@ public class PPOFlipperStarScript extends Script {
         int itemId = details.getItemId();
         long now = System.currentTimeMillis();
         if (order.getAction() == GrandExchangeAction.BUY) {
+            // No GE tax on BUY - it spends exactly what it's charged, nothing withheld.
             portfolio.recordBuy(itemId, filled, details.getSpent(), now);
             buyLimitLedger.recordBuy(itemId, filled, now);
         } else {
-            portfolio.recordSell(itemId, filled, details.getSpent());
+            // details.getSpent() on a SELL is Microbot's gross fill total, before GE tax - OSRS
+            // silently withholds 2% (capped, floor-exempt below 50gp/unit - see GeTax's javadoc)
+            // from what actually lands in inventory/bank. Recording the gross figure here would
+            // overstate realized profit by that same 2% on every SELL, every time - GeTax mirrors
+            // the exact formula data/ppo/env.py trained the model's reward signal against, so the
+            // ledger reflects what was actually received, matching what the model itself expects.
+            long netProceeds = GeTax.netProceeds(details.getPrice(), filled, details.getSpent());
+            portfolio.recordSell(itemId, filled, netProceeds);
         }
         recordTradeHistory(order, details, filled, now);
     }
