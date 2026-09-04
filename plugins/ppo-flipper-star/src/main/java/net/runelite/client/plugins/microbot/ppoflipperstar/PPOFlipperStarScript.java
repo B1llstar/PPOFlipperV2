@@ -836,12 +836,14 @@ public class PPOFlipperStarScript extends Script {
      *   new SELL of the same item, they're not the same intent). This is what actually stops the
      *   exact-same-price repeat-spam behavior found live (Maple logs, Iron platebody proposed
      *   and queued again every tick while an equivalent order was already pending).</li>
-     *   <li><b>Queue-depth cap</b>: skip ALL remaining suggestions this tick once
+     *   <li><b>Queue-depth cap (BUY only)</b>: skip all remaining BUY suggestions this tick once
      *   {@code QUEUED + SUBMITTED} count already reaches
      *   {@code maxActiveOffers * AUTONOMOUS_QUEUE_DEPTH_MULTIPLIER} - a hard backstop against
      *   unbounded growth regardless of how diverse the proposed items are, independent of the
      *   per-item dedup above (which alone wouldn't have stopped 300 genuinely distinct items from
-     *   still piling up 300 orders deep in one tick).</li>
+     *   still piling up 300 orders deep in one tick). Deliberately never applied to SELL (see the
+     *   SELL-before-BUY ordering note below) - only a BUY actually grows the backlog this cap
+     *   bounds, so gating a SELL on it is self-defeating.</li>
      * </ul>
      * Neither gate touches {@link Guardrails} or changes what executes once an order is actually
      * submitted - both are pre-filters on whether an order is worth queuing at all, applied
@@ -888,12 +890,24 @@ public class PPOFlipperStarScript extends Script {
             .thenComparing(Comparator.comparingDouble(PPOFlipperDecision::getConfidence).reversed()));
 
         for (PPOFlipperDecision decision : ordered) {
-            long currentBacklog = queue.countByStatus(PPOFlipperOrder.Status.QUEUED)
-                + queue.countByStatus(PPOFlipperOrder.Status.SUBMITTED);
-            if (currentBacklog >= maxQueueDepth) {
-                log.info("PPOFlipperStar: autonomous queue backlog at {} (cap {}), holding off on {} this tick.",
-                    currentBacklog, maxQueueDepth, decision);
-                break;
+            // The backlog-depth cap only ever gates BUY, never SELL - see incident-notes/
+            // fix-guide-autonomous-item-clustering.md's "related, separate bug" section. Only a
+            // BUY actually grows OrderQueue's backlog, so only BUY needs to be bounded by it; a
+            // SELL was already being placed first by the confidence sort above, but the cap check
+            // ran unconditionally on every iteration against the LIVE queue - once prior ticks'
+            // still-pending BUYs had already pushed the real backlog above the cap, the very
+            // first item checked this tick (even a real, high-confidence SELL the sort just moved
+            // to the front) failed the cap before the loop ever got a chance to submit it. A SELL
+            // represents capital/inventory already committed that could be freed up - gating it on
+            // a cap meant to bound queue GROWTH is self-defeating.
+            if (decision.getGeAction() != GrandExchangeAction.SELL) {
+                long currentBacklog = queue.countByStatus(PPOFlipperOrder.Status.QUEUED)
+                    + queue.countByStatus(PPOFlipperOrder.Status.SUBMITTED);
+                if (currentBacklog >= maxQueueDepth) {
+                    log.info("PPOFlipperStar: autonomous queue backlog at {} (cap {}), holding off on {} this tick.",
+                        currentBacklog, maxQueueDepth, decision);
+                    break;
+                }
             }
 
             boolean alreadyPending = queue.getAll().stream()
