@@ -405,6 +405,41 @@ public interface PPOFlipperStarConfig extends Config {
         return false;
     }
 
+    @ConfigItem(
+        keyName = "stalePositionAutoSellEnabled",
+        name = "Auto-sell stale positions",
+        description = "Forces a SELL_100% suggestion for any open position held longer than \"Stale position " +
+            "threshold\" below, independent of whether the model itself ever proposes selling it - added because " +
+            "the trained policy is structurally biased toward BUY over SELL (see incident notes: a SELL is only " +
+            "ever a legal/rewarded action in training when the item is already held, so on any given tick there " +
+            "are always far more legal BUY opportunities across the watchlist than SELL ones for whatever's " +
+            "currently held), which can otherwise let the portfolio grow indefinitely under autonomous mode with " +
+            "nothing ever forcing an exit. Uses the same weighted-average cost/acquisition-time tracking " +
+            "PortfolioManager already maintains from real buy timestamps - no new tracking needed even though " +
+            "separate purchases of the same item happen at different times/prices. A forced sell still passes " +
+            "through Guardrails exactly like any other order (it does not bypass anything), and is only actually " +
+            "auto-submitted when \"Autonomous mode (LIVE TRADING)\" is also on - with that off, it still appears " +
+            "as an ordinary suggestion in the panel awaiting your Confirm click, same as a model-proposed one.",
+        position = 6,
+        section = ppoSection
+    )
+    default boolean stalePositionAutoSellEnabled() {
+        return false;
+    }
+
+    @ConfigItem(
+        keyName = "stalePositionThresholdHours",
+        name = "Stale position threshold (hours)",
+        description = "How long (in hours, using the position's weighted-average acquisition time - see " +
+            "\"Auto-sell stale positions\" above) an open position must be held before it's forced into a " +
+            "SELL_100% suggestion. Only consulted while \"Auto-sell stale positions\" is on.",
+        position = 7,
+        section = ppoSection
+    )
+    default int stalePositionThresholdHours() {
+        return 4;
+    }
+
     @ConfigSection(
         name = "Cloud sync",
         description = "Firestore-backed persistence: portfolio, buy-limit ledger, watchlist, and trade history " +

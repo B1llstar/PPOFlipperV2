@@ -7,6 +7,7 @@ import net.runelite.api.gameval.ItemID;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.BuyLimitLedger;
+import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.CostBasisEntry;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
 import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreClient;
 import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
@@ -30,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -677,6 +679,10 @@ public class PPOFlipperStarScript extends Script {
             .filter(d -> !sellOffMode || d.getGeAction() != GrandExchangeAction.BUY)
             .collect(Collectors.toList());
 
+        if (configSnapshot.stalePositionAutoSellEnabled()) {
+            addStalePositionSells(decision.tickId, decision.checkpointVersion, suggestions);
+        }
+
         // Always populate DecisionSuggestions first, regardless of autonomous mode, so the panel
         // always shows what the model most recently proposed - an audit trail of the tick's
         // output whether or not it went on to auto-execute below.
@@ -699,6 +705,62 @@ public class PPOFlipperStarScript extends Script {
             autonomouslySubmit(suggestions);
         } else if (configSnapshot.autonomousModeEnabled()) {
             autonomouslySubmit(suggestions);
+        }
+    }
+
+    /**
+     * Forces a synthetic SELL_100% suggestion (confidence 1.0, so it always clears the confidence
+     * threshold) into {@code suggestions} for every open position held longer than
+     * {@code stalePositionThresholdHours} - see {@code stalePositionAutoSellEnabled}'s config
+     * description for why this exists at all: the trained policy is structurally biased toward
+     * BUY over SELL (a SELL is only ever legal/rewarded in training when the item is already
+     * held, so across a large watchlist there are always far more legal BUY opportunities than
+     * SELL ones), which can otherwise let a portfolio grow indefinitely under autonomous mode with
+     * nothing ever forcing an exit.
+     *
+     * <p>Uses {@link PortfolioManager#getOpenPositions}'s already-maintained weighted-average
+     * acquisition timestamp ({@link CostBasisEntry#getHoldingDurationMillis}) - no new tracking
+     * needed even though separate purchases of the same item happen at different times/prices,
+     * since that weighted average already blends them into one well-defined position age.
+     *
+     * <p>Skipped entirely for an item that already has a real (model-proposed) SELL suggestion
+     * this tick - never overrides or duplicates one, only fills the gap when the model proposed
+     * nothing for that item at all. Priced via {@link DecisionEngine#getLatestPrice} (the same
+     * non-blocking, cache-backed live price the model's own suggestions use); a position with no
+     * live price available yet is skipped for this tick rather than guessed at - it'll be
+     * reconsidered next tick once a price is cached.
+     *
+     * <p>A forced sell is a completely ordinary {@link PPOFlipperDecision} once constructed here -
+     * it flows through the exact same confidence filter (trivially, at 1.0), SELL-first sort, and
+     * {@link Guardrails#check} as any model-proposed suggestion, with no special-cased bypass.
+     */
+    private void addStalePositionSells(long tickId, String checkpointVersion, List<PPOFlipperDecision> suggestions) {
+        long thresholdMillis = Math.max(0, config.stalePositionThresholdHours()) * 3_600_000L;
+        if (thresholdMillis <= 0) return;
+
+        Set<Integer> alreadySuggestedSell = suggestions.stream()
+            .filter(d -> d.getGeAction() == GrandExchangeAction.SELL)
+            .map(PPOFlipperDecision::getItemId)
+            .collect(Collectors.toSet());
+
+        long now = System.currentTimeMillis();
+        for (CostBasisEntry entry : portfolio.getOpenPositions()) {
+            if (entry.getQuantityHeld() <= 0) continue;
+            if (entry.getHoldingDurationMillis(now) < thresholdMillis) continue;
+            if (alreadySuggestedSell.contains(entry.getItemId())) continue;
+
+            WikiPriceClient.Price price = decisionEngine.getLatestPrice(entry.getItemId());
+            if (price == null || price.instaSellPrice <= 0) continue;
+
+            String itemName = decisionEngine.getItemName(entry.getItemId());
+            if (itemName == null) continue;
+
+            PPOFlipperDecision forced = new PPOFlipperDecision(tickId, entry.getItemId(), itemName, "SELL_100%",
+                GrandExchangeAction.SELL, entry.getQuantityHeld(), price.instaSellPrice, 1.0,
+                checkpointVersion, now);
+            suggestions.add(forced);
+            log.info("PPOFlipperStar: forcing stale-position sell - {} held {} min (threshold {}h)",
+                forced, entry.getHoldingDurationMillis(now) / 60_000L, config.stalePositionThresholdHours());
         }
     }
 

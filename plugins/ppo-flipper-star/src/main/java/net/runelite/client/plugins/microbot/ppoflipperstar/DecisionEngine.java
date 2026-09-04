@@ -191,6 +191,20 @@ public class DecisionEngine {
     }
 
     /**
+     * The same non-blocking, cache-backed live price {@link #buildRequestItem} itself uses, for
+     * {@code PPOFlipperStarScript}'s stale-position auto-sell guardrail to price a forced SELL
+     * suggestion at - see {@link WikiPriceClient#getLatestPrice}'s javadoc for the non-blocking
+     * contract (an instant cache read, {@code null} on a genuine miss rather than ever blocking
+     * the caller). Deliberately exposes the same instance {@link #decide} already warms via
+     * {@link #refreshAllPrices()} rather than the caller holding its own separate
+     * {@link WikiPriceClient}, which would just be another independent cold cache - the exact
+     * multi-instance problem {@link WikiPriceClient}'s own javadoc documents as a past incident.
+     */
+    public WikiPriceClient.Price getLatestPrice(int itemId) {
+        return wikiPriceClient.getLatestPrice(itemId);
+    }
+
+    /**
      * True only when the most recent {@link #decide} call ended in {@link #pollForResponse}
      * timing out (a real request was written but no matching response ever arrived) - distinct
      * from the other reasons {@code decide} can return {@link Optional#empty()} (an empty
