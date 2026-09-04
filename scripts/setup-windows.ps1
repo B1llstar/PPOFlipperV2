@@ -403,7 +403,18 @@ if ($SetupPython) {
             $WorkerArgs += @("--service-account-path", $ServiceAccountPath)
         }
         Write-Step "Starting inference_worker.py in a new window"
-        Start-Process -FilePath $VenvPython -ArgumentList $WorkerArgs -WorkingDirectory (Join-Path $RepoDir "data")
+        # Plain `Start-Process -FilePath $VenvPython ...` with no window-style can end up with no
+        # visible console attached at all depending on how Windows resolves it when launched from
+        # inside another PowerShell process - confirmed live: the worker was running (or trying
+        # to), but no window ever appeared for a user to see its output or errors. Routed through
+        # `cmd.exe /k` instead: /k (not /c) keeps the window open after the command finishes, so a
+        # worker that crashes immediately on startup (e.g. a missing service-account JSON) leaves
+        # its error visible on screen rather than a window flashing and closing before it can be
+        # read. -WindowStyle Normal forces a genuinely visible window rather than leaving that to
+        # default resolution.
+        $QuotedWorkerArgs = ($WorkerArgs | ForEach-Object { "`"$_`"" }) -join " "
+        $CmdArgs = "/k `"`"$VenvPython`" $QuotedWorkerArgs`""
+        Start-Process -FilePath "cmd.exe" -ArgumentList $CmdArgs -WorkingDirectory (Join-Path $RepoDir "data") -WindowStyle Normal
     } else {
         Write-Step "Skipping inference worker start (-SkipInferenceWorker) - dependencies are installed."
     }
