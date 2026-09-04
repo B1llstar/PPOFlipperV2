@@ -1,5 +1,9 @@
 package net.runelite.client.plugins.microbot.ppoflipperstar;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
@@ -11,12 +15,18 @@ import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -73,6 +83,93 @@ public class DecisionEngine {
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
 
     private final AtomicLong tickIdGenerator = new AtomicLong(0);
+
+    // Bulk-fetched item mapping data (buy limits, names, etc), replacing per-item
+    // Rs2GrandExchange.getItemMappingData(itemId) calls entirely - see refreshItemMappings()'s
+    // javadoc for why. Keyed by itemId.
+    private final Map<Integer, ItemMappingData> itemMappingCache = new ConcurrentHashMap<>();
+    private static final String ITEM_MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping";
+    private static final String ITEM_MAPPING_USER_AGENT = "OSRS-GE-Trading-Client/1.0 (contact: via GitHub)";
+    private static final long ITEM_MAPPING_CACHE_TTL_MILLIS = 30L * 60 * 1000;
+    private static final HttpClient ITEM_MAPPING_HTTP_CLIENT = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(10))
+        .build();
+    private volatile long lastItemMappingBulkFetchAtMillis = 0;
+
+    /**
+     * Fetches EVERY tradeable item's mapping data (buy limit, name, value, etc.) in ONE HTTP call
+     * and warms {@link #itemMappingCache} for all of them at once, replacing what used to be N
+     * separate calls to {@code Rs2GrandExchange.getItemMappingData(itemId)}.
+     *
+     * <p><b>Why this exists - a real, load-bearing discovery, not a preemptive optimization:</b>
+     * the wiki has no per-item mapping endpoint at all. {@code Rs2GrandExchange.fetchItemMappingData}
+     * (confirmed via bytecode inspection, and independently via a plain curl against the same URL)
+     * calls this exact same bulk {@code /mapping} endpoint - which returns all ~4,700 tradeable
+     * items' full mapping data in one ~860KB response, taking ~2 seconds regardless of which single
+     * item was actually wanted - and then discards everything except the one requested item's
+     * entry. Its own {@code mappingCache} is keyed per item id, so it caches only that one entry
+     * too. The result: fetching mapping data for N different items means downloading and parsing
+     * the SAME ~860KB response N separate times - for a ~700-900 item watchlist, that's hundreds
+     * of full-size downloads, confirmed live to leave DECIDE tick threads stuck for 10+ minutes at
+     * a time inside {@code Rs2GrandExchange.fetchItemMappingData}. Fetching that same endpoint
+     * ourselves exactly ONCE and keeping every item's entry (not just one) is the real fix.
+     *
+     * <p>Cached for {@link #ITEM_MAPPING_CACHE_TTL_MILLIS} (mapping data - names/buy limits/values -
+     * changes at most a few times a year, unlike prices) so calling this every tick is a cheap
+     * no-op once warm. Never throws - a failed refresh just leaves the cache as it was; an item
+     * with genuinely no cached entry yet falls back to {@code buyLimit = 0}, the field's existing
+     * "no data" sentinel, not a crash.
+     */
+    public void refreshItemMappings() {
+        if (System.currentTimeMillis() - lastItemMappingBulkFetchAtMillis < ITEM_MAPPING_CACHE_TTL_MILLIS) {
+            return;
+        }
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(ITEM_MAPPING_URL))
+                .header("User-Agent", ITEM_MAPPING_USER_AGENT)
+                .timeout(Duration.ofSeconds(15))
+                .GET()
+                .build();
+
+            HttpResponse<String> response = ITEM_MAPPING_HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                log.warn("PPOFlipperStar: bulk item mapping fetch returned HTTP {}", response.statusCode());
+                return;
+            }
+
+            JsonArray entries = new JsonParser().parse(response.body()).getAsJsonArray();
+            int count = 0;
+            for (JsonElement element : entries) {
+                JsonObject obj = element.getAsJsonObject();
+                if (!obj.has("id")) continue;
+                int itemId = obj.get("id").getAsInt();
+                ItemMappingData mapping = new ItemMappingData(
+                    itemId,
+                    obj.has("name") ? obj.get("name").getAsString() : "",
+                    obj.has("examine") ? obj.get("examine").getAsString() : "",
+                    obj.has("members") && obj.get("members").getAsBoolean(),
+                    obj.has("limit") ? obj.get("limit").getAsInt() : 0,
+                    obj.has("value") ? obj.get("value").getAsInt() : 0,
+                    obj.has("lowalch") ? obj.get("lowalch").getAsInt() : 0,
+                    obj.has("highalch") ? obj.get("highalch").getAsInt() : 0,
+                    obj.has("icon") ? obj.get("icon").getAsString() : "");
+                itemMappingCache.put(itemId, mapping);
+                count++;
+            }
+            lastItemMappingBulkFetchAtMillis = System.currentTimeMillis();
+            log.info("PPOFlipperStar: bulk item mapping fetch warmed {} item(s) in one request.", count);
+        } catch (Exception e) {
+            log.warn("PPOFlipperStar: bulk item mapping fetch failed - {}", e.getMessage());
+        }
+    }
+
+    /** The item's GE 4-hour buy limit from the bulk-fetched mapping cache, or 0 if not yet known. */
+    public int getBuyLimit(int itemId) {
+        ItemMappingData mapping = itemMappingCache.get(itemId);
+        return (mapping != null && mapping.tradeLimitPer4Hours > 0) ? mapping.tradeLimitPer4Hours : 0;
+    }
 
     /**
      * True only when the most recent {@link #decide} call ended in {@link #pollForResponse}
@@ -156,6 +253,11 @@ public class DecisionEngine {
             // upfront, cache-backed at the same TTL as the per-item path, so this is a cheap no-op
             // once warm rather than a real network call every tick.
             wikiPriceClient.refreshAllPrices();
+
+            // Same "one bulk call, cache-backed" shape as refreshAllPrices() just above - see
+            // refreshItemMappings()'s own javadoc for why this replaces the per-item
+            // Rs2GrandExchange.getItemMappingData(itemId) call buildRequestItem used to make.
+            refreshItemMappings();
 
             long tickId = tickIdGenerator.incrementAndGet();
             List<PPOFlipperStarFirestoreClient.DecisionRequestItem> items = new ArrayList<>();
@@ -244,7 +346,10 @@ public class DecisionEngine {
         // is exactly what caused every live suggestion to come back with quantity=0 regardless of
         // confidence (see _action_to_order in inference_worker.py: desired_qty is 0 whenever
         // buyLimit <= 0). -1 is the field's real "no data" sentinel; anything else is genuine.
-        ItemMappingData mapping = Rs2GrandExchange.getItemMappingData(itemId);
+        // A plain, instant map read - see refreshItemMappings()'s javadoc for why this is no
+        // longer a per-item network call. An item genuinely missing from the bulk response, or
+        // not yet warmed, falls back to buyLimit = 0 - the field's existing "no data" sentinel.
+        ItemMappingData mapping = itemMappingCache.get(itemId);
         int buyLimit = (mapping != null && mapping.tradeLimitPer4Hours > 0) ? mapping.tradeLimitPer4Hours : 0;
         int alreadyBought = buyLimitLedger.quantityBoughtInWindow(itemId, System.currentTimeMillis());
         int headroom = Math.max(buyLimit - alreadyBought, 0);
