@@ -189,6 +189,11 @@ public class DecisionEngine {
         return lastDecideTimedOut;
     }
 
+    /** Current watchlist size - purely for DecideDiagnosticsLog's per-tick summary. */
+    public int watchlistSize() {
+        return watchlistManager.getAll().size();
+    }
+
     @Inject
     public DecisionEngine(PortfolioManager portfolio, BuyLimitLedger buyLimitLedger, GoldManager goldManager,
                            WatchlistManager watchlistManager, PPOFlipperStarFirestoreSync firestoreSync,

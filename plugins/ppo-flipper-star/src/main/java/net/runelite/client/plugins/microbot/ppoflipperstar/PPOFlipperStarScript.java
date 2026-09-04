@@ -150,10 +150,13 @@ public class PPOFlipperStarScript extends Script {
     private static final int MODEL_UNRESPONSIVE_THRESHOLD = 4;
     private final AtomicInteger consecutiveDecideTimeouts = new AtomicInteger(0);
 
+    private final DecideDiagnosticsLog diagnosticsLog;
+
     @Inject
     public PPOFlipperStarScript(OrderQueue queue, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
                                  GoldManager goldManager, PPOFlipperStarFirestoreSync firestoreSync,
-                                 DecisionEngine decisionEngine, DecisionSuggestions decisionSuggestions) {
+                                 DecisionEngine decisionEngine, DecisionSuggestions decisionSuggestions,
+                                 DecideDiagnosticsLog diagnosticsLog) {
         this.queue = queue;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
@@ -161,6 +164,7 @@ public class PPOFlipperStarScript extends Script {
         this.firestoreSync = firestoreSync;
         this.decisionEngine = decisionEngine;
         this.decisionSuggestions = decisionSuggestions;
+        this.diagnosticsLog = diagnosticsLog;
     }
 
     public boolean run(PPOFlipperStarConfig config) {
@@ -465,12 +469,28 @@ public class PPOFlipperStarScript extends Script {
                 } catch (Exception e) {
                     log.warn("PPOFlipperStar: DECIDE tick failed unexpectedly - {}", e.getMessage(), e);
                 } finally {
+                    lastDecideTickCompletedAtMillis = System.currentTimeMillis();
                     decideInFlight.set(false);
                 }
             });
         } catch (Exception e) {
             decideInFlight.set(false);
         }
+    }
+
+    // Wall-clock time the most recent DECIDE tick actually finished running (success or a clean
+    // failure) - purely observational bookkeeping for the panel's "Last DECIDE tick" status row,
+    // does not affect DECIDE behavior at all.
+    private volatile long lastDecideTickCompletedAtMillis = 0;
+
+    /** Milliseconds since the most recent DECIDE tick completed, or 0 if none has completed yet this session. */
+    public long millisSinceLastDecideTickCompleted() {
+        return lastDecideTickCompletedAtMillis == 0 ? 0 : System.currentTimeMillis() - lastDecideTickCompletedAtMillis;
+    }
+
+    /** The configured DECIDE tick cadence in seconds - used by the panel to judge how stale millisSinceLastDecideTickCompleted() is. */
+    public int getDecisionTickIntervalSeconds() {
+        return config != null ? Math.max(1, config.decisionTickIntervalSeconds()) : 1;
     }
 
     /**
@@ -611,6 +631,7 @@ public class PPOFlipperStarScript extends Script {
      * as a second layer - see its javadoc.
      */
     private void runDecideTick(PPOFlipperStarConfig configSnapshot) {
+        long tickStartMillis = System.currentTimeMillis();
         long timeoutMillis = Math.max(0, configSnapshot.decisionResponseTimeoutSeconds()) * 1000L;
         Optional<DecisionEngine.DecisionResult> result = decisionEngine.decide(timeoutMillis, configSnapshot.maxActiveOffers());
 
@@ -629,6 +650,9 @@ public class PPOFlipperStarScript extends Script {
             // whatever suggestions are already in DecisionSuggestions untouched rather than
             // clearing them, so a transient timeout doesn't yank a suggestion out from under a
             // user mid-review.
+            String outcome = decisionEngine.didLastDecideTimeOut() ? "TIMEOUT" : "EMPTY";
+            diagnosticsLog.logTick(-1, System.currentTimeMillis() - tickStartMillis,
+                decisionEngine.watchlistSize(), 0, 0, 0, outcome);
             return;
         }
 
@@ -662,6 +686,8 @@ public class PPOFlipperStarScript extends Script {
             log.info("PPOFlipperStar: DECIDE tick {} produced {} actionable suggestion(s) for review.",
                 decision.tickId, suggestions.size());
         }
+        diagnosticsLog.logTick(decision.tickId, System.currentTimeMillis() - tickStartMillis,
+            decisionEngine.watchlistSize(), decision.actions.size(), suggestions.size(), 0, "OK");
 
         // Sell-off mode auto-submits SELL suggestions on its own, independent of
         // autonomousModeEnabled - the whole point is exercising the SELL path without a manual

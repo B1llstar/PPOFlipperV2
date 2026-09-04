@@ -78,6 +78,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
     private JLabel realizedPnlValueLabel;
     private JLabel goldValueLabel;
     private JLabel netWorthDeltaValueLabel;
+    private JLabel lastDecideValueLabel;
 
     private JTextField itemNameField;
     private JSpinner quantitySpinner;
@@ -257,6 +258,8 @@ public class PPOFlipperStarPanel extends PluginPanel {
 
         panel.add(statusRow("Status", statusValueLabel));
         panel.add(statusRow("State", stateValueLabel));
+        lastDecideValueLabel = new JLabel();
+        panel.add(statusRow("Last DECIDE tick", lastDecideValueLabel));
         panel.add(statusRow("Gold (inv+bank)", goldValueLabel));
         panel.add(statusRow("Net worth Δ (session)", netWorthDeltaValueLabel));
         panel.add(statusRow("GP spent (session)", gpSpentValueLabel));
@@ -639,6 +642,8 @@ public class PPOFlipperStarPanel extends PluginPanel {
         stateValueLabel.setText(script.getState().name());
         gpSpentValueLabel.setText(String.format("%,d", script.getGpSpentThisSession()));
 
+        refreshLastDecideLabel(running);
+
         goldValueLabel.setText(String.format("%,d gp", goldManager.getTotalGold()));
 
         long netWorthDelta = goldManager.getSessionNetWorthDelta();
@@ -648,6 +653,42 @@ public class PPOFlipperStarPanel extends PluginPanel {
         long realizedPnl = portfolio.getTotalRealizedProfit();
         realizedPnlValueLabel.setText(String.format("%,d gp", realizedPnl));
         realizedPnlValueLabel.setForeground(realizedPnl >= 0 ? DONE_GREEN : FAILED_RED);
+    }
+
+    /**
+     * "Last DECIDE tick" status row - a direct visual answer to "is this still working right now"
+     * without reading logs. Color-coded by staleness against {@code decisionTickIntervalSeconds}
+     * (how often a tick SHOULD fire): green within 2x the configured interval (normal), yellow
+     * within 4x (running slow), red beyond that or if the script is running but no tick has
+     * completed yet at all. Purely observational - reads existing script state, changes nothing.
+     */
+    private void refreshLastDecideLabel(boolean running) {
+        if (!running) {
+            lastDecideValueLabel.setText("-");
+            lastDecideValueLabel.setForeground(Color.LIGHT_GRAY);
+            return;
+        }
+
+        long millisSince = script.millisSinceLastDecideTickCompleted();
+        if (millisSince <= 0) {
+            lastDecideValueLabel.setText("waiting for first tick...");
+            lastDecideValueLabel.setForeground(Color.LIGHT_GRAY);
+            return;
+        }
+
+        long intervalMs = script.getDecisionTickIntervalSeconds() * 1000L;
+        long secondsSince = millisSince / 1000;
+        lastDecideValueLabel.setText(secondsSince < 60
+            ? secondsSince + "s ago"
+            : (secondsSince / 60) + "m " + (secondsSince % 60) + "s ago");
+
+        if (millisSince <= intervalMs * 2) {
+            lastDecideValueLabel.setForeground(DONE_GREEN);
+        } else if (millisSince <= intervalMs * 4) {
+            lastDecideValueLabel.setForeground(Color.ORANGE);
+        } else {
+            lastDecideValueLabel.setForeground(FAILED_RED);
+        }
     }
 
     private void refreshOrderList() {
