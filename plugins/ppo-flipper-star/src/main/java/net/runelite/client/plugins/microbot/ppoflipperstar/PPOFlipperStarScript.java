@@ -733,6 +733,22 @@ public class PPOFlipperStarScript extends Script {
      * <p>A forced sell is a completely ordinary {@link PPOFlipperDecision} once constructed here -
      * it flows through the exact same confidence filter (trivially, at 1.0), SELL-first sort, and
      * {@link Guardrails#check} as any model-proposed suggestion, with no special-cased bypass.
+     *
+     * <p><b>Cross-checked against real live holdings ({@link PortfolioManager#getAllHoldings}),
+     * NOT trusted from {@link CostBasisEntry#getQuantityHeld} alone - a real incident.</b> The
+     * ledger can carry a stale/ghost entry for an item with a real tracked quantity but no
+     * genuine recent acquisition (e.g. a zero/epoch {@code weightedAcquisitionTimestampMillis}
+     * from data that predates this ledger, or a reconciled remote entry for stock that was sold
+     * or transferred outside this plugin without the ledger ever being told). Confirmed live: this
+     * produced forced SELL_100% suggestions for a whole family of longbow/shortbow items with a
+     * reported holding duration of ~56 YEARS (a dead giveaway of an epoch-zero timestamp, not a
+     * real position age), for quantities far exceeding what was actually held (Guardrails then
+     * correctly rejected each one as "sell quantity N exceeds what's held (0)") - harmless in that
+     * each was caught before submission, but pure wasted DECIDE-tick suggestion slots every tick,
+     * and a real risk if any partial overlap with genuine holdings had let a wrong-quantity SELL
+     * through. Every forced sell here is now clamped to {@code min(ledger quantity, live quantity)}
+     * and skipped entirely if live quantity is 0 - the same real inventory+bank read Guardrails
+     * itself checks, so this can never propose more than what could actually be sold.
      */
     private void addStalePositionSells(long tickId, String checkpointVersion, List<PPOFlipperDecision> suggestions) {
         long thresholdMillis = Math.max(0, config.stalePositionThresholdHours()) * 3_600_000L;
@@ -743,11 +759,16 @@ public class PPOFlipperStarScript extends Script {
             .map(PPOFlipperDecision::getItemId)
             .collect(Collectors.toSet());
 
+        Map<Integer, Integer> liveHoldings = portfolio.getAllHoldings();
         long now = System.currentTimeMillis();
         for (CostBasisEntry entry : portfolio.getOpenPositions()) {
             if (entry.getQuantityHeld() <= 0) continue;
             if (entry.getHoldingDurationMillis(now) < thresholdMillis) continue;
             if (alreadySuggestedSell.contains(entry.getItemId())) continue;
+
+            int liveQuantity = liveHoldings.getOrDefault(entry.getItemId(), 0);
+            if (liveQuantity <= 0) continue;
+            int sellQuantity = Math.min(entry.getQuantityHeld(), liveQuantity);
 
             WikiPriceClient.Price price = decisionEngine.getLatestPrice(entry.getItemId());
             if (price == null || price.instaSellPrice <= 0) continue;
@@ -756,11 +777,12 @@ public class PPOFlipperStarScript extends Script {
             if (itemName == null) continue;
 
             PPOFlipperDecision forced = new PPOFlipperDecision(tickId, entry.getItemId(), itemName, "SELL_100%",
-                GrandExchangeAction.SELL, entry.getQuantityHeld(), price.instaSellPrice, 1.0,
+                GrandExchangeAction.SELL, sellQuantity, price.instaSellPrice, 1.0,
                 checkpointVersion, now);
             suggestions.add(forced);
-            log.info("PPOFlipperStar: forcing stale-position sell - {} held {} min (threshold {}h)",
-                forced, entry.getHoldingDurationMillis(now) / 60_000L, config.stalePositionThresholdHours());
+            log.info("PPOFlipperStar: forcing stale-position sell - {} held {} min (threshold {}h, ledger qty {}, live qty {})",
+                forced, entry.getHoldingDurationMillis(now) / 60_000L, config.stalePositionThresholdHours(),
+                entry.getQuantityHeld(), liveQuantity);
         }
     }
 
