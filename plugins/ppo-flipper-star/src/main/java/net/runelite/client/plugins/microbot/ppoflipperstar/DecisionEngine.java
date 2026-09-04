@@ -227,6 +227,46 @@ public class DecisionEngine {
         return watchlistManager.getAll().size();
     }
 
+    /**
+     * Adds every currently-held item id (inventory + bank, respecting {@code inventoryOnlyMode}
+     * exactly like the rest of this tick's read) to the watchlist if it isn't already there - a
+     * real gap this closes: the only other way to add an item is right-clicking it while it's
+     * physically sitting in an INVENTORY slot ({@link net.runelite.client.plugins.microbot.ppoflipperstar.PPOFlipperStarPlugin#onMenuEntryAdded}
+     * gates on {@code Rs2Inventory.getItemInSlot}, so a bank-only item has no "Watch" menu entry
+     * at all), or the "Seed watchlist from trained items" bulk action (which only knows about the
+     * currently deployed checkpoint's trained item set, not what's actually held) - so a held item
+     * that was never manually right-clicked while in the inventory, and isn't in the current
+     * checkpoint's trained set, could otherwise sit invisible to every DECIDE tick indefinitely
+     * despite being real, valuable stock.
+     *
+     * <p><b>Deliberately unconditional - adds every held item regardless of whether it's in the
+     * deployed checkpoint's trained set.</b> An untrained item won't get a meaningful score (the
+     * model was never shown it during training), but it's harmless to include: {@link #buildRequestItem}
+     * simply produces a normal, if less-informed, state vector for it like any other watchlisted
+     * item, and Guardrails/the confidence filter apply identically regardless of whether the
+     * model's output for it happens to be well-calibrated.
+     *
+     * <p>Efficient by design: {@code allHoldings} is the same {@link PortfolioManager#getAllHoldings}
+     * result this tick already computed for every other purpose (see {@link #decide}'s javadoc on
+     * that call being a single scan reused tick-wide) - no extra read here. {@link WatchlistManager#contains}
+     * is a local, in-memory set lookup, so checking membership for every held item costs nothing;
+     * {@link WatchlistManager#add} only performs a Firestore write for an item genuinely not
+     * already present (it no-ops locally and remotely otherwise - see its own javadoc), so a
+     * steady-state tick where holdings haven't changed since the last one costs zero additional
+     * network calls, not just zero reads.
+     */
+    private void autoWatchHeldItems(Map<Integer, Integer> allHoldings) {
+        for (Map.Entry<Integer, Integer> holding : allHoldings.entrySet()) {
+            if (holding.getValue() <= 0) continue;
+            int itemId = holding.getKey();
+            if (!watchlistManager.contains(itemId)) {
+                watchlistManager.add(itemId);
+                log.info("PPOFlipperStar: auto-added held item {} (qty {}) to the watchlist - it was held but not previously watched.",
+                    itemId, holding.getValue());
+            }
+        }
+    }
+
     @Inject
     public DecisionEngine(PortfolioManager portfolio, BuyLimitLedger buyLimitLedger, GoldManager goldManager,
                            WatchlistManager watchlistManager, PPOFlipperStarFirestoreSync firestoreSync,
@@ -314,6 +354,8 @@ public class DecisionEngine {
             // bank+inventory scan for the whole tick, reused for every item below instead of each
             // one independently re-scanning the bank via getHeldQuantity(itemId).
             Map<Integer, Integer> allHoldings = portfolio.getAllHoldings();
+
+            autoWatchHeldItems(allHoldings);
 
             long tickId = tickIdGenerator.incrementAndGet();
             List<PPOFlipperStarFirestoreClient.DecisionRequestItem> items = new ArrayList<>();
