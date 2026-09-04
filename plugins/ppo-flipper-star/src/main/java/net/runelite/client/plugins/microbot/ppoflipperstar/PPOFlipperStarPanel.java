@@ -471,7 +471,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
      * "current deployed checkpoint" pointer doc) is future work, deliberately not built here to
      * avoid over-engineering a general checkpoint-version-discovery system for this one button.
      */
-    private static final String DEPLOYED_CHECKPOINT_GIT_COMMIT = "698392b0ed9101d471a8d7b426fcc57a8a315437";
+    private static final String DEPLOYED_CHECKPOINT_GIT_COMMIT = "3d91b6b5981321867ff961ba25e0f5c118b76098";
 
     /**
      * "Seed watchlist from trained items" (task requirement, not in the original PROPOSAL.md):
@@ -481,8 +481,23 @@ public class PPOFlipperStarPanel extends PluginPanel {
      * skipping ids already present. Deliberately NOT run automatically on plugin startup - doing
      * so would silently and repeatedly change the user's own curated watchlist without them
      * asking, every time the plugin starts. A confirmation dialog gates it since it's a bulk,
-     * hard-to-quickly-undo action (up to ~300 items, each would need removing one at a time via
-     * right-click/Unwatch otherwise).
+     * hard-to-quickly-undo action (the exact count varies per checkpoint - {@code trained_item_ids}
+     * in {@code data/models/ppo/best.json} is the source of truth - each would need removing one
+     * at a time via right-click/Unwatch otherwise).
+     *
+     * <p><b>{@link #DEPLOYED_CHECKPOINT_GIT_COMMIT} found stale in a real incident:</b> it was left
+     * pointing at an old checkpoint's commit (300 trained items) for a full deploy cycle after a
+     * newer checkpoint (885 trained items) went live - the model itself, and the live DECIDE
+     * watchlist (seeded before the mismatch), were both already on the new, larger item set, but
+     * this button's confirmation dialog and tooltip still advertised "~300" and would have SHRUNK
+     * a user's effective coverage back down to the old checkpoint's list if clicked again. Symptom
+     * that surfaced this: a held item (e.g. a Stymphike feather) with real quantity confirmed via
+     * the portfolio sync never appeared in any DECIDE request at all - not with heldQuantity 0, not
+     * present in the request whatsoever - because it was outside the 300-item list this button
+     * would have (re-)seeded from, despite being one of the 885 items the live model actually
+     * knows about. There is currently no automated check keeping this constant in sync with
+     * {@code best.json} - update it by hand on every checkpoint deploy (see that field's own
+     * javadoc for why it's hardcoded rather than read at runtime).
      */
     private JButton buildSeedWatchlistButton() {
         JButton button = new JButton("Seed watchlist from trained items");
@@ -492,15 +507,16 @@ public class PPOFlipperStarPanel extends PluginPanel {
         button.setFocusPainted(false);
         button.setAlignmentX(Component.CENTER_ALIGNMENT);
         button.setToolTipText("Adds every item the current deployed model checkpoint was trained on to your " +
-            "watchlist (up to ~300 items) - the model can only autonomously act on watchlisted items, so this " +
-            "widens its universe. Manual add/remove via right-click still works on top of this.");
+            "watchlist - the model can only autonomously act on watchlisted items, so this widens its universe " +
+            "to match what the deployed checkpoint actually knows about. Manual add/remove via right-click still " +
+            "works on top of this.");
         button.addActionListener(e -> onSeedWatchlistClicked(button));
         return button;
     }
 
     private void onSeedWatchlistClicked(JButton button) {
         int confirm = JOptionPane.showConfirmDialog(this,
-            "This will add up to 300 items to your watchlist. Continue?",
+            "This will add every item the current deployed model checkpoint was trained on to your watchlist. Continue?",
             "Seed watchlist from trained items", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (confirm != JOptionPane.YES_OPTION) return;
 
