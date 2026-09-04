@@ -154,9 +154,84 @@ function Get-JdkMajorVersion($javaHomePath) {
     return [int]$parts[0]
 }
 
-function Get-CompatibleJavaHome {
-    $CacheDir = Join-Path $env:USERPROFILE "microbot-client\jdk-17"
+function Get-PortableJdk([int]$MajorVersion) {
+    # Downloads and caches a portable Eclipse Temurin JDK of the exact requested major version
+    # into %USERPROFILE%\microbot-client\jdk-<MajorVersion>, independent of whatever Gradle's own
+    # toolchain support did or didn't provision - this repo's build.gradle DOES declare the
+    # foojay-resolver-convention plugin (auto-download should be on), and build.gradle DOES target
+    # JDK 11 specifically, but a real run still left %USERPROFILE%\.gradle\jdks completely empty
+    # after a successful build - root cause not conclusively pinned down (a GRADLE_USER_HOME
+    # override, an auto-download setting, or something else entirely), so rather than keep
+    # debugging Gradle's own toolchain resolution on a machine this can't directly inspect, this
+    # function is a self-contained fallback this script fully controls end to end.
+    $CacheDir = Join-Path $env:USERPROFILE "microbot-client\jdk-$MajorVersion"
+    if (Test-Path $CacheDir) {
+        $existingMajor = Get-JdkMajorVersion $CacheDir
+        if ($existingMajor -eq $MajorVersion) {
+            Write-Step "Using previously-downloaded portable JDK $MajorVersion at $CacheDir"
+            return $CacheDir
+        }
+        Write-Warn2 "A previous download exists at $CacheDir but reports major version $existingMajor, not $MajorVersion - removing it and re-downloading."
+        Remove-Item -Recurse -Force $CacheDir -ErrorAction SilentlyContinue
+    }
 
+    Write-Step "Downloading a portable JDK $MajorVersion (Eclipse Temurin)"
+    $TmpZip = Join-Path $env:TEMP "temurin$MajorVersion-windows-x64.zip"
+    if (Test-Path $TmpZip) { Remove-Item -Force $TmpZip -ErrorAction SilentlyContinue }
+    # Eclipse Temurin's own API resolves "latest" within a feature version - pinning only the
+    # major version so this doesn't need updating by hand as patch releases come out. Confirmed
+    # live (2026-09-04) for major version 17: resolves to a ~190MB
+    # OpenJDK17U-jdk_x64_windows_hotspot_<version>.zip via a 307 redirect to GitHub releases,
+    # whose single top-level directory is named "jdk-<version>" (e.g. "jdk-17.0.20.1+1") - the
+    # same shape is expected for other major versions.
+    $DownloadUrl = "https://api.adoptium.net/v3/binary/latest/$MajorVersion/ga/windows/x64/jdk/hotspot/normal/eclipse"
+    Write-Host "    downloading from $DownloadUrl (this is a real JDK, 150-200MB - can take a few minutes)"
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpZip -UseBasicParsing
+    $zipSizeMb = [math]::Round((Get-Item $TmpZip).Length / 1MB, 1)
+    Write-Host "    downloaded $zipSizeMb MB"
+    if ($zipSizeMb -lt 50) {
+        Write-Error "Downloaded file is only $zipSizeMb MB - too small to be a real JDK zip (expected 150-200MB). The download likely failed or returned an error page instead of the archive (does JDK $MajorVersion exist as a Temurin GA release?). Check $TmpZip manually."
+    }
+
+    $ExtractTmp = Join-Path $env:TEMP "temurin$MajorVersion-extract"
+    if (Test-Path $ExtractTmp) { Remove-Item -Recurse -Force $ExtractTmp }
+    New-Item -ItemType Directory -Force -Path $ExtractTmp | Out-Null
+    Write-Host "    extracting to $ExtractTmp"
+    Expand-Archive -Path $TmpZip -DestinationPath $ExtractTmp -Force
+
+    $ExtractedDirs = Get-ChildItem -Path $ExtractTmp -Directory
+    Write-Host "    top-level entries after extraction: $($ExtractedDirs.Name -join ', ')"
+    if ($ExtractedDirs.Count -eq 0) {
+        Write-Error "Extracted $TmpZip but found no top-level directory inside $ExtractTmp - the zip's layout may have changed. Check it manually."
+    }
+    $ExtractedRoot = $ExtractedDirs | Select-Object -First 1
+    Write-Host "    using extracted root: $($ExtractedRoot.FullName)"
+
+    New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+    # Robocopy, not Copy-Item: a JDK is thousands of small files, and Copy-Item -Recurse on
+    # Windows has known cases of returning before every file handle is actually released,
+    # especially over a slow/virus-scanned disk - which would make the very next
+    # Get-JdkMajorVersion call race against a still-finishing copy. Robocopy blocks until
+    # genuinely done. /E copies subdirectories including empty ones; /NFL /NDL /NJH /NJS quiet
+    # its normally-very-verbose per-file output.
+    Write-Host "    copying into $CacheDir (robocopy, this can take a minute for a full JDK)"
+    robocopy $ExtractedRoot.FullName $CacheDir /E /NFL /NDL /NJH /NJS | Out-Null
+    # Robocopy's exit codes are a bitmask where 0-7 all mean success (some combination of
+    # "files copied"/"extra files"/"mismatched") - only 8+ is a real failure, unlike every other
+    # Windows CLI tool's plain 0-success convention.
+    if ($LASTEXITCODE -ge 8) {
+        Write-Error "robocopy failed copying $($ExtractedRoot.FullName) to $CacheDir (exit code $LASTEXITCODE)."
+    }
+    Remove-Item -Recurse -Force $ExtractTmp, $TmpZip -ErrorAction SilentlyContinue
+
+    $finalMajor = Get-JdkMajorVersion $CacheDir
+    if ($finalMajor -ne $MajorVersion) {
+        Write-Error "Downloaded and extracted a JDK to $CacheDir but its major version reads as $finalMajor, not the requested $MajorVersion - inspect $CacheDir\release manually."
+    }
+    return $CacheDir
+}
+
+function Get-CompatibleJavaHome {
     if ($env:JAVA_HOME) {
         if (Test-GradleCompatibleJdk $env:JAVA_HOME) {
             return $env:JAVA_HOME
@@ -175,67 +250,8 @@ function Get-CompatibleJavaHome {
         Write-Host "    no 'java' found on PATH"
     }
 
-    if (Test-Path $CacheDir) {
-        if (Test-GradleCompatibleJdk $CacheDir) {
-            Write-Step "Using previously-downloaded portable JDK 17 at $CacheDir"
-            return $CacheDir
-        }
-        Write-Warn2 "A previous download exists at $CacheDir but failed the compatibility check above - removing it and re-downloading."
-        Remove-Item -Recurse -Force $CacheDir -ErrorAction SilentlyContinue
-    }
-
-    Write-Step "No Gradle-compatible JDK found (need JDK 8-20 to run Gradle's own launcher) - downloading a portable JDK 17"
-    $TmpZip = Join-Path $env:TEMP "temurin17-windows-x64.zip"
-    if (Test-Path $TmpZip) { Remove-Item -Force $TmpZip -ErrorAction SilentlyContinue }
-    # Eclipse Temurin's own API resolves "latest" within a feature version - pinning the major
-    # version (17) rather than an exact patch release so this doesn't need updating by hand.
-    # Confirmed live (2026-09-04): resolves to a ~190MB
-    # OpenJDK17U-jdk_x64_windows_hotspot_<version>.zip via a 307 redirect to GitHub releases,
-    # whose single top-level directory is named "jdk-<version>" (e.g. "jdk-17.0.20.1+1").
-    $DownloadUrl = "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jdk/hotspot/normal/eclipse"
-    Write-Host "    downloading from $DownloadUrl (this is a real JDK, ~190MB - can take a few minutes)"
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpZip -UseBasicParsing
-    $zipSizeMb = [math]::Round((Get-Item $TmpZip).Length / 1MB, 1)
-    Write-Host "    downloaded $zipSizeMb MB"
-    if ($zipSizeMb -lt 50) {
-        Write-Error "Downloaded file is only $zipSizeMb MB - too small to be a real JDK zip (expected ~190MB). The download likely failed or returned an error page instead of the archive. Check $TmpZip manually."
-    }
-
-    $ExtractTmp = Join-Path $env:TEMP "temurin17-extract"
-    if (Test-Path $ExtractTmp) { Remove-Item -Recurse -Force $ExtractTmp }
-    New-Item -ItemType Directory -Force -Path $ExtractTmp | Out-Null
-    Write-Host "    extracting to $ExtractTmp"
-    Expand-Archive -Path $TmpZip -DestinationPath $ExtractTmp -Force
-
-    $ExtractedDirs = Get-ChildItem -Path $ExtractTmp -Directory
-    Write-Host "    top-level entries after extraction: $($ExtractedDirs.Name -join ', ')"
-    if ($ExtractedDirs.Count -eq 0) {
-        Write-Error "Extracted $TmpZip but found no top-level directory inside $ExtractTmp - the zip's layout may have changed. Check it manually."
-    }
-    $ExtractedRoot = $ExtractedDirs | Select-Object -First 1
-    Write-Host "    using extracted root: $($ExtractedRoot.FullName)"
-
-    New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
-    # Robocopy, not Copy-Item: a JDK is thousands of small files, and Copy-Item -Recurse on
-    # Windows has known cases of returning before every file handle is actually released,
-    # especially over a slow/virus-scanned disk - which would make the very next
-    # Test-GradleCompatibleJdk call race against a still-finishing copy. Robocopy blocks until
-    # genuinely done. /E copies subdirectories including empty ones; /NFL /NDL /NJH /NJS quiet
-    # its normally-very-verbose per-file output.
-    Write-Host "    copying into $CacheDir (robocopy, this can take a minute for a full JDK)"
-    robocopy $ExtractedRoot.FullName $CacheDir /E /NFL /NDL /NJH /NJS | Out-Null
-    # Robocopy's exit codes are a bitmask where 0-7 all mean success (some combination of
-    # "files copied"/"extra files"/"mismatched") - only 8+ is a real failure, unlike every other
-    # Windows CLI tool's plain 0-success convention.
-    if ($LASTEXITCODE -ge 8) {
-        Write-Error "robocopy failed copying $($ExtractedRoot.FullName) to $CacheDir (exit code $LASTEXITCODE)."
-    }
-    Remove-Item -Recurse -Force $ExtractTmp, $TmpZip -ErrorAction SilentlyContinue
-
-    if (-not (Test-GradleCompatibleJdk $CacheDir)) {
-        Write-Error "Downloaded and extracted a JDK to $CacheDir but it still isn't recognized as Gradle-compatible - see the diagnostic lines above for exactly why, or inspect $CacheDir\release manually."
-    }
-    return $CacheDir
+    Write-Step "No Gradle-compatible JDK found (need JDK 8-20 to run Gradle's own launcher)"
+    return Get-PortableJdk 17
 }
 
 # ---------------------------------------------------------------------------
@@ -319,15 +335,15 @@ if (-not $SkipClient) {
     # Get-CompatibleJavaHome above) specifically wants JDK 11, matching launch.sh's own
     # `"$JAVA_BIN" -version 2>&1 | grep -q '"11'` check on macOS/Linux.
     #
-    # This previously searched %USERPROFILE%\.gradle\jdks for a folder name containing "jdk-11" -
-    # that pattern can never match: Gradle's real toolchain cache folder naming (confirmed against
-    # DefaultJdkCacheDirectory.java in Gradle's own source) is
-    # "<vendor>-<majorVersion>-<arch>-<os>.2", e.g. "temurin-11-x86_64-windows.2" - no "jdk-"
-    # substring anywhere in it. That guaranteed this fallback always failed on a real machine,
-    # even right after a build that had genuinely just provisioned a real JDK 11 (this repo's
-    # build.gradle targets JDK 11 specifically - see targetJdkVersion in build.gradle - so a
-    # successful build always means one exists in that cache by the time we get here). Confirmed
-    # live: a user hit exactly this after a successful build with only JDK 25 on PATH.
+    # Deliberately does NOT rely on Gradle's own toolchain cache (%USERPROFILE%\.gradle\jdks) even
+    # though build.gradle targets JDK 11 and should provision one there via the declared
+    # foojay-resolver-convention plugin - confirmed live that a real successful build still left
+    # that directory completely empty (root cause not conclusively pinned down: possibly a
+    # GRADLE_USER_HOME override, an auto-download setting, or something else specific to that
+    # machine). Rather than keep debugging Gradle's own toolchain resolution on a machine this
+    # can't directly inspect, this uses Get-PortableJdk (the same self-contained
+    # download-and-cache mechanism already built for the Gradle-launcher JDK) as a fallback this
+    # script fully controls end to end, independent of whatever Gradle itself did or didn't do.
     $JavaBin = $null
 
     $systemJava = Get-Command java -ErrorAction SilentlyContinue
@@ -340,28 +356,8 @@ if (-not $SkipClient) {
     }
 
     if (-not $JavaBin) {
-        $GradleJdksDir = Join-Path $env:USERPROFILE ".gradle\jdks"
-        if (Test-Path $GradleJdksDir) {
-            # Each toolchain JDK is one level down from jdks\ itself (jdks\<vendor-ver-arch-os.2>\),
-            # so check every immediate subdirectory as its own candidate JAVA_HOME rather than
-            # pattern-matching names that don't encode "jdk-<N>" the way this used to assume.
-            $candidates = Get-ChildItem -Path $GradleJdksDir -Directory -ErrorAction SilentlyContinue
-            Write-Host "    checking $($candidates.Count) cached toolchain JDK(s) under $GradleJdksDir"
-            foreach ($candidate in $candidates) {
-                $major = Get-JdkMajorVersion $candidate.FullName
-                Write-Host "        $($candidate.Name) -> major version $major"
-                if ($major -eq 11) {
-                    $JavaBin = Join-Path $candidate.FullName "bin\java.exe"
-                    break
-                }
-            }
-        } else {
-            Write-Host "    $GradleJdksDir does not exist"
-        }
-    }
-
-    if (-not $JavaBin) {
-        Write-Error "No JDK 11 found on PATH or under %USERPROFILE%\.gradle\jdks (see the diagnostic lines above for what was actually checked). The build above should have provisioned one via Gradle's toolchain support since build.gradle targets JDK 11 - if it's genuinely missing, run '.\gradlew.bat build' again and watch for a 'Downloading toolchain' message."
+        $PortableJdk11Home = Get-PortableJdk 11
+        $JavaBin = Join-Path $PortableJdk11Home "bin\java.exe"
     }
 
     Write-Host "    using java: $JavaBin"
