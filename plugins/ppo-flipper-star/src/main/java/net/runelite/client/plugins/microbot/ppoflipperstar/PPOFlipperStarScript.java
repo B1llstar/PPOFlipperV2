@@ -1229,7 +1229,18 @@ public class PPOFlipperStarScript extends Script {
                 Rs2Inventory.waitForInventoryChanges(5000);
             }
         } else {
-            int have = Rs2Inventory.itemQuantity(orderAwaitingFunds.getItemName());
+            // Same class of bug already fixed in hasFundsOrItems (see its own javadoc): a raw
+            // Rs2Inventory.itemQuantity(name) call doesn't reliably count a noted stack the same
+            // way InventoryManager.getQuantity does. Real incident: Sapphire ring (commonly held
+            // noted) was withdrawn here, then hasFundsOrItems' own (already-fixed) check
+            // immediately afterward still reported it short - the two calls were using different
+            // counting logic, so "correct per this line" and "correct per hasFundsOrItems" could
+            // disagree on the exact same inventory state. Using the same InventoryManager path
+            // here as hasFundsOrItems guarantees both agree.
+            int itemId = orderAwaitingFunds.getItemId();
+            int have = itemId > 0
+                ? inventoryManager.getQuantity(itemId)
+                : inventoryManager.getQuantity(orderAwaitingFunds.getItemName());
             int needed = orderAwaitingFunds.getQuantity() - have;
             if (needed > 0) {
                 withdrawPreferringNotes(orderAwaitingFunds.getItemId(), orderAwaitingFunds.getItemName(), needed);
