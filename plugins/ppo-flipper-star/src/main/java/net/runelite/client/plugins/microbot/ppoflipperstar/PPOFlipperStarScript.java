@@ -1066,8 +1066,32 @@ public class PPOFlipperStarScript extends Script {
                 continue;
             }
 
+            // Sell whatever's actually held rather than outright rejecting, when the model wants
+            // more than is genuinely available but SOME is - a real ask: previously a SELL for
+            // more than held was rejected in full by Guardrails ("exceeds what's held"), even when
+            // held quantity was, say, 40 out of a requested 48 - a perfectly good partial sale that
+            // still clears the same per-unit profit bar the full quantity would have. Per-unit
+            // margin (see applyMinSellMargin) is quantity-independent - both cost basis and sale
+            // proceeds scale linearly with quantity, so a price that clears the configured margin
+            // for the full requested quantity clears it identically for a smaller one. This is
+            // therefore a pure quantity clamp, not a re-validation: only ever reduces quantity
+            // downward to what's held, never touches price, and only when held is genuinely
+            // nonzero (a held quantity of 0 is a real "can't do this at all" case, still left to
+            // the normal Guardrails rejection path below, not something to clamp around).
+            int sellQuantity = decision.getQuantity();
+            if (decision.getGeAction() == GrandExchangeAction.SELL) {
+                int held = decision.getItemId() > 0
+                    ? inventoryManager.getQuantity(decision.getItemId())
+                    : inventoryManager.getQuantity(decision.getItemName());
+                if (held > 0 && held < sellQuantity) {
+                    log.info("PPOFlipperStar: clamping autonomous SELL for {} from {} to held quantity {} rather than rejecting outright.",
+                        decision.getItemName(), sellQuantity, held);
+                    sellQuantity = held;
+                }
+            }
+
             PPOFlipperOrder candidate = new PPOFlipperOrder(decision.getGeAction(), decision.getItemId(),
-                decision.getItemName(), decision.getQuantity(), decision.getPrice());
+                decision.getItemName(), sellQuantity, decision.getPrice());
 
             // Speculatively checked here, BEFORE queuing, rather than letting submitNextOrder's
             // own Guardrails.check() reject it later - a real incident: without this, the same
