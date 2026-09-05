@@ -160,12 +160,13 @@ public class PPOFlipperStarScript extends Script {
     private final AtomicInteger consecutiveDecideTimeouts = new AtomicInteger(0);
 
     private final DecideDiagnosticsLog diagnosticsLog;
+    private final InventoryManager inventoryManager;
 
     @Inject
     public PPOFlipperStarScript(OrderQueue queue, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
                                  GoldManager goldManager, PPOFlipperStarFirestoreSync firestoreSync,
                                  DecisionEngine decisionEngine, DecisionSuggestions decisionSuggestions,
-                                 DecideDiagnosticsLog diagnosticsLog) {
+                                 DecideDiagnosticsLog diagnosticsLog, InventoryManager inventoryManager) {
         this.queue = queue;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
@@ -174,6 +175,7 @@ public class PPOFlipperStarScript extends Script {
         this.decisionEngine = decisionEngine;
         this.decisionSuggestions = decisionSuggestions;
         this.diagnosticsLog = diagnosticsLog;
+        this.inventoryManager = inventoryManager;
     }
 
     public boolean run(PPOFlipperStarConfig config) {
@@ -1452,6 +1454,17 @@ public class PPOFlipperStarScript extends Script {
         if (order.getAction() == GrandExchangeAction.BUY) {
             return Rs2Inventory.itemQuantity(ItemID.COINS) >= order.totalValue();
         }
+        // Real incident: Rs2Inventory.itemQuantity(int) matches on the item's exact, as-held id -
+        // for an item currently held as a NOTED stack, that id is the noted variant's own id, not
+        // the unnoted id order.getItemId() carries (every id this plugin deals with is unnoted -
+        // see InventoryManager's class javadoc). A held noted stack of Grapes/Ruby amulet/etc. was
+        // confirmed live to read back as 0 via the raw Rs2Inventory call despite being genuinely
+        // visible and sufficient in the inventory, permanently stuck in the "still short
+        // funds/items after a bank visit" skip path (a bank visit can never fix a false negative
+        // that isn't actually about quantity at all). InventoryManager.getQuantity already
+        // resolves this exact case correctly (see its own canonicalItemId javadoc for why NOT to
+        // trust Rs2ItemModel.getUnNotedId() here) - use it instead of the raw Rs2Inventory call.
+        //
         // Prefer the id-based overload when available - sidesteps the same wiki "(item)"
         // disambiguation-suffix mismatch stripWikiDisambiguationSuffix exists for (see its
         // javadoc): an id lookup can never suffer a name-format mismatch at all. Only falls back
@@ -1459,9 +1472,9 @@ public class PPOFlipperStarScript extends Script {
         // happen for a normal model-originated order but is possible for one reconstructed from
         // persisted/legacy state that predates itemId being tracked.
         if (order.getItemId() > 0) {
-            return Rs2Inventory.itemQuantity(order.getItemId()) >= order.getQuantity();
+            return inventoryManager.getQuantity(order.getItemId()) >= order.getQuantity();
         }
-        return Rs2Inventory.itemQuantity(stripWikiDisambiguationSuffix(order.getItemName())) >= order.getQuantity();
+        return inventoryManager.getQuantity(stripWikiDisambiguationSuffix(order.getItemName())) >= order.getQuantity();
     }
 
     private void monitorOffers() {
