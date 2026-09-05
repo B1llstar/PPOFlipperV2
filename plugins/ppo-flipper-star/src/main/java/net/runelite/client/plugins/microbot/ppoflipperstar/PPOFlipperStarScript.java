@@ -180,7 +180,7 @@ public class PPOFlipperStarScript extends Script {
 
     public boolean run(PPOFlipperStarConfig config) {
         this.config = config;
-        this.guardrails = new Guardrails(config, portfolio, buyLimitLedger, queue, decisionEngine);
+        this.guardrails = new Guardrails(config, portfolio, buyLimitLedger, queue, decisionEngine, inventoryManager);
         this.guardrails.reset();
         this.state = State.GOING_TO_GE;
         this.activeOrders.clear();
@@ -755,10 +755,13 @@ public class PPOFlipperStarScript extends Script {
             // for an item genuinely sitting in inventory right now, never something the watchlist
             // happens to include for unrelated reasons (a bulk "seed from trained items" action,
             // or auto-added holdings from a time before this mode was turned on). Checked directly
-            // against Rs2Inventory (a live, authoritative read), not the watchlist or the request's
-            // heldQuantity field - belt-and-suspenders against either of those drifting.
+            // against InventoryManager (a live, authoritative, noted-stack-aware read - see its
+            // canonicalItemId javadoc for why NOT the raw Rs2Inventory.hasItem(int) this used to
+            // call, which - same class of bug as several other real incidents this session -
+            // cannot be trusted to recognize a noted stack by its unnoted id), not the watchlist
+            // or the request's heldQuantity field - belt-and-suspenders against either drifting.
             .filter(d -> !inventoryOnlyMode || d.getGeAction() != GrandExchangeAction.SELL
-                || Rs2Inventory.hasItem(d.getItemId()))
+                || inventoryManager.getQuantity(d.getItemId()) > 0)
             .collect(Collectors.toList());
 
         if (configSnapshot.stalePositionAutoSellEnabled()) {
@@ -1025,9 +1028,13 @@ public class PPOFlipperStarScript extends Script {
             // quieter skip so autonomous BUYs doomed to fail don't consume a queue-depth-cap slot
             // or log a rejection line every tick while inventory stays full.
             if (decision.getGeAction() == GrandExchangeAction.BUY) {
+                // InventoryManager, not raw Rs2Inventory.hasItem - see the inventoryOnlyMode SELL
+                // filter's comment above for why the raw call can't be trusted to recognize a
+                // noted stack by its unnoted id (same class of bug as several other real
+                // incidents this session).
                 boolean alreadyStacking = decision.getItemId() > 0
-                    ? Rs2Inventory.hasItem(decision.getItemId())
-                    : Rs2Inventory.hasItem(decision.getItemName());
+                    ? inventoryManager.getQuantity(decision.getItemId()) > 0
+                    : inventoryManager.getQuantity(decision.getItemName()) > 0;
                 if (!alreadyStacking && Rs2Inventory.isFull()) {
                     log.debug("PPOFlipperStar: holding off on autonomous {} - inventory is full and {} isn't already held.",
                         decision, decision.getItemName());
@@ -1229,13 +1236,15 @@ public class PPOFlipperStarScript extends Script {
                 Rs2Inventory.waitForInventoryChanges(5000);
             }
         } else {
-            // Same class of bug already fixed in hasFundsOrItems (see its own javadoc): a raw
-            // Rs2Inventory.itemQuantity(name) call doesn't reliably count a noted stack the same
-            // way InventoryManager.getQuantity does. Real incident: Sapphire ring (commonly held
-            // noted) was withdrawn here, then hasFundsOrItems' own (already-fixed) check
-            // immediately afterward still reported it short - the two calls were using different
-            // counting logic, so "correct per this line" and "correct per hasFundsOrItems" could
-            // disagree on the exact same inventory state. Using the same InventoryManager path
+            // Uses the same InventoryManager.getQuantity path hasFundsOrItems already uses (see
+            // its own javadoc) rather than the raw Rs2Inventory.itemQuantity(name) this used to
+            // call - real incident: Sapphire ring (commonly held noted) was withdrawn here, then
+            // hasFundsOrItems' check immediately afterward still reported it short. The raw NAME
+            // lookup itself sums noted+unnoted correctly (see withdrawPreferringNotes' own
+            // javadoc, bytecode-verified), but hasFundsOrItems' fix went through the ID-based
+            // InventoryManager path, not the name-based one - two different lookups against the
+            // same real state could still disagree on an edge case even with both individually
+            // "correct" in isolation. Using the identical call here as hasFundsOrItems guarantees
             // here as hasFundsOrItems guarantees both agree.
             int itemId = orderAwaitingFunds.getItemId();
             int have = itemId > 0

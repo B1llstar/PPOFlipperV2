@@ -24,18 +24,20 @@ public class Guardrails {
     private final BuyLimitLedger buyLimitLedger;
     private final OrderQueue queue;
     private final DecisionEngine decisionEngine;
+    private final InventoryManager inventoryManager;
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
 
     @Getter
     private long gpSpentThisSession = 0;
 
     public Guardrails(PPOFlipperStarConfig config, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
-                       OrderQueue queue, DecisionEngine decisionEngine) {
+                       OrderQueue queue, DecisionEngine decisionEngine, InventoryManager inventoryManager) {
         this.config = config;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
         this.queue = queue;
         this.decisionEngine = decisionEngine;
+        this.inventoryManager = inventoryManager;
     }
 
     public void reset() {
@@ -221,7 +223,16 @@ public class Guardrails {
      */
     private String checkInventorySpace(PPOFlipperOrder order) {
         int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
-        boolean alreadyStacking = itemId > 0 ? Rs2Inventory.hasItem(itemId) : Rs2Inventory.hasItem(order.getItemName());
+        // InventoryManager, not raw Rs2Inventory.hasItem - the same class of bug fixed several
+        // times over in PPOFlipperStarScript this session: a raw Rs2Inventory id/name lookup
+        // cannot be trusted to recognize a noted stack by its unnoted id (see
+        // InventoryManager.canonicalItemId's javadoc). This is the actual enforcement backstop
+        // for the full-inventory BUY guardrail, so a wrong answer here means a legitimate
+        // top-up BUY of an already-noted-held item gets wrongly rejected as "inventory full"
+        // even though topping up an existing stack needs no new slot at all.
+        boolean alreadyStacking = itemId > 0
+            ? inventoryManager.getQuantity(itemId) > 0
+            : inventoryManager.getQuantity(order.getItemName()) > 0;
         if (!alreadyStacking && Rs2Inventory.isFull()) {
             return String.format(
                 "inventory is full - no free slot for a new BUY of %s (not already held)",
