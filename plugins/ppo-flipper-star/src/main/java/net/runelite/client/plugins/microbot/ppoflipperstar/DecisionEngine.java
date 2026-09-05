@@ -89,7 +89,7 @@ public class DecisionEngine {
     // javadoc for why. Keyed by itemId.
     private final Map<Integer, ItemMappingData> itemMappingCache = new ConcurrentHashMap<>();
     private static final String ITEM_MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping";
-    private static final String ITEM_MAPPING_USER_AGENT = "OSRS-GE-Trading-Client/1.0 (contact: via GitHub)";
+    private static final String ITEM_MAPPING_USER_AGENT = "PPOFlipperStar-RuneLite-Plugin/1.0 (contact: rumblingitscoming1@gmail.com)";
     private static final long ITEM_MAPPING_CACHE_TTL_MILLIS = 30L * 60 * 1000;
     // HTTP_1_1 forced explicitly - see WikiPriceClient.HTTP_CLIENT's javadoc for the real
     // incident this addresses (Cloudflare, which fronts the wiki's API, flagging Java's default

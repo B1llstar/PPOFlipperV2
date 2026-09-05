@@ -87,7 +87,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class WikiHistoryBuffer {
 
     private static final String FIVE_MIN_URL = "https://prices.runescape.wiki/api/v1/osrs/5m?timestamp=%d";
-    private static final String USER_AGENT = "OSRS-GE-Trading-Client/1.0 (contact: via GitHub)";
+    private static final String USER_AGENT = "PPOFlipperStar-RuneLite-Plugin/1.0 (contact: rumblingitscoming1@gmail.com)";
     private static final long FIVE_MINUTES_SECONDS = 300;
 
     // 288 five-minute blocks = 24h, the largest rolling window features.py computes. Older

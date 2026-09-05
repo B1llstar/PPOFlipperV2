@@ -53,25 +53,31 @@ public class WikiPriceClient {
     // response (confirmed live: a plain curl against this URL returns the full dataset). See
     // refreshAllPrices()'s javadoc for why this exists.
     private static final String LATEST_URL_ALL = "https://prices.runescape.wiki/api/v1/osrs/latest";
-    // Deliberately generic, no personal/project-identifying terms - just enough to be a real
-    // contact-identifying agent per the wiki's own request (see
-    // https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices), without any obligation to
-    // name this specific tool.
+    // Identifies this tool and a real, monitorable contact address per the wiki's own request
+    // (see https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices) - a real incident is why
+    // this carries a genuine contact rather than a vague placeholder: the previous string
+    // ("OSRS-GE-Trading-Client/1.0 (contact: via GitHub)") ended up specifically, individually
+    // blocked server-side (confirmed live via plain curl from an unrelated machine/network - a
+    // generic/made-up User-Agent got 200, this exact string got 403) with no way to know why or
+    // reach anyone about it. Most likely self-inflicted by the duplicate-header bug below before
+    // it was fixed - repeated requests that looked like they came from two different clients
+    // (this custom string AND java.net.http's own default) is exactly the kind of odd traffic
+    // pattern the wiki's policy says can trigger a manual block. A real contact means the wiki
+    // team (or anyone) can actually reach out if this client's traffic ever needs adjusting,
+    // rather than a second silent, unrecoverable block down the line.
     //
-    // Set via HttpRequest.Builder.setHeader(), NEVER .header() - a real incident, and the actual
-    // wiki policy this matters for: that same page explicitly pre-emptively blocks any request
-    // whose User-Agent is a raw "Java/{version}" string (among other default HTTP-library
-    // signatures like python-requests/curl/Apache-HttpClient). JDK-8203771 documents that
-    // HttpRequest.Builder.header() APPENDS rather than replaces, so a request built with
-    // .header("User-Agent", ...) can carry BOTH java.net.http's own default "Java/<version>"
-    // header AND this custom one - which of the two a server honors on a duplicate header is
-    // server/version-dependent, so this could work under one JDK build and silently start getting
-    // pre-emptively blocked under another with zero code change, exactly what was seen live
-    // (worked initially on a fresh JDK 11 install on Windows, then started 403ing) - a browser
-    // from the same machine/IP was unaffected throughout, ruling out a network/IP-level cause.
+    // Set via HttpRequest.Builder.setHeader(), NEVER .header() - JDK-8203771 documents that
+    // .header() APPENDS rather than replaces, so a request built with .header("User-Agent", ...)
+    // can carry BOTH java.net.http's own default "Java/<version>" header (which the wiki's policy
+    // explicitly pre-emptively blocks, among other default HTTP-library signatures like
+    // python-requests/curl/Apache-HttpClient) AND this custom one - which of the two a server
+    // honors on a duplicate header is server/JDK-version-dependent, so this could work under one
+    // JDK build and silently start getting blocked under another with zero code change (confirmed
+    // live: worked initially on a fresh JDK 11 install on Windows, then started 403ing, while a
+    // browser from the same machine/IP was unaffected throughout - ruling out a network/IP cause).
     // setHeader() explicitly clears any prior value for the key first, guaranteeing only the
     // intended value is ever sent.
-    private static final String USER_AGENT = "OSRS-GE-Trading-Client/1.0 (contact: via GitHub)";
+    private static final String USER_AGENT = "PPOFlipperStar-RuneLite-Plugin/1.0 (contact: rumblingitscoming1@gmail.com)";
     private static final long CACHE_TTL_MILLIS = 30_000;
 
     // HTTP_1_1 forced explicitly, not left at HttpClient's default (which attempts HTTP/2 first) -
