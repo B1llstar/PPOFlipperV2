@@ -2,7 +2,9 @@ package net.runelite.client.plugins.microbot.ppoflipperstar;
 
 import com.google.inject.Provides;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.GameState;
 import net.runelite.api.MenuEntry;
+import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.client.config.ConfigManager;
@@ -85,6 +87,9 @@ public class PPOFlipperStarPlugin extends Plugin {
 
     @Inject
     private WikiHistoryBuffer wikiHistoryBuffer;
+
+    @Inject
+    private DecideDiagnosticsLog diagnosticsLog;
 
     private PPOFlipperStarPanel panel;
     private NavigationButton navButton;
@@ -209,6 +214,39 @@ public class PPOFlipperStarPlugin extends Plugin {
     @Subscribe
     public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event) {
         script.onOfferChanged(event);
+    }
+
+    /**
+     * Records a snapshot of what this script was doing the moment the client genuinely loses its
+     * connection - a real, recurring question this exists to answer: "why did I get
+     * disconnected?" A disconnect is often blamed on this plugin (an autonomous bot doing
+     * something that trips a server-side check), but with no record of the script's own state at
+     * that exact moment, there was previously no way to confirm or rule that out after the fact -
+     * only RuneLite's own generic reconnect-attempt logging in {@code client.log}, with nothing
+     * PPOFlipperStar-specific to correlate against.
+     *
+     * <p>Deliberately keyed on {@link GameState#CONNECTION_LOST} specifically, not
+     * {@code LOGIN_SCREEN} or {@code HOPPING} - those two are ordinary, expected transitions (a
+     * deliberate logout, a deliberate world hop) that happen constantly during normal play and
+     * would make this log pure noise if included. {@code CONNECTION_LOST} is RuneLite's own
+     * distinct signal for a genuine, unexpected drop, never fired for an intentional
+     * logout/hop.
+     *
+     * <p>Writes to the same {@code ppoflipperstar-decide.log} the rest of this plugin's
+     * observability already lives in (see {@link DecideDiagnosticsLog}'s own javadoc for why a
+     * separate, focused file exists at all) rather than a new file - one place to look, not two.
+     */
+    @Subscribe
+    public void onGameStateChanged(GameStateChanged event) {
+        if (event.getGameState() != GameState.CONNECTION_LOST) {
+            return;
+        }
+        diagnosticsLog.logNote(String.format(
+            "DISCONNECT (CONNECTION_LOST) - scriptState=%s activeOffers=%d gpSpentThisSession=%d " +
+                "queuedOrders=%d msSinceLastDecideTick=%d autonomousModeEnabled=%s sellOffModeEnabled=%s",
+            script.getState(), script.getActiveOfferCount(), script.getGpSpentThisSession(),
+            queue.countByStatus(PPOFlipperOrder.Status.QUEUED), script.millisSinceLastDecideTickCompleted(),
+            config.autonomousModeEnabled(), config.sellOffModeEnabled()));
     }
 
     /**
