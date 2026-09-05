@@ -1035,8 +1035,22 @@ public class PPOFlipperStarScript extends Script {
                 }
             }
 
+            // Matches by item NAME, not just id, as well - a real, suspected incident: an order
+            // "adopted" from an already-live GE offer with no prior tracked order (see
+            // reconcileSubmittedOrders' javadoc) resolves its itemId via
+            // Rs2ItemManager.getItemIdByName on the live offer's own item name, a completely
+            // separate resolution path from decision.getItemId() (which comes from the wiki's
+            // mapping data via DecisionEngine). If those two ever disagree on the exact id for the
+            // same real item, this id-only check silently fails to recognize the adopted order as
+            // "already pending," letting a fresh autonomous SELL for the same item get queued
+            // right alongside it - which then finds the item's real stock already fully committed
+            // to the adopted order's live offer and gets rejected as "exceeds what's held (0)",
+            // even though the item is genuinely, currently held (just already spoken for).
+            // Matching on name too closes that gap regardless of which id-resolution path (if
+            // either) is actually at fault.
             boolean alreadyPending = queue.getAll().stream()
-                .anyMatch(o -> o.getItemId() == decision.getItemId()
+                .anyMatch(o -> (o.getItemId() == decision.getItemId()
+                        || (o.getItemName() != null && o.getItemName().equalsIgnoreCase(decision.getItemName())))
                     && o.getAction() == decision.getGeAction()
                     && (o.getStatus() == PPOFlipperOrder.Status.QUEUED || o.getStatus() == PPOFlipperOrder.Status.SUBMITTED));
             if (alreadyPending) {
