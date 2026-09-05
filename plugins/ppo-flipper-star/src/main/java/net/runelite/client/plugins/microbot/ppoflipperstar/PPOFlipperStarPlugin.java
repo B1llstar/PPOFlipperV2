@@ -94,6 +94,12 @@ public class PPOFlipperStarPlugin extends Plugin {
     private PPOFlipperStarPanel panel;
     private NavigationButton navButton;
 
+    // Tracks the last known LOGGED_IN/LOGIN_SCREEN transition - see onGameStateChanged's javadoc
+    // for why this is needed on top of the CONNECTION_LOST check (a client can drop straight to
+    // LOGIN_SCREEN with no CONNECTION_LOST event at all in some disconnect scenarios). Same
+    // pattern already used by the sibling nmz-debug plugin's NmzDebugPlugin.
+    private boolean wasLoggedIn = false;
+
     @Provides
     PPOFlipperStarConfig provideConfig(ConfigManager configManager) {
         return configManager.getConfig(PPOFlipperStarConfig.class);
@@ -225,12 +231,21 @@ public class PPOFlipperStarPlugin extends Plugin {
      * only RuneLite's own generic reconnect-attempt logging in {@code client.log}, with nothing
      * PPOFlipperStar-specific to correlate against.
      *
-     * <p>Deliberately keyed on {@link GameState#CONNECTION_LOST} specifically, not
-     * {@code LOGIN_SCREEN} or {@code HOPPING} - those two are ordinary, expected transitions (a
-     * deliberate logout, a deliberate world hop) that happen constantly during normal play and
-     * would make this log pure noise if included. {@code CONNECTION_LOST} is RuneLite's own
-     * distinct signal for a genuine, unexpected drop, never fired for an intentional
-     * logout/hop.
+     * <p>Two distinct triggers, both logged the same way - same pattern already used by the
+     * sibling {@code nmz-debug} plugin's {@code NmzDebugPlugin}:
+     * <ul>
+     *   <li>{@link GameState#CONNECTION_LOST} - RuneLite's own distinct signal for a genuine,
+     *   unexpected drop, never fired for an intentional logout/hop.</li>
+     *   <li>A transition to {@code LOGIN_SCREEN} while {@link #wasLoggedIn} is still true - some
+     *   disconnect scenarios drop the client straight to the login screen with no
+     *   {@code CONNECTION_LOST} event ever firing at all, which would otherwise go completely
+     *   unlogged. Only fires when the PREVIOUS state was genuinely {@code LOGGED_IN}, so an
+     *   ordinary startup or a deliberate logout (which also passes through {@code LOGIN_SCREEN})
+     *   is never mistaken for a disconnect.</li>
+     * </ul>
+     * Deliberately does NOT key on {@code HOPPING} - that is an ordinary, deliberate world-hop
+     * transition that happens constantly during normal play and would make this log pure noise
+     * if included.
      *
      * <p>Writes to the same {@code ppoflipperstar-decide.log} the rest of this plugin's
      * observability already lives in (see {@link DecideDiagnosticsLog}'s own javadoc for why a
@@ -238,13 +253,25 @@ public class PPOFlipperStarPlugin extends Plugin {
      */
     @Subscribe
     public void onGameStateChanged(GameStateChanged event) {
-        if (event.getGameState() != GameState.CONNECTION_LOST) {
-            return;
+        GameState state = event.getGameState();
+        if (state == GameState.CONNECTION_LOST) {
+            logDisconnectSnapshot("CONNECTION_LOST");
+        } else if (state == GameState.LOGIN_SCREEN && wasLoggedIn) {
+            logDisconnectSnapshot("LOGIN_SCREEN (dropped from LOGGED_IN, no CONNECTION_LOST event fired)");
         }
+
+        if (state == GameState.LOGGED_IN) {
+            wasLoggedIn = true;
+        } else if (state == GameState.LOGIN_SCREEN) {
+            wasLoggedIn = false;
+        }
+    }
+
+    private void logDisconnectSnapshot(String reason) {
         diagnosticsLog.logNote(String.format(
-            "DISCONNECT (CONNECTION_LOST) - scriptState=%s activeOffers=%d gpSpentThisSession=%d " +
+            "DISCONNECT (%s) - scriptState=%s activeOffers=%d gpSpentThisSession=%d " +
                 "queuedOrders=%d msSinceLastDecideTick=%d autonomousModeEnabled=%s sellOffModeEnabled=%s",
-            script.getState(), script.getActiveOfferCount(), script.getGpSpentThisSession(),
+            reason, script.getState(), script.getActiveOfferCount(), script.getGpSpentThisSession(),
             queue.countByStatus(PPOFlipperOrder.Status.QUEUED), script.millisSinceLastDecideTickCompleted(),
             config.autonomousModeEnabled(), config.sellOffModeEnabled()));
     }
