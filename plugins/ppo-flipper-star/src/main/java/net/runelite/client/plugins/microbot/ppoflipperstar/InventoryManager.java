@@ -78,17 +78,31 @@ public class InventoryManager {
         }
         int resolvedId = Rs2ItemManager.getItemIdByName(item.getName(), true);
         int result = resolvedId > 0 ? resolvedId : item.getId();
-        // Debug-only: this is the exact resolution step a real, still-unexplained incident keeps
-        // pointing back to (a noted stack's real held quantity not being found by the id the rest
-        // of the plugin - the wiki mapping, DecisionEngine, order.getItemId() - uses for the same
-        // real item). If getItemIdByName ever returns the NOTED item's own id back (rather than
-        // genuinely resolving to the unnoted id), or some other id entirely, this line is the only
-        // place that would be visible - enable debug logging for this class specifically to
-        // capture it live the next time a "still short"/"exceeds what's held" report recurs for a
-        // known-noted item.
-        if (log.isDebugEnabled()) {
-            log.debug("PPOFlipperStar: canonicalItemId - noted item rawId={} name=\"{}\" -> resolvedId={} (used={})",
-                item.getId(), item.getName(), resolvedId, result);
+        // Logged at WARN, always on (no logger config needed), ONLY on the two failure cases - this
+        // is the exact resolution step a real, still-unexplained incident keeps pointing back to
+        // (a noted stack's real held quantity not being found by the id the rest of the plugin -
+        // the wiki mapping, DecisionEngine, order.getItemId() - uses for the same real item).
+        // Two distinct ways this can go wrong, both worth flagging separately:
+        //   1. getItemIdByName finds nothing at all (resolvedId <= 0) - falls back to the raw
+        //      noted id unchanged, an obviously-wrong id for anything expecting the unnoted one.
+        //   2. getItemIdByName "succeeds" but returns the SAME id as the raw noted item
+        //      (resolvedId == item.getId()) - a silent, more insidious failure: looks like a
+        //      normal resolved id, but is actually still the noted variant's own id, not the true
+        //      unnoted one. This is the shape a caller keying off the wiki's unnoted id (which is
+        //      never the noted id) would see as "not found" with no obvious error anywhere.
+        // Deliberately silent on genuine success (called on every inventory snapshot, for every
+        // noted stack held - logging every call, not just failures, would flood client.log for no
+        // benefit once this is confirmed working).
+        if (resolvedId <= 0) {
+            log.warn("PPOFlipperStar: canonicalItemId - noted item \"{}\" (rawId={}) - getItemIdByName found NO " +
+                "unnoted id at all, falling back to the raw noted id unchanged - this item's held quantity will " +
+                "be invisible to anything keyed by its real unnoted id.",
+                item.getName(), item.getId());
+        } else if (resolvedId == item.getId()) {
+            log.warn("PPOFlipperStar: canonicalItemId - noted item \"{}\" (rawId={}) - getItemIdByName resolved " +
+                "back to the SAME id as the raw noted item, not a different unnoted id - resolution likely did " +
+                "NOT actually find the true unnoted id, even though it didn't fail outright.",
+                item.getName(), item.getId());
         }
         return result;
     }
@@ -119,12 +133,13 @@ public class InventoryManager {
     public int getQuantity(int itemId) {
         Map<Integer, Integer> snapshot = snapshotByItemId();
         int result = snapshot.getOrDefault(itemId, 0);
-        // Debug-only: pairs with canonicalItemId's own debug line - if a caller queries an id
-        // that genuinely isn't in the snapshot at all (result 0) while the snapshot DOES contain
-        // some other id for what's actually the same real item, that's the exact live evidence
-        // needed to pin down a still-unexplained noted-item mismatch report.
-        if (log.isDebugEnabled() && result == 0 && !snapshot.isEmpty()) {
-            log.debug("PPOFlipperStar: getQuantity({}) -> 0, but snapshot has these ids/qty: {}", itemId, snapshot);
+        // Logged at INFO, always on - pairs with canonicalItemId's own logging above: if a caller
+        // queries an id that genuinely isn't in the snapshot at all (result 0) while the inventory
+        // is NOT actually empty, that's the exact live evidence needed to pin down a still-
+        // unexplained noted-item mismatch report - shows up in client.log automatically, no logger
+        // config needed to see it.
+        if (result == 0 && !snapshot.isEmpty()) {
+            log.info("PPOFlipperStar: getQuantity({}) -> 0, but inventory snapshot has these ids/qty: {}", itemId, snapshot);
         }
         return result;
     }
