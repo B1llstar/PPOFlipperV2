@@ -1242,6 +1242,28 @@ public class PPOFlipperStarScript extends Script {
         Rs2Bank.setWithdrawAsItem();
     }
 
+    /**
+     * Strips a trailing " (item)" disambiguation suffix the OSRS Wiki adds to an item's name when
+     * it collides with an NPC's name (e.g. "Snowy knight (item)" - "Snowy knight" is also an NPC).
+     * Confirmed live: the GE's own search does NOT recognize that suffixed form at all - only the
+     * plain name resolves - so a name sourced from the wiki's mapping data (which is what
+     * {@code order.getItemName()} always is, via {@link DecisionEngine#getItemName}) fails to find
+     * the item in the GE search box if used verbatim for the actual in-game interaction. Confirmed
+     * via the wiki's own {@code /mapping} data: 9 known items currently carry this suffix (Snowy
+     * knight, Black warlock, Sunlight/Moonlight moth, Sapphire glacialis, Ruby harvest, Shantay
+     * pass, Swamp toad, Poison), all NPC/item name collisions the wiki disambiguates the same way.
+     *
+     * <p>Deliberately scoped to ONLY the GE-search call sites (buyItem/sellItem/findSlotForItem in
+     * {@link #submitNextOrder}), not applied at the source in {@link PPOFlipperOrder#getItemName}
+     * itself - the wiki's full "(item)" name is still the correct, canonical form for pricing
+     * lookups, Firestore trade history, and display, where it causes no problem and stripping it
+     * would just lose real information for no benefit.
+     */
+    private static String stripWikiDisambiguationSuffix(String itemName) {
+        if (itemName == null) return null;
+        return itemName.replaceAll("(?i)\\s*\\(item\\)$", "");
+    }
+
     private void submitNextOrder() {
         // Holds submission (retried next tick, not a terminal state) while the startup Firestore
         // reconcile is still in flight - see PPOFlipperStarFirestoreSync.reconcilePending's
@@ -1303,16 +1325,17 @@ public class PPOFlipperStarScript extends Script {
         // each other - buyItem(name, price, quantity) but sellItem(name, quantity, price). Do
         // not "fix" this to look symmetric without re-verifying against the client jar - it
         // really is asymmetric (confirmed against microbot-2.6.21.jar's own method signatures).
+        String geSearchName = stripWikiDisambiguationSuffix(order.getItemName());
         GrandExchangeSlots slotBefore = Rs2GrandExchange.getAvailableSlot();
         boolean submitted = order.getAction() == GrandExchangeAction.BUY
-            ? Rs2GrandExchange.buyItem(order.getItemName(), submitPrice, order.getQuantity())
-            : Rs2GrandExchange.sellItem(order.getItemName(), order.getQuantity(), submitPrice);
+            ? Rs2GrandExchange.buyItem(geSearchName, submitPrice, order.getQuantity())
+            : Rs2GrandExchange.sellItem(geSearchName, order.getQuantity(), submitPrice);
 
         if (submitted) {
             if (order.getAction() == GrandExchangeAction.BUY) {
                 guardrails.recordSpend((long) submitPrice * order.getQuantity());
             }
-            GrandExchangeSlots slot = slotBefore != null ? slotBefore : Rs2GrandExchange.findSlotForItem(order.getItemName(), order.getAction() == GrandExchangeAction.BUY);
+            GrandExchangeSlots slot = slotBefore != null ? slotBefore : Rs2GrandExchange.findSlotForItem(geSearchName, order.getAction() == GrandExchangeAction.BUY);
             order.setSlot(slot);
             order.setSubmittedPrice(submitPrice);
             order.setStatus(PPOFlipperOrder.Status.SUBMITTED);
@@ -1429,7 +1452,16 @@ public class PPOFlipperStarScript extends Script {
         if (order.getAction() == GrandExchangeAction.BUY) {
             return Rs2Inventory.itemQuantity(ItemID.COINS) >= order.totalValue();
         }
-        return Rs2Inventory.itemQuantity(order.getItemName()) >= order.getQuantity();
+        // Prefer the id-based overload when available - sidesteps the same wiki "(item)"
+        // disambiguation-suffix mismatch stripWikiDisambiguationSuffix exists for (see its
+        // javadoc): an id lookup can never suffer a name-format mismatch at all. Only falls back
+        // to a (suffix-stripped) name lookup for an order with no resolved id, which shouldn't
+        // happen for a normal model-originated order but is possible for one reconstructed from
+        // persisted/legacy state that predates itemId being tracked.
+        if (order.getItemId() > 0) {
+            return Rs2Inventory.itemQuantity(order.getItemId()) >= order.getQuantity();
+        }
+        return Rs2Inventory.itemQuantity(stripWikiDisambiguationSuffix(order.getItemName())) >= order.getQuantity();
     }
 
     private void monitorOffers() {
