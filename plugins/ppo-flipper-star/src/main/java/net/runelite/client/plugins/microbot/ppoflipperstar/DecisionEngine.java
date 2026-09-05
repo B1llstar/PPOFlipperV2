@@ -91,8 +91,13 @@ public class DecisionEngine {
     private static final String ITEM_MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping";
     private static final String ITEM_MAPPING_USER_AGENT = "OSRS-GE-Trading-Client/1.0 (contact: via GitHub)";
     private static final long ITEM_MAPPING_CACHE_TTL_MILLIS = 30L * 60 * 1000;
+    // HTTP_1_1 forced explicitly - see WikiPriceClient.HTTP_CLIENT's javadoc for the real
+    // incident this addresses (Cloudflare, which fronts the wiki's API, flagging Java's default
+    // HTTP/2 TLS/ALPN fingerprint as non-browser and returning 403 on some machines/JDKs but not
+    // others, even with an identical User-Agent).
     private static final HttpClient ITEM_MAPPING_HTTP_CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
+        .version(HttpClient.Version.HTTP_1_1)
         .build();
     private volatile long lastItemMappingBulkFetchAtMillis = 0;
 

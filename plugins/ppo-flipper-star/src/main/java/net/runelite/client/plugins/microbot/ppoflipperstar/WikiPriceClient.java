@@ -60,8 +60,18 @@ public class WikiPriceClient {
     private static final String USER_AGENT = "OSRS-GE-Trading-Client/1.0 (contact: via GitHub)";
     private static final long CACHE_TTL_MILLIS = 30_000;
 
+    // HTTP_1_1 forced explicitly, not left at HttpClient's default (which attempts HTTP/2 first) -
+    // a real incident on Windows: identical requests (same URL, same User-Agent) succeeded from a
+    // browser but got 403 from this client specifically. Cloudflare (which fronts the wiki's API)
+    // is known to be more aggressive about flagging HTTP/2 connections with a non-browser
+    // TLS/ALPN fingerprint than plain HTTP/1.1 ones - the exact fingerprint Java's HttpClient
+    // presents can differ by JDK vendor/build, so this could pass on one machine's JDK and fail on
+    // another's without any code difference at all. Forcing HTTP/1.1 sidesteps that fingerprinting
+    // surface entirely; the wiki's API has no meaningful throughput need for HTTP/2's multiplexing
+    // anyway (one small JSON response per call, no concurrent same-host requests worth pipelining).
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(5))
+        .version(HttpClient.Version.HTTP_1_1)
         .build();
 
     // Shared by every WikiPriceClient instance (each caller - the script, Guardrails,

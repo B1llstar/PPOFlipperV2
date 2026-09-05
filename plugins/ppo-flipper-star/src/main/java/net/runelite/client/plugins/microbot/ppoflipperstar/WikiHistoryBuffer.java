@@ -106,8 +106,13 @@ public class WikiHistoryBuffer {
     // had a Firestore copy; a brand-new item just seeds from Firestore on first need regardless.
     private static final long FIRESTORE_PUSH_INTERVAL_MINUTES = 10;
 
+    // HTTP_1_1 forced explicitly - see WikiPriceClient.HTTP_CLIENT's javadoc for the real
+    // incident this addresses (Cloudflare, which fronts the wiki's API, flagging Java's default
+    // HTTP/2 TLS/ALPN fingerprint as non-browser and returning 403 on some machines/JDKs but not
+    // others, even with an identical User-Agent).
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
+        .version(HttpClient.Version.HTTP_1_1)
         .build();
 
     /** One 5-minute candle, matching fetch_5m_history.py's fetch_block row shape exactly. Plain fields (no lombok) so Gson's default reflective (de)serialization round-trips it directly, same convention as PPOFlipperOrder - see OrderQueue's persistence javadoc for why that's safe for a final-field class with no no-args constructor. */
