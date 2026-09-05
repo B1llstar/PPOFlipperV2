@@ -90,7 +90,15 @@ public class DecisionEngine {
     private final Map<Integer, ItemMappingData> itemMappingCache = new ConcurrentHashMap<>();
     private static final String ITEM_MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping";
     private static final String ITEM_MAPPING_USER_AGENT = "PPOFlipperStar-RuneLite-Plugin/1.0 (contact: rumblingitscoming1@gmail.com)";
-    private static final long ITEM_MAPPING_CACHE_TTL_MILLIS = 30L * 60 * 1000;
+    // Widened from 30 minutes to 4 hours - a defensive request-volume pass (see this codebase's
+    // history of wiki User-Agent/rate-limit incidents) confirmed no structural inefficiency
+    // remains in how this plugin calls the wiki API, but this was the one genuinely safe further
+    // reduction available: mapping data (names/buy limits/values) changes "at most a few times a
+    // year" per this method's own javadoc below, so even 4 hours is still far more frequent than
+    // it needs to be for correctness - this purely cuts one more wiki request per tick-cycle for
+    // zero real freshness cost, unlike the price refresh's 30s TTL, which directly feeds trading
+    // decisions and would lose real decision quality if widened the same way.
+    private static final long ITEM_MAPPING_CACHE_TTL_MILLIS = 4L * 60 * 60 * 1000;
     // HTTP_1_1 forced explicitly - see WikiPriceClient.HTTP_CLIENT's javadoc for the real
     // incident this addresses (Cloudflare, which fronts the wiki's API, flagging Java's default
     // HTTP/2 TLS/ALPN fingerprint as non-browser and returning 403 on some machines/JDKs but not
