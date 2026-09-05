@@ -7,7 +7,6 @@ import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioMa
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
-import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 /**
  * Guardrail checks applied to a {@link PPOFlipperOrder} before it's ever submitted to the GE -
@@ -25,19 +24,22 @@ public class Guardrails {
     private final OrderQueue queue;
     private final DecisionEngine decisionEngine;
     private final InventoryManager inventoryManager;
+    private final ItemNameResolver itemNameResolver;
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
 
     @Getter
     private long gpSpentThisSession = 0;
 
     public Guardrails(PPOFlipperStarConfig config, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
-                       OrderQueue queue, DecisionEngine decisionEngine, InventoryManager inventoryManager) {
+                       OrderQueue queue, DecisionEngine decisionEngine, InventoryManager inventoryManager,
+                       ItemNameResolver itemNameResolver) {
         this.config = config;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
         this.queue = queue;
         this.decisionEngine = decisionEngine;
         this.inventoryManager = inventoryManager;
+        this.itemNameResolver = itemNameResolver;
     }
 
     public void reset() {
@@ -189,7 +191,7 @@ public class Guardrails {
      * here closes the one remaining call site still bypassing that fix.
      */
     private String checkBuyLimit(PPOFlipperOrder order) {
-        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
+        int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         if (itemId <= 0) {
             return null;
         }
@@ -222,7 +224,7 @@ public class Guardrails {
      * one, so it applies the same regardless of that setting.
      */
     private String checkInventorySpace(PPOFlipperOrder order) {
-        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
+        int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         // InventoryManager, not raw Rs2Inventory.hasItem - the same class of bug fixed several
         // times over in PPOFlipperStarScript this session: a raw Rs2Inventory id/name lookup
         // cannot be trusted to recognize a noted stack by its unnoted id (see
@@ -265,7 +267,7 @@ public class Guardrails {
     }
 
     private String checkPriceDeviation(PPOFlipperOrder order, int maxDeviationPercent) {
-        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
+        int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         if (itemId <= 0) {
             // Can't resolve the item to check its guide price - let the GE search itself be the
             // source of truth for whether the name is valid, don't block on this.

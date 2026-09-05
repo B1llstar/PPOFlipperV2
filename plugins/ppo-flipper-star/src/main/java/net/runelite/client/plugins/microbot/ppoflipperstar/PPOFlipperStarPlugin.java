@@ -91,6 +91,9 @@ public class PPOFlipperStarPlugin extends Plugin {
     @Inject
     private DecideDiagnosticsLog diagnosticsLog;
 
+    @Inject
+    private ItemNameResolver itemNameResolver;
+
     private PPOFlipperStarPanel panel;
     private NavigationButton navButton;
 
@@ -172,7 +175,7 @@ public class PPOFlipperStarPlugin extends Plugin {
     }
 
     private void addPanel() {
-        panel = new PPOFlipperStarPanel(this, script, queue, portfolio, goldManager, watchlistManager, decisionSuggestions, firestoreSync);
+        panel = new PPOFlipperStarPanel(this, script, queue, portfolio, goldManager, watchlistManager, decisionSuggestions, firestoreSync, itemNameResolver);
 
         // Reuse the client's own Grand Exchange icon (bundled in the client jar) instead of
         // shipping a duplicate image asset.

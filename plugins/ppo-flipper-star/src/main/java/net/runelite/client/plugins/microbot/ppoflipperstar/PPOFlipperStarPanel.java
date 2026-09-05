@@ -69,6 +69,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
     private final WatchlistManager watchlistManager;
     private final DecisionSuggestions decisionSuggestions;
     private final PPOFlipperStarFirestoreSync firestoreSync;
+    private final ItemNameResolver itemNameResolver;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
 
     private JButton executeButton;
@@ -109,7 +110,8 @@ public class PPOFlipperStarPanel extends PluginPanel {
     @Inject
     public PPOFlipperStarPanel(PPOFlipperStarPlugin plugin, PPOFlipperStarScript script, OrderQueue queue,
                                 PortfolioManager portfolio, GoldManager goldManager, WatchlistManager watchlistManager,
-                                DecisionSuggestions decisionSuggestions, PPOFlipperStarFirestoreSync firestoreSync) {
+                                DecisionSuggestions decisionSuggestions, PPOFlipperStarFirestoreSync firestoreSync,
+                                ItemNameResolver itemNameResolver) {
         super();
         this.plugin = plugin;
         this.script = script;
@@ -119,6 +121,7 @@ public class PPOFlipperStarPanel extends PluginPanel {
         this.watchlistManager = watchlistManager;
         this.decisionSuggestions = decisionSuggestions;
         this.firestoreSync = firestoreSync;
+        this.itemNameResolver = itemNameResolver;
 
         setBorder(new EmptyBorder(10, 10, 10, 10));
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
@@ -609,14 +612,17 @@ public class PPOFlipperStarPanel extends PluginPanel {
             return;
         }
 
-        // Rs2ItemManager.getItemId(String) does a plain substring search with no exact-match
-        // filter - a real bug found live: typing "Pie dish" silently resolved to "Unfired pie
-        // dish" (id 1789) instead of the real "Pie dish" (id 2313), since the latter's name
-        // contains the former as a substring and happened to win the underlying map's iteration
-        // order. getItemIdByName(name, true) does an equalsIgnoreCase pass (and checks held
-        // inventory/bank items by exact name first) instead of taking whatever substring match
-        // comes first.
-        int itemId = Rs2ItemManager.getItemIdByName(name, true);
+        // ItemNameResolver, not Rs2ItemManager.getItemId(String)/getItemIdByName(String, boolean) -
+        // getItemId does a plain substring search with no exact-match filter (a real bug found
+        // live: typing "Pie dish" silently resolved to "Unfired pie dish", id 1789, instead of the
+        // real "Pie dish", id 2313, since the latter's name contains the former as a substring).
+        // getItemIdByName fixed THAT bug (an equalsIgnoreCase pass) but is itself confirmed broken
+        // for a different reason - see ItemNameResolver's own javadoc: it checks live bank/
+        // inventory state first and returns whichever held item's raw id it finds, so typing the
+        // name of an item you currently hold NOTED would silently add an order keyed by the noted
+        // id, not the true unnoted id every other part of this plugin expects. ItemNameResolver's
+        // exact match against the wiki's static mapping data has neither problem.
+        int itemId = itemNameResolver.resolveId(name);
         queue.add(new PPOFlipperOrder(action, itemId, name, quantity, price));
         itemNameField.setText("");
     }

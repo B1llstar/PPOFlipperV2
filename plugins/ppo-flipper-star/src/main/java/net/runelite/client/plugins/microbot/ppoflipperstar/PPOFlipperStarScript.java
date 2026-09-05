@@ -21,7 +21,6 @@ import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.grandexchange.models.GrandExchangeOfferDetails;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
-import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Inject;
 import java.util.ArrayList;
@@ -161,12 +160,14 @@ public class PPOFlipperStarScript extends Script {
 
     private final DecideDiagnosticsLog diagnosticsLog;
     private final InventoryManager inventoryManager;
+    private final ItemNameResolver itemNameResolver;
 
     @Inject
     public PPOFlipperStarScript(OrderQueue queue, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
                                  GoldManager goldManager, PPOFlipperStarFirestoreSync firestoreSync,
                                  DecisionEngine decisionEngine, DecisionSuggestions decisionSuggestions,
-                                 DecideDiagnosticsLog diagnosticsLog, InventoryManager inventoryManager) {
+                                 DecideDiagnosticsLog diagnosticsLog, InventoryManager inventoryManager,
+                                 ItemNameResolver itemNameResolver) {
         this.queue = queue;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
@@ -176,11 +177,12 @@ public class PPOFlipperStarScript extends Script {
         this.decisionSuggestions = decisionSuggestions;
         this.diagnosticsLog = diagnosticsLog;
         this.inventoryManager = inventoryManager;
+        this.itemNameResolver = itemNameResolver;
     }
 
     public boolean run(PPOFlipperStarConfig config) {
         this.config = config;
-        this.guardrails = new Guardrails(config, portfolio, buyLimitLedger, queue, decisionEngine, inventoryManager);
+        this.guardrails = new Guardrails(config, portfolio, buyLimitLedger, queue, decisionEngine, inventoryManager, itemNameResolver);
         this.guardrails.reset();
         this.state = State.GOING_TO_GE;
         this.activeOrders.clear();
@@ -310,11 +312,20 @@ public class PPOFlipperStarScript extends Script {
                 activeOrders.put(slot, match);
                 log.info("PPOFlipperStar: reconciled SUBMITTED order {} to live slot {}", match, slot);
             } else {
-                // getItemIdByName(name, true) does an exact (equalsIgnoreCase) match, unlike
-                // getItemId(String)'s plain substring search - see PPOFlipperStarPanel's
-                // onAddOrderClicked javadoc for the real "Pie dish" vs "Unfired pie dish" bug this
-                // avoids.
-                int itemId = Rs2ItemManager.getItemIdByName(details.getItemName(), true);
+                // ItemNameResolver, not Rs2ItemManager.getItemIdByName - the latter is confirmed
+                // NOT a real name-to-id lookup (checks live bank/inventory state first, returning
+                // whichever held item's raw id it finds - see ItemNameResolver's own javadoc for
+                // the full incident). This exact call site is suspected as the real mechanism
+                // behind an earlier incident (item-id mismatch between an "adopted" order and a
+                // freshly-proposed one for the same real item, defeating the autonomousSubmit
+                // dedup check - see that method's own "Matches by item NAME, not just id" comment)
+                // - an adopted SELL's item may no longer be held anywhere by the time this runs
+                // (it's already committed to the live offer being adopted), which is exactly the
+                // "not held, fall through to a live composition/price-index search" case
+                // getItemIdByName's own live-state-first logic could resolve inconsistently
+                // depending on what else is held. ItemNameResolver's exact match against the
+                // wiki's static mapping data has no such dependency.
+                int itemId = itemNameResolver.resolveId(details.getItemName());
                 PPOFlipperOrder adopted = new PPOFlipperOrder(liveAction, itemId, details.getItemName(), details.getTotalQuantity(), details.getPrice());
                 adopted.setSlot(slot);
                 adopted.setStatus(PPOFlipperOrder.Status.SUBMITTED);
@@ -1420,7 +1431,7 @@ public class PPOFlipperStarScript extends Script {
      * price unchanged rather than blocking submission on a missing lookup.
      */
     private int clampToLivePrice(PPOFlipperOrder order) {
-        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
+        int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         if (itemId <= 0) return order.getPrice();
 
         WikiPriceClient.Price price = wikiPriceClient.getLatestPrice(itemId);
@@ -1478,7 +1489,7 @@ public class PPOFlipperStarScript extends Script {
         double marginPercent = config.minSellProfitMarginPercent();
         if (marginPercent <= 0) return candidatePrice;
 
-        int itemId = order.getItemId() > 0 ? order.getItemId() : Rs2ItemManager.getItemIdByName(order.getItemName(), true);
+        int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         int averageCost = itemId > 0 ? portfolio.getAverageCost(itemId) : 0;
         if (averageCost <= 0) return candidatePrice;
 

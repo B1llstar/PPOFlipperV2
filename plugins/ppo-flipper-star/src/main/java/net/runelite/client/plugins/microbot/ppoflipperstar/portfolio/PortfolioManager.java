@@ -8,6 +8,7 @@ import net.runelite.api.ItemComposition;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.microbot.ppoflipperstar.BankManager;
 import net.runelite.client.plugins.microbot.ppoflipperstar.InventoryManager;
+import net.runelite.client.plugins.microbot.ppoflipperstar.ItemNameResolver;
 import net.runelite.client.plugins.microbot.ppoflipperstar.PPOFlipperStarConfig;
 import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreClient;
 import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
@@ -64,6 +65,7 @@ public class PortfolioManager {
     private final BankManager bankManager;
     private final PPOFlipperStarConfig config;
     private final PPOFlipperStarFirestoreSync firestoreSync;
+    private final ItemNameResolver itemNameResolver;
     private final Rs2ItemManager itemManager = new Rs2ItemManager();
     private final Gson gson = new Gson();
 
@@ -72,12 +74,13 @@ public class PortfolioManager {
     @Inject
     public PortfolioManager(ConfigManager configManager, InventoryManager inventoryManager,
                              BankManager bankManager, PPOFlipperStarConfig config,
-                             PPOFlipperStarFirestoreSync firestoreSync) {
+                             PPOFlipperStarFirestoreSync firestoreSync, ItemNameResolver itemNameResolver) {
         this.configManager = configManager;
         this.inventoryManager = inventoryManager;
         this.bankManager = bankManager;
         this.config = config;
         this.firestoreSync = firestoreSync;
+        this.itemNameResolver = itemNameResolver;
         this.ledger = loadLedger();
     }
 
@@ -194,16 +197,23 @@ public class PortfolioManager {
     }
 
     /**
-     * Deliberately uses {@link Rs2ItemManager#getItemIdByName(String, boolean)} (exact,
-     * case-insensitive match), NOT {@code Rs2ItemManager#getItemId(String)} - the latter is a
-     * plain substring search with no exact-match filter, confirmed live to silently resolve
-     * "Pie dish" to "Unfired pie dish" (a real, differently-priced item whose name happens to
-     * contain the query as a substring) instead of the real "Pie dish". {@link Guardrails}'s
-     * sell-quantity-exceeds-held check calls this exact method, so that bug meant a real,
-     * confirmed-in-bank item read back as 0 held and had every SELL for it rejected.
+     * Uses {@link ItemNameResolver}, NOT {@code Rs2ItemManager.getItemIdByName(String, boolean)} -
+     * that method was tried here first and confirmed broken via bytecode decompilation: it checks
+     * {@code Rs2Bank.hasBankItem(name)} then {@code Rs2Inventory.hasItem(name)} first, returning
+     * whichever LIVE-HELD item's raw id it finds, before ever attempting a genuine name-to-id
+     * database lookup. For a NOTED item genuinely held (the exact case this method needs to
+     * resolve correctly), that live-state check fires first and hands back the noted item's own
+     * raw id, not the true unnoted id {@link #getHeldQuantity(int)} is keyed by - a real, confirmed
+     * incident (Mystic water staff, held noted, read back as 0 held and had its SELL rejected with
+     * "exceeds what's held (0)" despite being genuinely, visibly held). See
+     * {@link InventoryManager#canonicalItemId}'s javadoc for the full incident history, including
+     * an earlier substring-search bug ({@code Rs2ItemManager#getItemId(String)} silently resolving
+     * "Pie dish" to "Unfired pie dish") this same exact-match requirement was originally added to
+     * avoid - {@link ItemNameResolver} preserves that same exact, case-insensitive match semantics
+     * while fixing the live-state problem.
      */
     public int getHeldQuantity(String itemName) {
-        int itemId = Rs2ItemManager.getItemIdByName(itemName, true);
+        int itemId = itemNameResolver.resolveId(itemName);
         return itemId > 0 ? getHeldQuantity(itemId) : 0;
     }
 

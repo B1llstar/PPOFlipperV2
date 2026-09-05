@@ -2,8 +2,8 @@ package net.runelite.client.plugins.microbot.ppoflipperstar;
 
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
-import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
+import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.util.HashMap;
 import java.util.List;
@@ -20,16 +20,22 @@ import java.util.Map;
  * implicitly on every read - a read here is deliberately non-blocking and never walks/opens
  * anything itself.
  *
- * <p><b>Noted items are normalized to their unnoted id</b> in {@link #snapshotByItemId()} - see
- * {@link InventoryManager#canonicalItemId}'s javadoc for the full story, including a real,
- * confirmed bug in {@code Rs2ItemModel.getUnNotedId()} itself (it returns the noted id unchanged
- * for a genuinely noted item, not the true unnoted id) and why this resolves via
- * {@link Rs2ItemManager#getItemIdByName(String, boolean)} on the item's name instead. The bank
- * routinely holds noted stock (that's the entire point of noting - compact storage), so this
- * matters here at least as much as it does for inventory.
+ * <p><b>Noted items are normalized to their unnoted id</b> in {@link #snapshotByItemId()} via
+ * {@link ItemNameResolver} - see {@link InventoryManager#canonicalItemId}'s javadoc for the full
+ * incident history (two confirmed-broken prior approaches: {@code Rs2ItemModel.getUnNotedId()},
+ * then {@code Rs2ItemManager.getItemIdByName}, which is NOT a real name-to-id lookup - it checks
+ * live bank/inventory state first). The bank routinely holds noted stock (that's the entire point
+ * of noting - compact storage), so this matters here at least as much as it does for inventory.
  */
 @Singleton
 public class BankManager {
+
+    private final ItemNameResolver itemNameResolver;
+
+    @Inject
+    public BankManager(ItemNameResolver itemNameResolver) {
+        this.itemNameResolver = itemNameResolver;
+    }
 
     public boolean isOpen() {
         return Rs2Bank.isOpen();
@@ -62,7 +68,7 @@ public class BankManager {
         if (!item.isNoted()) {
             return item.getId();
         }
-        int resolvedId = Rs2ItemManager.getItemIdByName(item.getName(), true);
+        int resolvedId = itemNameResolver.resolveId(item.getName());
         return resolvedId > 0 ? resolvedId : item.getId();
     }
 
