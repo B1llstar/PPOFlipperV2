@@ -236,7 +236,7 @@ public class WikiHistoryBuffer {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(String.format(FIVE_MIN_URL, block)))
-                .header("User-Agent", USER_AGENT)
+                .setHeader("User-Agent", USER_AGENT)
                 .timeout(Duration.ofSeconds(10))
                 .GET()
                 .build();

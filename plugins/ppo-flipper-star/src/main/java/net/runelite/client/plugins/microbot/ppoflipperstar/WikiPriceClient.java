@@ -57,6 +57,20 @@ public class WikiPriceClient {
     // contact-identifying agent per the wiki's own request (see
     // https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices), without any obligation to
     // name this specific tool.
+    //
+    // Set via HttpRequest.Builder.setHeader(), NEVER .header() - a real incident, and the actual
+    // wiki policy this matters for: that same page explicitly pre-emptively blocks any request
+    // whose User-Agent is a raw "Java/{version}" string (among other default HTTP-library
+    // signatures like python-requests/curl/Apache-HttpClient). JDK-8203771 documents that
+    // HttpRequest.Builder.header() APPENDS rather than replaces, so a request built with
+    // .header("User-Agent", ...) can carry BOTH java.net.http's own default "Java/<version>"
+    // header AND this custom one - which of the two a server honors on a duplicate header is
+    // server/version-dependent, so this could work under one JDK build and silently start getting
+    // pre-emptively blocked under another with zero code change, exactly what was seen live
+    // (worked initially on a fresh JDK 11 install on Windows, then started 403ing) - a browser
+    // from the same machine/IP was unaffected throughout, ruling out a network/IP-level cause.
+    // setHeader() explicitly clears any prior value for the key first, guaranteeing only the
+    // intended value is ever sent.
     private static final String USER_AGENT = "OSRS-GE-Trading-Client/1.0 (contact: via GitHub)";
     private static final long CACHE_TTL_MILLIS = 30_000;
 
@@ -135,7 +149,7 @@ public class WikiPriceClient {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(LATEST_URL_ALL))
-                .header("User-Agent", USER_AGENT)
+                .setHeader("User-Agent", USER_AGENT)
                 .timeout(Duration.ofSeconds(10))
                 .GET()
                 .build();
@@ -230,7 +244,7 @@ public class WikiPriceClient {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(String.format(LATEST_URL, itemId)))
-                .header("User-Agent", USER_AGENT)
+                .setHeader("User-Agent", USER_AGENT)
                 .timeout(Duration.ofSeconds(5))
                 .GET()
                 .build();

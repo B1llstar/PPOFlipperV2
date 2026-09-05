@@ -133,7 +133,7 @@ public class DecisionEngine {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(ITEM_MAPPING_URL))
-                .header("User-Agent", ITEM_MAPPING_USER_AGENT)
+                .setHeader("User-Agent", ITEM_MAPPING_USER_AGENT)
                 .timeout(Duration.ofSeconds(15))
                 .GET()
                 .build();
