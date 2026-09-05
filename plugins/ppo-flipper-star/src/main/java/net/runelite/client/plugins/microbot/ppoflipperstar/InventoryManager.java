@@ -1,5 +1,6 @@
 package net.runelite.client.plugins.microbot.ppoflipperstar;
 
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
@@ -26,6 +27,7 @@ import java.util.Map;
  * is unnoted - without this, a noted holding is invisible to portfolio/guardrail checks keyed by
  * the unnoted id.
  */
+@Slf4j
 @Singleton
 public class InventoryManager {
 
@@ -75,7 +77,20 @@ public class InventoryManager {
             return item.getId();
         }
         int resolvedId = Rs2ItemManager.getItemIdByName(item.getName(), true);
-        return resolvedId > 0 ? resolvedId : item.getId();
+        int result = resolvedId > 0 ? resolvedId : item.getId();
+        // Debug-only: this is the exact resolution step a real, still-unexplained incident keeps
+        // pointing back to (a noted stack's real held quantity not being found by the id the rest
+        // of the plugin - the wiki mapping, DecisionEngine, order.getItemId() - uses for the same
+        // real item). If getItemIdByName ever returns the NOTED item's own id back (rather than
+        // genuinely resolving to the unnoted id), or some other id entirely, this line is the only
+        // place that would be visible - enable debug logging for this class specifically to
+        // capture it live the next time a "still short"/"exceeds what's held" report recurs for a
+        // known-noted item.
+        if (log.isDebugEnabled()) {
+            log.debug("PPOFlipperStar: canonicalItemId - noted item rawId={} name=\"{}\" -> resolvedId={} (used={})",
+                item.getId(), item.getName(), resolvedId, result);
+        }
+        return result;
     }
 
     public Rs2ItemModel getItemInSlot(int slot) {
@@ -102,7 +117,16 @@ public class InventoryManager {
      * which froze the entire client window while the bank was open.
      */
     public int getQuantity(int itemId) {
-        return snapshotByItemId().getOrDefault(itemId, 0);
+        Map<Integer, Integer> snapshot = snapshotByItemId();
+        int result = snapshot.getOrDefault(itemId, 0);
+        // Debug-only: pairs with canonicalItemId's own debug line - if a caller queries an id
+        // that genuinely isn't in the snapshot at all (result 0) while the snapshot DOES contain
+        // some other id for what's actually the same real item, that's the exact live evidence
+        // needed to pin down a still-unexplained noted-item mismatch report.
+        if (log.isDebugEnabled() && result == 0 && !snapshot.isEmpty()) {
+            log.debug("PPOFlipperStar: getQuantity({}) -> 0, but snapshot has these ids/qty: {}", itemId, snapshot);
+        }
+        return result;
     }
 
     public int getQuantity(String itemName) {
