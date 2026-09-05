@@ -177,6 +177,14 @@ On macOS, both scripts also have Launchpad icons ("BotStar Launcher" and
 "BotStar + FlipperStar") for a one-click launch without opening a terminal
 manually.
 
+**Viewing plugin logs:** `./scripts/show-logs.sh` (macOS/Linux) or
+`.\scripts\show-logs.ps1` (Windows) live-tails PPOFlipperStar's decide log,
+nmz-debug's disconnect log, or RuneLite's shared `client.log` — run with no
+argument for an interactive menu, or pass `ppo`, `nmz`, or `client` directly
+(e.g. `./scripts/show-logs.sh ppo`). Both scripts read from the same
+`~/.runelite`/`%USERPROFILE%\.runelite` layout `launch.sh`/
+`setup-windows.ps1` already use.
+
 ## Adding a new plugin
 
 1. `mkdir -p plugins/<name>/src/main/java/net/runelite/client/plugins/microbot/<name>`
