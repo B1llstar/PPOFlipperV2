@@ -14,6 +14,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Resolves an item's display name to its canonical (unnoted) item id via the OSRS Wiki's static
@@ -70,6 +71,21 @@ public class ItemNameResolver {
 
     private final Map<String, Integer> idByLowercaseName = new ConcurrentHashMap<>();
     private volatile long lastFetchAtMillis = 0;
+    // Real incident this exists to prevent: this class had no in-flight dedup at all (unlike
+    // WikiPriceClient's FETCH_IN_FLIGHT), and is called once per noted item held, from
+    // PPOFlipperStarPanel's once-a-second gold-poll thread on top of every other caller
+    // (InventoryManager/BankManager's own canonicalItemId, Guardrails, PPOFlipperStarScript) - on
+    // a degraded network stretch where the wiki mapping fetch was genuinely slow, this let many
+    // callers pile up simultaneously blocking on independent, duplicate, uncoordinated HTTP
+    // fetches to the exact same endpoint, each holding its own calling thread for up to
+    // FETCH_TIMEOUT's escalated ceiling (45s) - confirmed live: the gold poll (configured to run
+    // every 1s) was observed only actually completing roughly every 10s during an episode where
+    // the whole client eventually froze, alongside unrelated Microbot systems independently timing
+    // out waiting on the client thread. A single AtomicBoolean-guarded in-flight fetch, with every
+    // other concurrent caller just using whatever's already cached (even if stale) rather than
+    // piling on a redundant blocking fetch of their own, turns "N threads each block for up to 45s"
+    // into "one thread blocks, everyone else proceeds immediately with the best data available."
+    private final AtomicBoolean fetchInFlight = new AtomicBoolean(false);
 
     /**
      * The item's true, canonical (unnoted) id for this display name, or -1 if not found (an
@@ -78,16 +94,40 @@ public class ItemNameResolver {
      * unlike {@link WikiPriceClient}'s async-refresh pattern: this is called rarely (only when
      * resolving a noted item's canonical id, not on every tick for every item), so a occasional
      * real network wait here is an acceptable tradeoff against the complexity of an async
-     * cache-miss path for a call site that isn't performance-sensitive.
+     * cache-miss path for a call site that isn't performance-sensitive. Only the FIRST caller to
+     * find the cache stale actually blocks on a refresh - see {@link #fetchInFlight}'s own comment
+     * for the real incident this protects against; every other concurrent caller falls through
+     * immediately to whatever's already cached (stale data, or -1 if the cache has never
+     * successfully warmed at all yet) rather than piling on a redundant fetch of its own.
      */
     public int resolveId(String itemName) {
         if (itemName == null || itemName.isEmpty()) return -1;
         refreshIfStale();
-        return idByLowercaseName.getOrDefault(itemName.toLowerCase(), -1);
+        String normalized = stripKnownDisplaySuffix(itemName).toLowerCase();
+        return idByLowercaseName.getOrDefault(normalized, -1);
+    }
+
+    // Real incident: "Purple robe bottoms (Members)" (a noted stack's raw item name, per
+    // Rs2ItemModel/the game client's own item definition) permanently failed to resolve - the
+    // wiki's mapping data lists this exact item as plain "Purple robe bottoms" (id 2938), with no
+    // "(Members)" suffix at all. Same class of mismatch as
+    // PPOFlipperStarScript#stripWikiDisambiguationSuffix (a GE-search-side name the wiki includes
+    // but the live game doesn't recognize) just in the opposite direction - here it's the live
+    // game's own name carrying a suffix the wiki's canonical mapping data never had in the first
+    // place. Every noted-item resolution goes through this method, so fixing it here (rather than
+    // duplicating a strip at each of InventoryManager/BankManager/Guardrails/etc.'s call sites)
+    // covers all of them at once.
+    private static String stripKnownDisplaySuffix(String itemName) {
+        return itemName.replaceAll("(?i)\\s*\\(members\\)$", "");
     }
 
     private void refreshIfStale() {
         if (System.currentTimeMillis() - lastFetchAtMillis < CACHE_TTL_MILLIS && !idByLowercaseName.isEmpty()) {
+            return;
+        }
+        if (!fetchInFlight.compareAndSet(false, true)) {
+            // Another thread is already refreshing - use whatever's cached right now (possibly
+            // stale, possibly empty) rather than piling on a second concurrent blocking fetch.
             return;
         }
 
@@ -122,6 +162,8 @@ public class ItemNameResolver {
                 FETCH_TIMEOUT.current().getSeconds(), e.getMessage());
         } catch (Exception e) {
             log.warn("PPOFlipperStar: ItemNameResolver bulk mapping fetch failed - {}", e.getMessage());
+        } finally {
+            fetchInFlight.set(false);
         }
     }
 }
