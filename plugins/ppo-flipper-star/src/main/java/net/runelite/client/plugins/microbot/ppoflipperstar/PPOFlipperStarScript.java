@@ -1361,6 +1361,31 @@ public class PPOFlipperStarScript extends Script {
         }
         PPOFlipperOrder order = next.get();
 
+        // Safety-net clamp, right before the guardrail that would otherwise flatly reject this
+        // order: a real incident (Yew longbow (u), genuinely held noted, persistently rejected as
+        // "exceeds what's held (0)" for an entire session, well after the ItemNameResolver fix)
+        // showed that whatever the exact cause of a stale/undercounted held-quantity read, the
+        // right response isn't to throw the whole order away - it's the same "sell what's
+        // genuinely available" reasoning autonomouslySubmit already applies before an order is
+        // ever queued (see its own comment), just re-applied here as a backstop immediately before
+        // submission, since held quantity can legitimately change (or a miscount can surface) in
+        // the time an order sits QUEUED. Only ever shrinks a SELL's quantity down to what
+        // getHeldQuantity actually reports right now, never touches BUY orders or price, and only
+        // when held is genuinely nonzero - a held quantity of 0 is still a real "can't do this at
+        // all" case, left to guardrails.check's normal rejection below.
+        if (order.getAction() == GrandExchangeAction.SELL) {
+            int held = portfolio.getHeldQuantity(order.getItemName());
+            if (held > 0 && held < order.getQuantity()) {
+                log.warn("PPOFlipperStar: clamping queued SELL for {} from {} to held quantity {} " +
+                        "right before submission rather than rejecting outright.",
+                    order.getItemName(), order.getQuantity(), held);
+                PPOFlipperOrder clamped = new PPOFlipperOrder(order.getAction(), order.getItemId(),
+                    order.getItemName(), held, order.getPrice());
+                queue.replace(order.getId(), clamped);
+                order = clamped;
+            }
+        }
+
         String rejection = guardrails.check(order);
         if (rejection != null) {
             log.warn("PPOFlipperStar: rejected order [{}] - {}", order, rejection);

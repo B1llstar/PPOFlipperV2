@@ -87,6 +87,32 @@ public class OrderQueue {
         notifyChanged();
     }
 
+    /**
+     * Swaps the QUEUED order with id {@code orderId} for {@code replacement} at the same position
+     * in the list, or appends {@code replacement} if the original wasn't found (defensive only -
+     * shouldn't happen given the sole call site re-reads the order from this same queue
+     * immediately beforehand). Exists for {@code PPOFlipperStarScript#submitNextOrder}'s SELL-
+     * quantity clamp (see its own comment): {@link PPOFlipperOrder#quantity} is deliberately
+     * immutable (an order's requested size is fixed intent, not a field the script mutates in
+     * place elsewhere), so reducing it requires building a new order and replacing the old one
+     * here rather than a setter.
+     */
+    public void replace(long orderId, PPOFlipperOrder replacement) {
+        int index = -1;
+        for (int i = 0; i < orders.size(); i++) {
+            if (orders.get(i).getId() == orderId) {
+                index = i;
+                break;
+            }
+        }
+        if (index >= 0) {
+            orders.set(index, replacement);
+        } else {
+            orders.add(replacement);
+        }
+        notifyChanged();
+    }
+
     public void clear() {
         orders.clear();
         notifyChanged();
