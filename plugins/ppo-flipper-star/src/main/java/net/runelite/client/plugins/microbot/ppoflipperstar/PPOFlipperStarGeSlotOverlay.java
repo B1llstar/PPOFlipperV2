@@ -1,5 +1,6 @@
 package net.runelite.client.plugins.microbot.ppoflipperstar;
 
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Point;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeSlots;
@@ -34,9 +35,11 @@ import java.util.Map;
  * reads the exact same {@code submittedAtMillis}/{@code staleOfferTimeoutMinutes} inputs and
  * mirrors that same math purely for the label, with zero side effects of its own).
  */
+@Slf4j
 public class PPOFlipperStarGeSlotOverlay extends Overlay {
 
     private static final Font TIMER_FONT = new Font(Font.SANS_SERIF, Font.BOLD, 12);
+    private long lastDiagnosticLogAtMillis = 0;
 
     private final PPOFlipperStarScript script;
     private final PPOFlipperStarConfig config;
@@ -52,14 +55,24 @@ public class PPOFlipperStarGeSlotOverlay extends Overlay {
 
     @Override
     public Dimension render(Graphics2D graphics) {
+        boolean shouldLog = System.currentTimeMillis() - lastDiagnosticLogAtMillis > 5000;
+        if (shouldLog) lastDiagnosticLogAtMillis = System.currentTimeMillis();
+
         int timeoutMinutes = config.staleOfferTimeoutMinutes();
-        if (timeoutMinutes <= 0) return null;
+        if (timeoutMinutes <= 0) {
+            if (shouldLog) log.info("PPOFlipperStar: GeSlotOverlay - staleOfferTimeoutMinutes<=0, not rendering.");
+            return null;
+        }
 
         Map<GrandExchangeSlots, PPOFlipperOrder> activeOrders = script.getActiveOrders();
-        if (activeOrders.isEmpty()) return null;
+        if (activeOrders.isEmpty()) {
+            if (shouldLog) log.info("PPOFlipperStar: GeSlotOverlay - activeOrders is empty, nothing to draw.");
+            return null;
+        }
 
         long timeoutMillis = timeoutMinutes * 60_000L;
         long now = System.currentTimeMillis();
+        int drawn = 0;
 
         for (Map.Entry<GrandExchangeSlots, PPOFlipperOrder> entry : activeOrders.entrySet()) {
             PPOFlipperOrder order = entry.getValue();
@@ -68,10 +81,18 @@ public class PPOFlipperStarGeSlotOverlay extends Overlay {
             // one regardless of age (see its own javadoc: pulling a partial fill would strand the
             // already-filled portion's exit strategy), so a countdown implying it could be pulled
             // would be actively misleading here.
-            if (submittedAt <= 0 || order.getQuantityFilled() > 0) continue;
+            if (submittedAt <= 0 || order.getQuantityFilled() > 0) {
+                if (shouldLog) log.info("PPOFlipperStar: GeSlotOverlay - slot {} skipped (submittedAt={}, filled={})",
+                    entry.getKey(), submittedAt, order.getQuantityFilled());
+                continue;
+            }
 
             Widget slotWidget = Rs2Widget.getWidget(465, 7 + entry.getKey().ordinal());
-            if (slotWidget == null || slotWidget.isHidden()) continue;
+            if (slotWidget == null || slotWidget.isHidden()) {
+                if (shouldLog) log.info("PPOFlipperStar: GeSlotOverlay - slot {} widget(465,{}) is {}",
+                    entry.getKey(), 7 + entry.getKey().ordinal(), slotWidget == null ? "NULL" : "hidden");
+                continue;
+            }
 
             long remainingMillis = timeoutMillis - (now - submittedAt);
             String label = remainingMillis > 0
@@ -85,7 +106,13 @@ public class PPOFlipperStarGeSlotOverlay extends Overlay {
             Point textLocation = new Point(bounds.x + bounds.width / 2 - 20, bounds.y - 4);
             graphics.setFont(TIMER_FONT);
             OverlayUtil.renderTextLocation(graphics, textLocation, label, color);
+            drawn++;
+            if (shouldLog) log.info("PPOFlipperStar: GeSlotOverlay - drew '{}' for slot {} at widget bounds {}",
+                label, entry.getKey(), bounds);
         }
+
+        if (shouldLog) log.info("PPOFlipperStar: GeSlotOverlay - render() called, {} of {} active order(s) drawn.",
+            drawn, activeOrders.size());
 
         return null;
     }
