@@ -406,6 +406,7 @@ public class PPOFlipperStarScript extends Script {
         maybeRunDecideTick();
         maybeRefreshBank();
         maybeSyncLiveHoldings();
+        checkForFinishedOffers();
 
         switch (state) {
             case IDLE:
@@ -1571,14 +1572,31 @@ public class PPOFlipperStarScript extends Script {
         return inventoryManager.getQuantity(stripWikiDisambiguationSuffix(order.getItemName())) >= order.getQuantity();
     }
 
-    private void monitorOffers() {
-        if (!Rs2GrandExchange.isOpen()) {
-            Rs2GrandExchange.openExchange();
-            return;
-        }
+    /**
+     * Auto-detects completed/partially-filled offers via the live offer details API (backed by
+     * the same client state {@code GrandExchangeOfferChanged} notifies us of) and collects
+     * anything finished - also handles the stale-dud-offer abort path, since that's the other
+     * thing that needs to happen to an active offer regardless of what the state machine below is
+     * otherwise doing.
+     *
+     * <p><b>Called unconditionally from {@link #tick()}, independent of {@code state} - not just
+     * from {@link #monitorOffers()}.</b> A real incident: a completely unrelated order (e.g. a
+     * SELL whose {@code sellItem} call kept returning false every single tick - a stuck/failing
+     * submission, not a state-machine bug) pinned {@code state} at {@code SUBMITTING_ORDERS}
+     * indefinitely, since {@link #submitNextOrder} only ever advances {@code state} forward on
+     * success and otherwise just returns, leaving it unchanged. With this check gated behind
+     * {@code MONITORING_OFFERS}/{@code COLLECTING} only (as it used to be), an already-SOLD offer
+     * sitting in a completely different GE slot was never even looked at - {@code state} never
+     * got the chance to reach the branch that would have collected it - so a filled 100% sale
+     * just sat uncollected in the GE interface indefinitely while an unrelated stuck order kept
+     * retrying forever. Running this before the state switch, on every tick regardless of what
+     * state is currently active, means a fill is detected and collected the moment it happens, not
+     * only when the state machine happens to be in exactly the right state to notice it.
+     */
+    private void checkForFinishedOffers() {
+        if (activeOrders.isEmpty()) return;
+        if (!Rs2GrandExchange.isOpen()) return;
 
-        // Auto-detect completed/partially-filled offers via the live offer details API (backed
-        // by the same client state GrandExchangeOfferChanged notifies us of).
         for (Map.Entry<GrandExchangeSlots, PPOFlipperOrder> entry : new LinkedHashMap<>(activeOrders).entrySet()) {
             GrandExchangeSlots slot = entry.getKey();
             PPOFlipperOrder order = entry.getValue();
@@ -1611,13 +1629,20 @@ public class PPOFlipperStarScript extends Script {
                 } else {
                     // Collection failed (GE widget not ready/interactable this tick, a
                     // transient timing issue). Leave the order SUBMITTED and in activeOrders so
-                    // the next tick's monitorOffers pass retries it.
+                    // the next tick's check retries it.
                     log.warn("PPOFlipperStar: collectOffer failed for slot {} - {}, will retry next tick", slot, order);
                 }
             } else if (isDud(order) && isStale(order) && queue.nextQueued().isPresent()) {
                 abortStaleOffer(slot, order);
             }
             queue.notifyChanged();
+        }
+    }
+
+    private void monitorOffers() {
+        if (!Rs2GrandExchange.isOpen()) {
+            Rs2GrandExchange.openExchange();
+            return;
         }
 
         evictForBlockedSell();
