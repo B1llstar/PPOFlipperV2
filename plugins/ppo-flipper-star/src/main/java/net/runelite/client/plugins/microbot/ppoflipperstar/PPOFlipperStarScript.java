@@ -2025,6 +2025,11 @@ public class PPOFlipperStarScript extends Script {
         return activeOrders.size();
     }
 
+    /** Read-only snapshot of which order currently occupies which GE slot - for {@link PPOFlipperStarGeSlotOverlay}'s per-slot stale-timer display. */
+    public Map<GrandExchangeSlots, PPOFlipperOrder> getActiveOrders() {
+        return new LinkedHashMap<>(activeOrders);
+    }
+
     public long getGpSpentThisSession() {
         return guardrails == null ? 0 : guardrails.getGpSpentThisSession();
     }

@@ -54,6 +54,9 @@ public class PPOFlipperStarPlugin extends Plugin {
     private PPOFlipperStarOverlay overlay;
 
     @Inject
+    private PPOFlipperStarGeSlotOverlay geSlotOverlay;
+
+    @Inject
     private PPOFlipperStarScript script;
 
     @Inject
@@ -112,6 +115,7 @@ public class PPOFlipperStarPlugin extends Plugin {
     @Override
     protected void startUp() {
         overlayManager.add(overlay);
+        overlayManager.add(geSlotOverlay);
         addPanel();
         // The script only starts when the panel's Execute button is clicked - enabling the
         // plugin just makes the sidebar panel and overlay available, same lifecycle as
@@ -138,6 +142,7 @@ public class PPOFlipperStarPlugin extends Plugin {
         script.shutdown();
         removePanel();
         overlayManager.remove(overlay);
+        overlayManager.remove(geSlotOverlay);
         firestoreSync.stop();
         eventBus.unregister(accountIdentity);
         wikiHistoryBuffer.stop();
