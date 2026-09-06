@@ -1424,6 +1424,25 @@ public class PPOFlipperStarScript extends Script {
         // really is asymmetric (confirmed against microbot-2.6.21.jar's own method signatures).
         String geSearchName = stripWikiDisambiguationSuffix(order.getItemName());
         GrandExchangeSlots slotBefore = Rs2GrandExchange.getAvailableSlot();
+
+        // Real incident: activeOrders.size() < maxActiveOffers() (the check above) disagreed with
+        // the GE's own live slot occupancy - a genuinely full GE (all 8 slots occupied, whatever
+        // the exact mismatch's cause) still let this method fall through to sellItem()/buyItem()
+        // every single tick, which can only ever fail with no free slot to place into. That
+        // produced 500+ consecutive "failed to submit... will retry next tick" log lines for the
+        // same order over several minutes - not a sellItem() bug, just calling it in a situation
+        // it can never succeed in. Bailing out here to MONITORING_OFFERS instead lets
+        // evictForBlockedSell (which only ever runs from that state - see monitorOffers) actually
+        // get a chance to free a slot for a blocked SELL, exactly the mechanism that exists for
+        // this situation but was starved by retrying the doomed submit instead of ever reaching it.
+        if (slotBefore == null) {
+            log.warn("PPOFlipperStar: no free GE slot available to submit {} despite activeOrders " +
+                    "reporting {} of {} - deferring to MONITORING_OFFERS instead of retrying a doomed submit.",
+                order, activeOrders.size(), Math.max(1, config.maxActiveOffers()));
+            state = State.MONITORING_OFFERS;
+            return;
+        }
+
         boolean submitted = order.getAction() == GrandExchangeAction.BUY
             ? Rs2GrandExchange.buyItem(geSearchName, submitPrice, order.getQuantity())
             : Rs2GrandExchange.sellItem(geSearchName, order.getQuantity(), submitPrice);
