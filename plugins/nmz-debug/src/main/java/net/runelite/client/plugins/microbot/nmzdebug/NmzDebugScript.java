@@ -67,7 +67,7 @@ public class NmzDebugScript extends Script {
         int overloadTarget = config.overloadPotionAmount();
         boolean hasPrayerPotAndToggle = Rs2Inventory.hasItem("prayer potion") && config.togglePrayerPotions();
         boolean result = overloadCount == overloadTarget || hasPrayerPotAndToggle;
-        System.out.println("[NMZDEBUG] canStartNmz: overload(4) count=" + overloadCount
+        NmzDebugLog.log("[NMZDEBUG] canStartNmz: overload(4) count=" + overloadCount
                 + " target=" + overloadTarget
                 + " hasPrayerPotAndToggle=" + hasPrayerPotAndToggle
                 + " -> result=" + result);
@@ -101,33 +101,33 @@ public class NmzDebugScript extends Script {
 
         mainScheduledFuture = scheduledExecutorService.scheduleWithFixedDelay(() -> {
             try {
-                System.out.println("[NMZDEBUG] ===== tick start =====");
+                NmzDebugLog.log("[NMZDEBUG] ===== tick start =====");
                 if (!Microbot.isLoggedIn()) {
-                    System.out.println("[NMZDEBUG] BLOCKED: not logged in, skipping tick");
+                    NmzDebugLog.log("[NMZDEBUG] BLOCKED: not logged in, skipping tick");
                     return;
                 }
                 if (!initialized) {
                     initialized = true;
-                    System.out.println("[NMZDEBUG] first tick: running one-time init");
+                    NmzDebugLog.log("[NMZDEBUG] first tick: running one-time init");
                     // Skip inventory setup and lobby walk if already inside the NMZ instance
-                    System.out.println("[NMZDEBUG] init: about to fetch player location via clientThread.invoke()");
+                    NmzDebugLog.log("[NMZDEBUG] init: about to fetch player location via clientThread.invoke()");
                     WorldPoint initLoc = Microbot.getClientThread().invoke(() -> Microbot.getClient().getLocalPlayer().getWorldLocation());
-                    System.out.println("[NMZDEBUG] init: clientThread.invoke() returned");
+                    NmzDebugLog.log("[NMZDEBUG] init: clientThread.invoke() returned");
                     boolean isInNmzInstance = initLoc != null && initLoc.getY() > 4500;
-                    System.out.println("[NMZDEBUG] init: playerLoc=" + initLoc + " isInNmzInstance=" + isInNmzInstance);
+                    NmzDebugLog.log("[NMZDEBUG] init: playerLoc=" + initLoc + " isInNmzInstance=" + isInNmzInstance);
                     if (!isInNmzInstance) {
                         if (config.inventorySetupon()) {
-                            System.out.println("[NMZDEBUG] init: inventorySetupon=true, inventorySetup=" + config.inventorySetup());
+                            NmzDebugLog.log("[NMZDEBUG] init: inventorySetupon=true, inventorySetup=" + config.inventorySetup());
                             if (config.inventorySetup() != null) {
                                 var inventorySetup = new Rs2InventorySetup(config.inventorySetup(), mainScheduledFuture);
                                 boolean invMatch = inventorySetup.doesInventoryMatch();
                                 boolean eqMatch = inventorySetup.doesEquipmentMatch();
-                                System.out.println("[NMZDEBUG] init: doesInventoryMatch=" + invMatch + " doesEquipmentMatch=" + eqMatch);
+                                NmzDebugLog.log("[NMZDEBUG] init: doesInventoryMatch=" + invMatch + " doesEquipmentMatch=" + eqMatch);
                                 if (!invMatch || !eqMatch) {
-                                    System.out.println("[NMZDEBUG] init: setup mismatch, walking to bank to reload setup");
+                                    NmzDebugLog.log("[NMZDEBUG] init: setup mismatch, walking to bank to reload setup");
                                     Rs2Walker.walkTo(Rs2Bank.getNearestBank().getWorldPoint(), 20);
                                     if (!inventorySetup.loadEquipment() || !inventorySetup.loadInventory()) {
-                                        System.out.println("[NMZDEBUG] ABORT: Failed to load inventory setup, stopping plugin");
+                                        NmzDebugLog.log("[NMZDEBUG] ABORT: Failed to load inventory setup, stopping plugin");
                                         Microbot.log("Failed to load inventory setup");
                                         Microbot.stopPlugin(plugin);
                                         return;
@@ -135,40 +135,40 @@ public class NmzDebugScript extends Script {
                                     Rs2Bank.closeBank();
                                 }
                             } else {
-                                System.out.println("[NMZDEBUG] init: inventorySetupon=true but inventorySetup config is null, nothing to load");
+                                NmzDebugLog.log("[NMZDEBUG] init: inventorySetupon=true but inventorySetup config is null, nothing to load");
                             }
                         } else {
-                            System.out.println("[NMZDEBUG] init: inventorySetupon=false, skipping setup check");
+                            NmzDebugLog.log("[NMZDEBUG] init: inventorySetupon=false, skipping setup check");
                         }
-                        System.out.println("[NMZDEBUG] init: walking to NMZ entrance (2609,3114,0)");
+                        NmzDebugLog.log("[NMZDEBUG] init: walking to NMZ entrance (2609,3114,0)");
                         Rs2Walker.walkTo(new WorldPoint(2609, 3114, 0), 5);
                     }
                 }
                 boolean superRunResult = super.run();
-                System.out.println("[NMZDEBUG] super.run() -> " + superRunResult);
+                NmzDebugLog.log("[NMZDEBUG] super.run() -> " + superRunResult);
                 if (!superRunResult) {
-                    System.out.println("[NMZDEBUG] BLOCKED: super.run() returned false (not logged in / tutorial gate / paused / interrupted), skipping tick");
+                    NmzDebugLog.log("[NMZDEBUG] BLOCKED: super.run() returned false (not logged in / tutorial gate / paused / interrupted), skipping tick");
                     return;
                 }
                 if (Rs2AntibanSettings.actionCooldownActive) {
-                    System.out.println("[NMZDEBUG] BLOCKED: Rs2AntibanSettings.actionCooldownActive=true, skipping tick");
+                    NmzDebugLog.log("[NMZDEBUG] BLOCKED: Rs2AntibanSettings.actionCooldownActive=true, skipping tick");
                     return;
                 }
                 Rs2Combat.setAutoRetaliate(true);
                 boolean isOutsideNmz = isOutside();
                 useOverload = Microbot.getClient().getBoostedSkillLevel(Skill.RANGED) == Microbot.getClient().getRealSkillLevel(Skill.RANGED) && config.overloadPotionAmount() > 0;
-                System.out.println("[NMZDEBUG] tick state: isOutsideNmz=" + isOutsideNmz + " useOverload=" + useOverload);
+                NmzDebugLog.log("[NMZDEBUG] tick state: isOutsideNmz=" + isOutsideNmz + " useOverload=" + useOverload);
                 if (isOutsideNmz) {
                     Rs2Walker.setTarget(null);
-                    System.out.println("[NMZDEBUG] -> handleOutsideNmz()");
+                    NmzDebugLog.log("[NMZDEBUG] -> handleOutsideNmz()");
                     handleOutsideNmz();
                 } else {
-                    System.out.println("[NMZDEBUG] -> handleInsideNmz()");
+                    NmzDebugLog.log("[NMZDEBUG] -> handleInsideNmz()");
                     handleInsideNmz();
                 }
-                System.out.println("[NMZDEBUG] ===== tick end =====");
+                NmzDebugLog.log("[NMZDEBUG] ===== tick end =====");
             } catch (Exception ex) {
-                System.out.println("[NMZDEBUG] EXCEPTION in main loop: " + ex);
+                NmzDebugLog.log("[NMZDEBUG] EXCEPTION in main loop: " + ex);
                 Microbot.logStackTrace(this.getClass().getSimpleName(), ex);
             }
         }, 0, 1000, TimeUnit.MILLISECONDS);
@@ -186,21 +186,21 @@ public class NmzDebugScript extends Script {
     public boolean isOutside() {
         WorldPoint loc = Microbot.getClientThread().invoke(() -> Microbot.getClient().getLocalPlayer().getWorldLocation());
         boolean result = loc != null && loc.distanceTo(new WorldPoint(2602, 3116, 0)) < 20;
-        System.out.println("[NMZDEBUG] isOutside: loc=" + loc + " -> result=" + result);
+        NmzDebugLog.log("[NMZDEBUG] isOutside: loc=" + loc + " -> result=" + result);
         return result;
     }
 
     public void handleOutsideNmz() {
         int purchasedDreamVarbit = Microbot.getVarbitValue(VarbitID.NZONE_PURCHASEDDREAM);
         boolean hasStartedDream = purchasedDreamVarbit > 0;
-        System.out.println("[NMZDEBUG] handleOutsideNmz: NZONE_PURCHASEDDREAM varbit=" + purchasedDreamVarbit + " hasStartedDream=" + hasStartedDream);
+        NmzDebugLog.log("[NMZDEBUG] handleOutsideNmz: NZONE_PURCHASEDDREAM varbit=" + purchasedDreamVarbit + " hasStartedDream=" + hasStartedDream);
         if (config.togglePrayerPotions())
             Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, false);
         if (!hasStartedDream) {
-            System.out.println("[NMZDEBUG] handleOutsideNmz: no dream purchased yet -> startNmzDream()");
+            NmzDebugLog.log("[NMZDEBUG] handleOutsideNmz: no dream purchased yet -> startNmzDream()");
             startNmzDream();
         } else {
-            System.out.println("[NMZDEBUG] handleOutsideNmz: dream already purchased -> potion fetch/store flow");
+            NmzDebugLog.log("[NMZDEBUG] handleOutsideNmz: dream already purchased -> potion fetch/store flow");
             final String overload = "Overload (4)";
             final String absorption = "Absorption (4)";
             storePotions(ObjectID.NZONE_BARREL_3, "overload", config.overloadPotionAmount());
@@ -212,10 +212,10 @@ public class NmzDebugScript extends Script {
             }
         }
         if (canStartNmz()) {
-            System.out.println("[NMZDEBUG] handleOutsideNmz: canStartNmz=true -> consumeEmptyVial()");
+            NmzDebugLog.log("[NMZDEBUG] handleOutsideNmz: canStartNmz=true -> consumeEmptyVial()");
             consumeEmptyVial();
         } else {
-            System.out.println("[NMZDEBUG] handleOutsideNmz: canStartNmz=false -> sleeping 2000ms and retrying next tick");
+            NmzDebugLog.log("[NMZDEBUG] handleOutsideNmz: canStartNmz=false -> sleeping 2000ms and retrying next tick");
             sleep(2000);
         }
     }
@@ -226,14 +226,14 @@ public class NmzDebugScript extends Script {
             lastCombatTime = System.currentTimeMillis();
         }
         long idleMs = System.currentTimeMillis() - lastCombatTime;
-        System.out.println("[NMZDEBUG] handleInsideNmz: inCombat=" + inCombat + " idleMs=" + idleMs);
+        NmzDebugLog.log("[NMZDEBUG] handleInsideNmz: inCombat=" + inCombat + " idleMs=" + idleMs);
         Rs2Antiban.takeMicroBreakByChance();
         if (!inCombat && idleMs > 20000) {
             Rs2NpcModel closestNpc = npcCache.query().nearest();
-            System.out.println("[NMZDEBUG] handleInsideNmz: idle >20s, nearest npc=" + (closestNpc == null ? "NULL (no boss spawned in arena!)" : closestNpc.getName()));
+            NmzDebugLog.log("[NMZDEBUG] handleInsideNmz: idle >20s, nearest npc=" + (closestNpc == null ? "NULL (no boss spawned in arena!)" : closestNpc.getName()));
             if (closestNpc != null) {
                 boolean attacked = closestNpc.click("Attack");
-                System.out.println("[NMZDEBUG] handleInsideNmz: click(\"Attack\") on " + closestNpc.getName() + " -> " + attacked);
+                NmzDebugLog.log("[NMZDEBUG] handleInsideNmz: click(\"Attack\") on " + closestNpc.getName() + " -> " + attacked);
                 if (attacked) {
                     Rs2Antiban.actionCooldown();
                 }
@@ -244,7 +244,7 @@ public class NmzDebugScript extends Script {
             Rs2Prayer.toggle(Rs2PrayerEnum.PROTECT_MELEE, true);
         boolean orbUsed = useOrbs();
         if (!orbUsed && config.walkToCenter()) {
-            System.out.println("[NMZDEBUG] handleInsideNmz: no orb used, walking to arena center " + center);
+            NmzDebugLog.log("[NMZDEBUG] handleInsideNmz: no orb used, walking to arena center " + center);
             walkToCenter();
         }
         useOverloadPotion();
@@ -259,49 +259,49 @@ public class NmzDebugScript extends Script {
     }
 
     public void startNmzDream() {
-        System.out.println("[NMZDEBUG] startNmzDream: ENTER");
+        NmzDebugLog.log("[NMZDEBUG] startNmzDream: ENTER");
         // Set new center so that it is random for every time joining the dream
         center = new WorldPoint(Rs2Random.between(2270, 2276), Rs2Random.between(4693, 4696), 0);
 
         Rs2NpcModel dominic = npcCache.query().withName("Dominic Onion").nearestOnClientThread();
-        System.out.println("[NMZDEBUG] startNmzDream: Dominic Onion lookup -> " + (dominic == null ? "NULL (not found nearby!)" : ("found at " + dominic.getWorldLocation())));
+        NmzDebugLog.log("[NMZDEBUG] startNmzDream: Dominic Onion lookup -> " + (dominic == null ? "NULL (not found nearby!)" : ("found at " + dominic.getWorldLocation())));
         if (dominic != null) {
             boolean clicked = dominic.click("Dream");
-            System.out.println("[NMZDEBUG] startNmzDream: dominic.click(\"Dream\") -> " + clicked);
+            NmzDebugLog.log("[NMZDEBUG] startNmzDream: dominic.click(\"Dream\") -> " + clicked);
         } else {
-            System.out.println("[NMZDEBUG] startNmzDream: ABORT-ish, dominic is null so no click happened; the sleepUntil below has nothing to wait for and will likely time out");
+            NmzDebugLog.log("[NMZDEBUG] startNmzDream: ABORT-ish, dominic is null so no click happened; the sleepUntil below has nothing to wait for and will likely time out");
         }
 
         boolean sawDreamSelectWidget = sleepUntil(() -> Rs2Widget.hasWidget("Which dream would you like to experience?"), 8000);
-        System.out.println("[NMZDEBUG] startNmzDream: waited for 'Which dream would you like to experience?' widget -> appeared=" + sawDreamSelectWidget);
+        NmzDebugLog.log("[NMZDEBUG] startNmzDream: waited for 'Which dream would you like to experience?' widget -> appeared=" + sawDreamSelectWidget);
         if (!sawDreamSelectWidget) {
-            System.out.println("[NMZDEBUG] startNmzDream: BAIL, dream-select widget never appeared (dialogue text may have changed, or click didn't register) - returning early this tick");
+            NmzDebugLog.log("[NMZDEBUG] startNmzDream: BAIL, dream-select widget never appeared (dialogue text may have changed, or click didn't register) - returning early this tick");
             return;
         }
 
         boolean clickedPrevious = Rs2Widget.clickWidget("Previous:");
-        System.out.println("[NMZDEBUG] startNmzDream: clickWidget(\"Previous:\") -> " + clickedPrevious);
+        NmzDebugLog.log("[NMZDEBUG] startNmzDream: clickWidget(\"Previous:\") -> " + clickedPrevious);
 
         boolean sawContinueWidget = sleepUntil(() -> Rs2Widget.hasWidget("Click here to continue"), 8000);
-        System.out.println("[NMZDEBUG] startNmzDream: waited for 'Click here to continue' widget -> appeared=" + sawContinueWidget);
+        NmzDebugLog.log("[NMZDEBUG] startNmzDream: waited for 'Click here to continue' widget -> appeared=" + sawContinueWidget);
         if (!sawContinueWidget) {
-            System.out.println("[NMZDEBUG] startNmzDream: BAIL, continue widget never appeared - returning early this tick");
+            NmzDebugLog.log("[NMZDEBUG] startNmzDream: BAIL, continue widget never appeared - returning early this tick");
             return;
         }
 
         boolean clickedContinue = Rs2Widget.clickWidget("Click here to continue");
-        System.out.println("[NMZDEBUG] startNmzDream: clickWidget(\"Click here to continue\") -> " + clickedContinue);
+        NmzDebugLog.log("[NMZDEBUG] startNmzDream: clickWidget(\"Click here to continue\") -> " + clickedContinue);
 
         boolean sawAgreeToPay = sleepUntil(() -> Rs2Widget.hasWidget("Agree to pay"), 8000);
-        System.out.println("[NMZDEBUG] startNmzDream: waited for 'Agree to pay' widget -> appeared=" + sawAgreeToPay);
+        NmzDebugLog.log("[NMZDEBUG] startNmzDream: waited for 'Agree to pay' widget -> appeared=" + sawAgreeToPay);
         if (Rs2Widget.hasWidget("Agree to pay")) {
-            System.out.println("[NMZDEBUG] startNmzDream: typing '1' + enter to confirm payment");
+            NmzDebugLog.log("[NMZDEBUG] startNmzDream: typing '1' + enter to confirm payment");
             Rs2Keyboard.typeString("1");
             Rs2Keyboard.enter();
         } else {
-            System.out.println("[NMZDEBUG] startNmzDream: BAIL, 'Agree to pay' widget never appeared, nothing confirmed");
+            NmzDebugLog.log("[NMZDEBUG] startNmzDream: BAIL, 'Agree to pay' widget never appeared, nothing confirmed");
         }
-        System.out.println("[NMZDEBUG] startNmzDream: EXIT");
+        NmzDebugLog.log("[NMZDEBUG] startNmzDream: EXIT");
     }
 
     public boolean useOrbs() {
@@ -455,30 +455,30 @@ public class NmzDebugScript extends Script {
     }
 
     public void consumeEmptyVial() {
-        System.out.println("[NMZDEBUG] consumeEmptyVial: ENTER");
+        NmzDebugLog.log("[NMZDEBUG] consumeEmptyVial: ENTER");
         boolean widgetMissingOrHidden = Microbot.getClientThread().runOnClientThreadOptional(() ->
                 Rs2Widget.getWidget(129, 6) == null || Rs2Widget.getWidget(129, 6).isHidden())
                 .orElse(false);
-        System.out.println("[NMZDEBUG] consumeEmptyVial: widget(129,6) missing/hidden=" + widgetMissingOrHidden);
+        NmzDebugLog.log("[NMZDEBUG] consumeEmptyVial: widget(129,6) missing/hidden=" + widgetMissingOrHidden);
         if (widgetMissingOrHidden) {
             Rs2TileObjectModel vial = tileObjectCache.query().withId(ObjectID.NZONE_LOBBY_VIAL).nearest();
-            System.out.println("[NMZDEBUG] consumeEmptyVial: lobby vial lookup -> " + (vial == null ? "NULL (not found nearby)" : "found"));
+            NmzDebugLog.log("[NMZDEBUG] consumeEmptyVial: lobby vial lookup -> " + (vial == null ? "NULL (not found nearby)" : "found"));
             if (vial != null) vial.click("drink");
         }
         sleep(2000, 4000);
         Widget widget = Rs2Widget.getWidget(129, 6);
         boolean hidden = Microbot.getClientThread().runOnClientThreadOptional(widget::isHidden).orElse(false);
-        System.out.println("[NMZDEBUG] consumeEmptyVial: widget(129,6) hidden=" + hidden + " (this is the 'enter dream' confirm button)");
+        NmzDebugLog.log("[NMZDEBUG] consumeEmptyVial: widget(129,6) hidden=" + hidden + " (this is the 'enter dream' confirm button)");
         if (!hidden) {
-            System.out.println("[NMZDEBUG] consumeEmptyVial: clicking widget(129,6) twice to confirm entering the dream");
+            NmzDebugLog.log("[NMZDEBUG] consumeEmptyVial: clicking widget(129,6) twice to confirm entering the dream");
             Rs2Widget.clickWidget(widget.getId());
             sleep(300);
             Rs2Widget.clickWidget(widget.getId());
         } else {
-            System.out.println("[NMZDEBUG] consumeEmptyVial: widget already hidden, nothing to click - this may mean the dream never actually started");
+            NmzDebugLog.log("[NMZDEBUG] consumeEmptyVial: widget already hidden, nothing to click - this may mean the dream never actually started");
         }
         sleep(2000, 4000);
-        System.out.println("[NMZDEBUG] consumeEmptyVial: EXIT");
+        NmzDebugLog.log("[NMZDEBUG] consumeEmptyVial: EXIT");
     }
 
     // Nightmare Zone potion barrels are capped at 255 doses each (single unsigned byte varbit).
@@ -486,7 +486,7 @@ public class NmzDebugScript extends Script {
 
     public void handleStore() {
         if (canStartNmz()) {
-            System.out.println("[NMZDEBUG] handleStore: canStartNmz already true, nothing to buy, returning");
+            NmzDebugLog.log("[NMZDEBUG] handleStore: canStartNmz already true, nothing to buy, returning");
             return;
         }
         int overloadAmt = Microbot.getVarbitValue(VarbitID.NZONE_POTION_3);
@@ -495,7 +495,7 @@ public class NmzDebugScript extends Script {
         boolean overloadBarrelFull = overloadAmt >= BARREL_MAX_DOSES;
         boolean absorptionBarrelFull = absorptionAmt >= BARREL_MAX_DOSES;
         if (overloadBarrelFull || absorptionBarrelFull) {
-            System.out.println("[NMZDEBUG] handleStore: barrel already at cap (" + BARREL_MAX_DOSES + " doses) - overloadBarrelFull=" + overloadBarrelFull
+            NmzDebugLog.log("[NMZDEBUG] handleStore: barrel already at cap (" + BARREL_MAX_DOSES + " doses) - overloadBarrelFull=" + overloadBarrelFull
                     + " (amt=" + overloadAmt + ") absorptionBarrelFull=" + absorptionBarrelFull + " (amt=" + absorptionAmt + ")");
         }
 
@@ -506,12 +506,12 @@ public class NmzDebugScript extends Script {
         int absorptionTargetDoses = Math.min(config.absorptionPotionAmount() * 4, BARREL_MAX_DOSES);
         int overloadDosesNeeded = overloadBarrelFull ? 0 : Math.max(0, overloadTargetDoses - overloadAmt);
         int absorptionDosesNeeded = absorptionBarrelFull ? 0 : Math.max(0, absorptionTargetDoses - absorptionAmt);
-        System.out.println("[NMZDEBUG] handleStore: barrel overloadAmt=" + overloadAmt + " absorptionAmt=" + absorptionAmt
+        NmzDebugLog.log("[NMZDEBUG] handleStore: barrel overloadAmt=" + overloadAmt + " absorptionAmt=" + absorptionAmt
                 + " overloadTargetDoses=" + overloadTargetDoses + " absorptionTargetDoses=" + absorptionTargetDoses
                 + " overloadDosesNeeded=" + overloadDosesNeeded + " absorptionDosesNeeded=" + absorptionDosesNeeded);
 
         if (overloadDosesNeeded == 0 && absorptionDosesNeeded == 0) {
-            System.out.println("[NMZDEBUG] handleStore: barrels already full (or at target/cap), nothing to buy, returning");
+            NmzDebugLog.log("[NMZDEBUG] handleStore: barrels already full (or at target/cap), nothing to buy, returning");
             return;
         }
 
@@ -522,18 +522,18 @@ public class NmzDebugScript extends Script {
         // NMZ reward shop costs: Overload 1,500 pts / Absorption 1,000 pts per 4-dose potion
         int totalCost = overloadToBuy * 1500 + absorptionToBuy * 1000;
         int nmzPoints = Microbot.getVarbitPlayerValue(VarPlayerID.NZONE_REWARDPOINTS);
-        System.out.println("[NMZDEBUG] handleStore: need to buy overload x" + overloadToBuy + " absorption x" + absorptionToBuy
+        NmzDebugLog.log("[NMZDEBUG] handleStore: need to buy overload x" + overloadToBuy + " absorption x" + absorptionToBuy
                 + " totalCost=" + totalCost + " nmzPoints=" + nmzPoints);
 
         if (nmzPoints < totalCost) {
-            System.out.println("[NMZDEBUG] ABORT: handleStore stopping plugin, not enough NMZ points (have " + nmzPoints + ", need " + totalCost + ")");
+            NmzDebugLog.log("[NMZDEBUG] ABORT: handleStore stopping plugin, not enough NMZ points (have " + nmzPoints + ", need " + totalCost + ")");
             Microbot.showMessage("BOT SHUTDOWN: Not enough points to buy potions (have " + nmzPoints + ", need " + totalCost + ")");
             Microbot.stopPlugin(plugin);
             return;
         }
 
         Rs2TileObjectModel chest = tileObjectCache.query().withId(ObjectID.NZONE_LOBBY_CHEST).nearest();
-        System.out.println("[NMZDEBUG] handleStore: reward chest lookup -> " + (chest == null ? "NULL (not found nearby!)" : "found"));
+        NmzDebugLog.log("[NMZDEBUG] handleStore: reward chest lookup -> " + (chest == null ? "NULL (not found nearby!)" : "found"));
         if (chest == null) return;
         chest.click();
         sleepUntil(() -> Rs2Widget.isWidgetVisible(13500418) || Rs2Bank.isBankPinWidgetVisible(), 10000);
