@@ -20,6 +20,7 @@ import net.runelite.client.plugins.microbot.ppoflipperstar.sync.AccountIdentity;
 import net.runelite.client.plugins.microbot.ppoflipperstar.sync.PPOFlipperStarFirestoreSync;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
+import net.runelite.client.plugins.microbot.util.security.LoginManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
@@ -259,8 +260,10 @@ public class PPOFlipperStarPlugin extends Plugin {
         GameState state = event.getGameState();
         if (state == GameState.CONNECTION_LOST) {
             logDisconnectSnapshot("CONNECTION_LOST");
+            reconnect("CONNECTION_LOST");
         } else if (state == GameState.LOGIN_SCREEN && wasLoggedIn) {
             logDisconnectSnapshot("LOGIN_SCREEN (dropped from LOGGED_IN, no CONNECTION_LOST event fired)");
+            reconnect("LOGIN_SCREEN (dropped from LOGGED_IN)");
         }
 
         if (state == GameState.LOGGED_IN) {
@@ -268,6 +271,32 @@ public class PPOFlipperStarPlugin extends Plugin {
         } else if (state == GameState.LOGIN_SCREEN) {
             wasLoggedIn = false;
         }
+    }
+
+    /**
+     * Reacts to a disconnect by dismissing whatever prompt/dialog is currently on screen and
+     * clicking back in via the active profile's saved login (the "Existing user" button showing
+     * the profile's own username) - same fix, same reasoning, and the same
+     * {@code LoginManager.login()} call as the sibling {@code nmz-debug} plugin's
+     * {@code NmzDebugPlugin#reconnect} (see that method's own javadoc for the full bytecode-level
+     * confirmation of what {@code login()} does internally: {@code handleDisconnectDialogs} to
+     * dismiss a stuck dialog, then set world/credentials from the active profile and submit).
+     * {@code login()} already self-throttles and no-ops during an in-flight attempt, so firing it
+     * once per disconnect event is enough - RuneLite keeps re-firing
+     * {@code CONNECTION_LOST}/{@code LOGIN_SCREEN} while still disconnected, so a failed attempt
+     * gets retried on the next one without this needing its own retry loop.
+     *
+     * <p>Dispatched via {@code runOnSeperateThread} - {@code login()} clicks widgets and sleeps
+     * between steps internally, which must never run directly on the event-bus callback's thread
+     * (effectively the client thread) {@code onGameStateChanged} is itself invoked on.
+     */
+    private void reconnect(String reason) {
+        log.warn("PPOFlipperStar: reconnect - disconnect detected ({}) - dismissing prompt and logging back in via LoginManager.login()", reason);
+        Microbot.getClientThread().runOnSeperateThread(() -> {
+            boolean success = LoginManager.login();
+            log.warn("PPOFlipperStar: reconnect - LoginManager.login() -> {}", success);
+            return true;
+        });
     }
 
     private void logDisconnectSnapshot(String reason) {
