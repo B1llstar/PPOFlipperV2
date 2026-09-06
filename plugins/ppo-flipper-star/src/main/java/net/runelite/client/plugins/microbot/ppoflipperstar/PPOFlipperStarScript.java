@@ -1564,18 +1564,29 @@ public class PPOFlipperStarScript extends Script {
      * offered above the live insta-buy price, and a SELL order is never actually offered below
      * the live insta-sell price. Uses {@link WikiPriceClient} (a direct call to the OSRS Wiki's
      * real-time API), never {@code Rs2GrandExchange.getRealTimePrices} - see that client's
-     * javadoc. If live price data isn't available for any reason, falls back to the order's own
-     * price unchanged rather than blocking submission on a missing lookup.
+     * javadoc.
+     *
+     * <p><b>SELL uses {@link WikiPriceClient#getLatestPriceBlocking}, BUY uses the non-blocking
+     * {@link WikiPriceClient#getLatestPrice}.</b> A real incident: Chaos rune sold at 103gp while
+     * the live insta-sell price was genuinely 137gp (a 25% real underprice on 1060 units) because
+     * this item's price happened to be a cache miss at that exact submission moment - the
+     * non-blocking read returned {@code null}, and this method's old "no live data -> trust the
+     * order's own price unchanged" fallback let a stale/wrong model-proposed price go straight to
+     * the GE with zero live verification. A SELL is exactly the one place this plugin promises a
+     * price floor ("never sell below the live insta-sell price") - honoring that promise means
+     * actually knowing the live price before submitting, not hoping the cache was already warm.
+     * BUY is left non-blocking deliberately: worst case there, "no live data" means potentially
+     * paying a little more than strictly necessary, not giving real GP away outright, and BUY
+     * submissions can be far more frequent (Rapid non-PPO's own scanner) than the one-off SELL
+     * path this fixes - not worth the added network-wait risk on that side too.
      */
     private int clampToLivePrice(PPOFlipperOrder order) {
         int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         if (itemId <= 0) return order.getPrice();
 
-        WikiPriceClient.Price price = wikiPriceClient.getLatestPrice(itemId);
-        if (price == null) return order.getPrice();
-
         if (order.getAction() == GrandExchangeAction.BUY) {
-            if (price.instaBuyPrice <= 0) return order.getPrice();
+            WikiPriceClient.Price price = wikiPriceClient.getLatestPrice(itemId);
+            if (price == null || price.instaBuyPrice <= 0) return order.getPrice();
             int capped = Math.min(order.getPrice(), price.instaBuyPrice);
             if (capped < order.getPrice()) {
                 log.info("PPOFlipperStar: capped buy price for {} from {} to live insta-buy price {}",
@@ -1588,9 +1599,14 @@ public class PPOFlipperStarScript extends Script {
             }
             return capped;
         } else {
+            WikiPriceClient.Price price = wikiPriceClient.getLatestPriceBlocking(itemId);
             int floored = order.getPrice();
-            if (price.instaSellPrice > 0) {
+            if (price != null && price.instaSellPrice > 0) {
                 floored = Math.max(floored, price.instaSellPrice);
+            } else {
+                log.warn("PPOFlipperStar: no live price available for {} even after a blocking fetch - " +
+                        "submitting at the order's own price {} gp with no live-market floor applied this time.",
+                    order.getItemName(), order.getPrice());
             }
             if (floored > order.getPrice()) {
                 log.info("PPOFlipperStar: raised sell price for {} from {} to live insta-sell price {}",

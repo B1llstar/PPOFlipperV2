@@ -234,6 +234,38 @@ public class WikiPriceClient {
         return cached != null ? cached.price : null;
     }
 
+    /**
+     * Same cache as {@link #getLatestPrice(int)}, but on a cache miss/stale entry, BLOCKS the
+     * calling thread on a real, synchronous HTTP fetch instead of returning a stale/null price and
+     * triggering a background refresh for next time. Exists specifically for
+     * {@code PPOFlipperStarScript#clampToLivePrice}'s SELL floor: a real incident found live -
+     * Chaos rune sold at 103gp while the live insta-sell price was genuinely 137gp (a 25% real-
+     * money underprice on 1060 units) because this item's price happened to be a cache miss at
+     * that exact submission moment, and {@code clampToLivePrice}'s existing "no live data -> trust
+     * the order's own price unchanged" fallback meant the model's stale/wrong proposed price went
+     * straight to the GE with zero live-market verification. A SELL is exactly the one place this
+     * plugin promises a price floor ("never sell below the live insta-sell price") - honoring that
+     * promise requires actually knowing the live price before submitting, not hoping the cache
+     * happened to already be warm.
+     *
+     * <p>Deliberately NOT the default behavior of {@link #getLatestPrice(int)} - that method's own
+     * javadoc explains why every other caller (DecisionEngine's per-tick loop, Guardrails' price-
+     * deviation check) must stay non-blocking: hundreds of watchlisted items times a blocking
+     * network call each would stall those callers for minutes, a real, previously-fixed incident.
+     * This method is reserved for the one call site that both needs a guaranteed-fresh price AND
+     * only ever calls it once per order submission, not once per watchlisted item per tick.
+     */
+    public Price getLatestPriceBlocking(int itemId) {
+        CachedPrice cached = cache.get(itemId);
+        if (cached != null && System.currentTimeMillis() - cached.fetchedAtMillis < CACHE_TTL_MILLIS) {
+            return cached.price;
+        }
+
+        fetchOneSynchronously(itemId);
+        cached = cache.get(itemId);
+        return cached != null ? cached.price : null;
+    }
+
     private void triggerBackgroundFetch(int itemId) {
         if (FETCH_IN_FLIGHT.putIfAbsent(itemId, Boolean.TRUE) != null) {
             // Another call (from this instance or a sibling one - the executor/in-flight map are
@@ -259,6 +291,17 @@ public class WikiPriceClient {
 
     /** The actual blocking HTTP call - runs only on {@link #BACKGROUND_EXECUTOR}, never on a caller's thread. */
     private void fetchOne(int itemId) {
+        fetchOneSynchronously(itemId);
+    }
+
+    /**
+     * The real fetch-and-cache logic shared by {@link #fetchOne(int)} (called only from
+     * {@link #BACKGROUND_EXECUTOR}) and {@link #getLatestPriceBlocking(int)} (called directly on
+     * the caller's own thread, deliberately - see that method's javadoc for why). Naming this
+     * distinctly from {@code fetchOne} makes it obvious at either call site that this performs
+     * real, synchronous network I/O on whatever thread calls it.
+     */
+    private void fetchOneSynchronously(int itemId) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(String.format(LATEST_URL, itemId)))
