@@ -1316,25 +1316,34 @@ public class PPOFlipperStarScript extends Script {
     }
 
     /**
-     * Strips a trailing " (item)" disambiguation suffix the OSRS Wiki adds to an item's name when
-     * it collides with an NPC's name (e.g. "Snowy knight (item)" - "Snowy knight" is also an NPC).
-     * Confirmed live: the GE's own search does NOT recognize that suffixed form at all - only the
-     * plain name resolves - so a name sourced from the wiki's mapping data (which is what
-     * {@code order.getItemName()} always is, via {@link DecisionEngine#getItemName}) fails to find
-     * the item in the GE search box if used verbatim for the actual in-game interaction. Confirmed
-     * via the wiki's own {@code /mapping} data: 9 known items currently carry this suffix (Snowy
-     * knight, Black warlock, Sunlight/Moonlight moth, Sapphire glacialis, Ruby harvest, Shantay
-     * pass, Swamp toad, Poison), all NPC/item name collisions the wiki disambiguates the same way.
+     * Strips trailing disambiguation/variant suffixes the OSRS Wiki's mapping data includes in an
+     * item's canonical name but the GE's own in-game search does not recognize:
+     * <ul>
+     *   <li>" (item)" - added when an item's plain name collides with an NPC's (e.g. "Snowy knight
+     *   (item)" - "Snowy knight" is also an NPC). Confirmed via the wiki's own mapping data: 9
+     *   known items currently carry this suffix (Snowy knight, Black warlock, Sunlight/Moonlight
+     *   moth, Sapphire glacialis, Ruby harvest, Shantay pass, Swamp toad, Poison).</li>
+     *   <li>" (tablet)" - a real incident: "Salve graveyard teleport (tablet)" (the wiki's/GE
+     *   trading name for item id 19619) failed to submit every single tick, indefinitely - the
+     *   in-game GE search only recognizes it as "Salve graveyard teleport", with no "(tablet)"
+     *   at all, unlike most other disambiguating suffixes (e.g. "(u)", "(noted)") which the search
+     *   DOES recognize verbatim.</li>
+     * </ul>
+     * In both cases the wiki's suffixed form is still the correct, canonical name for pricing/
+     * trading-data purposes - it's specifically the GE search widget that doesn't index it, so a
+     * name sourced from the wiki's mapping data (which is what {@code order.getItemName()} always
+     * is, via {@link DecisionEngine#getItemName}) fails to find the item in the GE search box if
+     * used verbatim for the actual in-game interaction.
      *
-     * <p>Deliberately scoped to ONLY the GE-search call sites (buyItem/sellItem/findSlotForItem in
-     * {@link #submitNextOrder}), not applied at the source in {@link PPOFlipperOrder#getItemName}
-     * itself - the wiki's full "(item)" name is still the correct, canonical form for pricing
-     * lookups, Firestore trade history, and display, where it causes no problem and stripping it
-     * would just lose real information for no benefit.
+     * <p>Deliberately scoped to ONLY the GE-search call sites ({@link #submitNextOrder}'s
+     * {@code GrandExchangeRequest}/{@code findSlotForItem}), not applied at the source in
+     * {@link PPOFlipperOrder#getItemName} itself - the wiki's full suffixed name is still the
+     * correct, canonical form for pricing lookups, Firestore trade history, and display, where it
+     * causes no problem and stripping it would just lose real information for no benefit.
      */
     private static String stripWikiDisambiguationSuffix(String itemName) {
         if (itemName == null) return null;
-        return itemName.replaceAll("(?i)\\s*\\(item\\)$", "");
+        return itemName.replaceAll("(?i)\\s*\\((item|tablet)\\)$", "");
     }
 
     private void submitNextOrder() {
