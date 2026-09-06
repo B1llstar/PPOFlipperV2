@@ -162,13 +162,21 @@ public class PPOFlipperStarScript extends Script {
     private final DecideDiagnosticsLog diagnosticsLog;
     private final InventoryManager inventoryManager;
     private final ItemNameResolver itemNameResolver;
+    private final RapidFlipEngine rapidFlipEngine;
+    private final RapidFlipScanner rapidFlipScanner;
+
+    // Cadence for RapidFlipScanner, independent of decisionTickIntervalSeconds - see
+    // maybeRunRapidScan's own javadoc. 0 means "due immediately" so the first tick after Execute
+    // always runs one scan in regardless of the configured interval.
+    private long nextRapidScanAtMillis = 0;
 
     @Inject
     public PPOFlipperStarScript(OrderQueue queue, PortfolioManager portfolio, BuyLimitLedger buyLimitLedger,
                                  GoldManager goldManager, PPOFlipperStarFirestoreSync firestoreSync,
                                  DecisionEngine decisionEngine, DecisionSuggestions decisionSuggestions,
                                  DecideDiagnosticsLog diagnosticsLog, InventoryManager inventoryManager,
-                                 ItemNameResolver itemNameResolver) {
+                                 ItemNameResolver itemNameResolver, RapidFlipEngine rapidFlipEngine,
+                                 RapidFlipScanner rapidFlipScanner) {
         this.queue = queue;
         this.portfolio = portfolio;
         this.buyLimitLedger = buyLimitLedger;
@@ -179,6 +187,8 @@ public class PPOFlipperStarScript extends Script {
         this.diagnosticsLog = diagnosticsLog;
         this.inventoryManager = inventoryManager;
         this.itemNameResolver = itemNameResolver;
+        this.rapidFlipEngine = rapidFlipEngine;
+        this.rapidFlipScanner = rapidFlipScanner;
     }
 
     public boolean run(PPOFlipperStarConfig config) {
@@ -192,6 +202,7 @@ public class PPOFlipperStarScript extends Script {
         this.needsReconcile = true;
         this.nextDecisionTickAtMillis = 0;
         this.nextBankRefreshAtMillis = 0;
+        this.nextRapidScanAtMillis = 0;
         this.nextLiveHoldingsSyncAtMillis = 0;
         this.lastBuySuggestionAtMillis.clear();
         this.lastAutonomousRejectionAtMillis.clear();
@@ -407,6 +418,7 @@ public class PPOFlipperStarScript extends Script {
         maybeRunDecideTick();
         maybeRefreshBank();
         maybeSyncLiveHoldings();
+        maybeRunRapidScan();
         checkForFinishedOffers();
 
         switch (state) {
@@ -576,6 +588,23 @@ public class PPOFlipperStarScript extends Script {
             "immediately as a precaution against an unexpected deposit/withdrawal (see guardAgainstUnexpectedBank's " +
             "javadoc for the real incident this guards against).");
         Rs2Bank.closeBank();
+    }
+
+    /**
+     * Fires {@link RapidFlipScanner#scan()} on its own cadence ({@code rapidScanIntervalSeconds}),
+     * independent of {@code decisionTickIntervalSeconds} - rapid non-PPO is specifically about
+     * reacting to a spread opening up between DECIDE ticks, not waiting on the PPO model's own,
+     * typically slower cadence. Checked every tick() call but only actually dispatches a scan once
+     * the interval has elapsed, same pattern as {@link #maybeRunDecideTick}/{@link #maybeRefreshBank}.
+     * Runs inline (not on a separate executor like DECIDE) since a scan only reads already-cached
+     * live prices (see {@link RapidFlipEngine#evaluate}'s contract) and builds/queues orders - no
+     * blocking network I/O on this thread, unlike DECIDE's Firestore round-trip.
+     */
+    private void maybeRunRapidScan() {
+        long now = System.currentTimeMillis();
+        if (now < nextRapidScanAtMillis) return;
+        nextRapidScanAtMillis = now + Math.max(1, config.rapidScanIntervalSeconds()) * 1000L;
+        rapidFlipScanner.scan();
     }
 
     private void maybeRefreshBank() {
@@ -1084,6 +1113,27 @@ public class PPOFlipperStarScript extends Script {
                 log.info("PPOFlipperStar: skipping autonomous {} - still within its post-rejection cooldown.", decision);
                 decisionSuggestions.remove(decision.getId());
                 continue;
+            }
+
+            // Rapid PPO (see PPOFlipperStarConfig's "Rapid flipping" section): an extra, live-
+            // market gate on top of every other check here, independent of the model's own
+            // proposed price - the model still makes every decision (item/direction/confidence),
+            // this only additionally requires the item's CURRENT wiki spread to clear the
+            // configured margin bar after 2% GE tax right now, not just whatever the model
+            // computed its suggestion against (which may already be stale by submission time).
+            // Held for reconsideration next tick, same as any other guardrail rejection here -
+            // never discarded outright, since the spread that fails this check now may open back
+            // up moments later.
+            if (config.rapidPpoEnabled()) {
+                RapidFlipEngine.Evaluation evaluation = rapidFlipEngine.evaluate(decision.getItemId());
+                if (evaluation == null || !evaluation.qualifies) {
+                    log.info("PPOFlipperStar: skipping autonomous {} - rapid PPO is on and the live spread doesn't " +
+                            "currently clear the margin bar ({}).",
+                        decision, evaluation == null ? "no live price cached yet" :
+                            "net margin/unit " + evaluation.netMarginPerUnit + " gp");
+                    decisionSuggestions.remove(decision.getId());
+                    continue;
+                }
             }
 
             // Sell whatever's actually held rather than outright rejecting, when the model wants
@@ -1674,6 +1724,16 @@ public class PPOFlipperStarScript extends Script {
                     recordCostBasis(order, details, filled);
                     order.setStatus(PPOFlipperOrder.Status.DONE);
                     activeOrders.remove(slot);
+
+                    // Rapid non-PPO's other half (see PPOFlipperOrder#isRapidFlipBuy's javadoc):
+                    // a genuinely filled rapid BUY immediately gets its SELL counterpart queued at
+                    // the then-current live insta-sell price - true rapid turnaround, rather than
+                    // waiting for a DECIDE tick or a human to notice. offerState == BOUGHT (not
+                    // just "finished", which also covers CANCELLED_BUY) and filled > 0 together
+                    // rule out queuing a SELL for a cancelled/never-filled rapid BUY.
+                    if (order.isRapidFlipBuy() && offerState == GrandExchangeOfferState.BOUGHT && filled > 0) {
+                        queueRapidFlipSell(order, filled);
+                    }
                 } else {
                     // Collection failed (GE widget not ready/interactable this tick, a
                     // transient timing issue). Leave the order SUBMITTED and in activeOrders so
@@ -1685,6 +1745,28 @@ public class PPOFlipperStarScript extends Script {
             }
             queue.notifyChanged();
         }
+    }
+
+    /**
+     * Queues the SELL half of a completed rapid flip (see {@link PPOFlipperOrder#isRapidFlipBuy}'s
+     * javadoc), sized to exactly what filled (never the originally requested quantity - a partial
+     * fill should only ever try to sell what's actually held), priced at the CURRENT live
+     * insta-sell price re-checked at this exact moment, not whatever price was live when the BUY
+     * was originally sized - the whole point of "rapid" is reacting to the market as it is right
+     * now, not a snapshot from moments ago. Falls back to the BUY's own price (guaranteeing at
+     * least a break-even-ish attempt rather than silently doing nothing) only if no live price is
+     * cached for some reason - {@link Guardrails#check}/{@link #hasFundsOrItems} still apply
+     * normally to this SELL like any other order, so a bad fallback price would be caught by the
+     * existing price-deviation guardrail rather than executing blindly.
+     */
+    private void queueRapidFlipSell(PPOFlipperOrder filledBuy, int filledQuantity) {
+        WikiPriceClient.Price price = wikiPriceClient.getLatestPrice(filledBuy.getItemId());
+        int sellPrice = (price != null && price.instaSellPrice > 0) ? price.instaSellPrice : filledBuy.getPrice();
+        PPOFlipperOrder sellOrder = new PPOFlipperOrder(GrandExchangeAction.SELL, filledBuy.getItemId(),
+            filledBuy.getItemName(), filledQuantity, sellPrice);
+        queue.add(sellOrder);
+        log.info("PPOFlipperStar: rapid flip - BUY filled ({}x {}), queued SELL {}x @ {} gp (live insta-sell)",
+            filledQuantity, filledBuy.getItemName(), filledQuantity, sellPrice);
     }
 
     private void monitorOffers() {

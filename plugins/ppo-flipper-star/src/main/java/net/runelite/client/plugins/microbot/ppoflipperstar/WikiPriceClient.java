@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import lombok.extern.slf4j.Slf4j;
 
+import javax.inject.Singleton;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -46,6 +47,7 @@ import java.util.concurrent.Executors;
  * waiting on it - the next call, moments later, sees the warmed cache.
  */
 @Slf4j
+@Singleton
 public class WikiPriceClient {
 
     private static final String LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest?id=%d";

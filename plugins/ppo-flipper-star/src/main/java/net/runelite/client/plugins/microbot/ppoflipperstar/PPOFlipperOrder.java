@@ -83,6 +83,18 @@ public class PPOFlipperOrder {
     @Setter
     private volatile long submittedAtMillis = 0;
 
+    /**
+     * True for a BUY produced by {@code RapidFlipScanner} (the standalone "Rapid non-PPO" flipping
+     * mode - see {@code PPOFlipperStarConfig}'s "Rapid flipping" section), never set for anything
+     * else (a manual order, a confirmed/autonomous PPO suggestion, or the SELL half of a rapid
+     * flip once it's built). Read once, by {@code PPOFlipperStarScript#checkForFinishedOffers}, to
+     * recognize a just-filled rapid BUY and immediately queue its SELL counterpart at the
+     * then-current live insta-sell price - true rapid turnaround, rather than waiting for the next
+     * DECIDE tick or a human to notice the fill and act on it.
+     */
+    @Setter
+    private volatile boolean rapidFlipBuy = false;
+
     public PPOFlipperOrder(GrandExchangeAction action, int itemId, String itemName, int quantity, int price) {
         this.action = action;
         this.itemId = itemId;

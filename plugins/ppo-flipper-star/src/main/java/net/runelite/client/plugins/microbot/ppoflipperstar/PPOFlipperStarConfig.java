@@ -586,4 +586,144 @@ public interface PPOFlipperStarConfig extends Config {
     default boolean marketHistoryCloudSyncEnabled() {
         return true;
     }
+
+    @ConfigSection(
+        name = "Rapid flipping",
+        description = "Fast buy-low-sell-high mode: only trades an item when its live wiki insta-buy/insta-sell " +
+            "spread is wide enough to still turn a real profit after the 2% GE sell tax (see GeTax), rather than " +
+            "waiting for the PPO model's own, generally more patient timing. Two independent sub-modes, either or " +
+            "both can be on at once - see each one's own description.",
+        position = 5,
+        closedByDefault = true
+    )
+    String rapidFlippingSection = "rapidFlipping";
+
+    @ConfigItem(
+        keyName = "rapidPpoEnabled",
+        name = "Rapid PPO (filter model suggestions)",
+        description = "When on, an autonomous BUY/SELL suggestion from the PPO model is only actually submitted " +
+            "if the item's CURRENT live wiki spread independently clears the margin bar below (checked fresh at " +
+            "submission time, not just whatever price the model proposed) - on top of every other existing " +
+            "guardrail, never replacing them. The model still makes every decision (which item, which " +
+            "direction, confidence); this only adds one more live-market sanity check before trusting a " +
+            "suggestion to actually fill fast and stay profitable. Suggestions that fail this check are held " +
+            "(same as any other guardrail rejection - reconsidered fresh next tick), not discarded outright.",
+        position = 0,
+        section = rapidFlippingSection
+    )
+    default boolean rapidPpoEnabled() {
+        return false;
+    }
+
+    @ConfigItem(
+        keyName = "rapidNonPpoEnabled",
+        name = "Rapid non-PPO (standalone scanner)",
+        description = "Independent of the PPO model entirely: on its own periodic scan (see 'Rapid scan interval' " +
+            "below), evaluates every watchlisted item's (or every tradeable item's, see 'Rapid scan scope') live " +
+            "wiki spread and queues a BUY for anything clearing the margin bar below, sized by 'Rapid flip budget " +
+            "per item' - capped at the item's own GE 4-hour buy limit. Once a rapid BUY fills, a SELL is queued " +
+            "immediately at the then-current live insta-sell price (re-checked at that moment, not the price the " +
+            "BUY was originally sized against) - true rapid turnaround, no waiting for a better price. Every " +
+            "order this produces is a normal PPOFlipperOrder through the same OrderQueue/Guardrails/" +
+            "PortfolioManager pipeline as everything else in this plugin (buy limits, cost-basis tracking, and " +
+            "the GE active-offer slot cap are all respected automatically, nothing bypassed for speed).",
+        position = 1,
+        section = rapidFlippingSection
+    )
+    default boolean rapidNonPpoEnabled() {
+        return false;
+    }
+
+    @ConfigItem(
+        keyName = "rapidScanAllItems",
+        name = "Rapid scan scope: all tradeable items",
+        description = "Only affects Rapid non-PPO's scan scope (Rapid PPO always evaluates whatever item the " +
+            "model already proposed). Off (default): only scans items on your watchlist, consistent with how " +
+            "every other part of this plugin scopes itself. On: scans every tradeable item the wiki's bulk " +
+            "/latest endpoint returns (~4,700 items) - no extra HTTP requests either way, since that endpoint " +
+            "already fetches every item's price in one call regardless of how many are actually evaluated " +
+            "locally, but this surfaces opportunities in items you never deliberately chose to track.",
+        position = 2,
+        section = rapidFlippingSection
+    )
+    default boolean rapidScanAllItems() {
+        return false;
+    }
+
+    /** Which shape 'Rapid flipping minimum margin' below is interpreted as. */
+    enum RapidMarginType {
+        PERCENT_ABOVE_TAX,
+        FLAT_GP_PER_UNIT
+    }
+
+    @ConfigItem(
+        keyName = "rapidMarginType",
+        name = "Rapid margin type",
+        description = "How 'Rapid flipping minimum margin' below is interpreted. 'Percent above tax' requires " +
+            "the live spread's margin (net of the 2% GE sell tax) to exceed the configured percentage of the " +
+            "buy price - scales naturally across cheap and expensive items alike. 'Flat gp per unit' instead " +
+            "requires a fixed minimum net gp profit per unit regardless of item price - simpler to reason about " +
+            "for a specific item, but a poor fit across a watchlist spanning very different price ranges. Never " +
+            "combined - exactly one applies at a time, per this setting.",
+        position = 3,
+        section = rapidFlippingSection
+    )
+    default RapidMarginType rapidMarginType() {
+        return RapidMarginType.PERCENT_ABOVE_TAX;
+    }
+
+    @ConfigItem(
+        keyName = "rapidMinMarginPercent",
+        name = "Rapid flipping minimum margin (%)",
+        description = "Only used when 'Rapid margin type' above is 'Percent above tax'. The live spread's net " +
+            "margin (insta-sell minus insta-buy, minus 2% GE sell tax) must exceed this percentage of the " +
+            "insta-buy price before a rapid flip is proposed - e.g. 1% means a flip needs the spread to clear " +
+            "tax by at least an extra 1% of the buy price, not just break even against it.",
+        position = 4,
+        section = rapidFlippingSection
+    )
+    default double rapidMinMarginPercent() {
+        return 1.0;
+    }
+
+    @ConfigItem(
+        keyName = "rapidMinMarginGp",
+        name = "Rapid flipping minimum margin (gp/unit)",
+        description = "Only used when 'Rapid margin type' above is 'Flat gp per unit'. The live spread's net " +
+            "margin per unit (insta-sell minus insta-buy, minus 2% GE sell tax, divided by quantity) must exceed " +
+            "this flat gp amount before a rapid flip is proposed.",
+        position = 5,
+        section = rapidFlippingSection
+    )
+    default int rapidMinMarginGp() {
+        return 5;
+    }
+
+    @ConfigItem(
+        keyName = "rapidFlipBudgetGp",
+        name = "Rapid flip budget per item (gp)",
+        description = "Only used by Rapid non-PPO (Rapid PPO sizes its orders exactly as the model proposed, " +
+            "same as always). Maximum gp to spend on a single rapid BUY - quantity is this budget divided by the " +
+            "live insta-buy price, capped at the item's own GE 4-hour buy limit (never rounded up past either " +
+            "bound). Bounds risk per flip regardless of the item's own price.",
+        position = 6,
+        section = rapidFlippingSection
+    )
+    default int rapidFlipBudgetGp() {
+        return 50_000;
+    }
+
+    @ConfigItem(
+        keyName = "rapidScanIntervalSeconds",
+        name = "Rapid scan interval (seconds)",
+        description = "Only used by Rapid non-PPO. How often the standalone scanner re-evaluates every item in " +
+            "scope against the margin bar - independent of, and typically much faster than, " +
+            "'decisionTickIntervalSeconds' (the PPO model's own decide cadence), since rapid flipping is " +
+            "specifically about reacting to a spread the moment it opens up.",
+        position = 7,
+        section = rapidFlippingSection
+    )
+    default int rapidScanIntervalSeconds() {
+        return 10;
+    }
 }

@@ -193,6 +193,20 @@ public class DecisionEngine {
     }
 
     /**
+     * Every tradeable item id known to the bulk-fetched mapping cache - for
+     * {@code RapidFlipScanner}'s "scan every tradeable item" mode ({@code rapidScanAllItems}),
+     * which has no watchlist to scope itself to and needs the full universe instead. Proactively
+     * calls {@link #refreshItemMappings()} first (a cheap no-op once warm, per that method's own
+     * TTL) rather than assuming a DECIDE tick has already warmed it - rapid non-PPO is designed to
+     * work with the PPO/DECIDE side entirely disabled, so it cannot depend on that loop having run
+     * even once.
+     */
+    public java.util.Set<Integer> getAllKnownItemIds() {
+        refreshItemMappings();
+        return itemMappingCache.keySet();
+    }
+
+    /**
      * The item's display name from the same bulk-fetched mapping cache {@link #getBuyLimit} reads,
      * or {@code null} if not yet known (an item genuinely missing from the bulk response, or not
      * yet warmed). Added for {@code PPOFlipperStarScript#toDecision} to resolve a suggestion's item
