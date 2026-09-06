@@ -4,9 +4,11 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.BuyLimitLedger;
 import net.runelite.client.plugins.microbot.ppoflipperstar.portfolio.PortfolioManager;
+import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 
 /**
  * Guardrail checks applied to a {@link PPOFlipperOrder} before it's ever submitted to the GE -
@@ -69,6 +71,7 @@ public class Guardrails {
         if (order.getAction() == GrandExchangeAction.SELL) {
             int held = portfolio.getHeldQuantity(order.getItemName());
             if (order.getQuantity() > held) {
+                logSellRejectionDiagnostics(order);
                 return String.format(
                     "sell quantity %d exceeds what's held (%d)",
                     order.getQuantity(), held);
@@ -190,6 +193,58 @@ public class Guardrails {
      * loop's own per-item mapping lookups; routing through its shared, already-bulk-warmed cache
      * here closes the one remaining call site still bypassing that fix.
      */
+    /**
+     * Unconditional diagnostic (never debug-gated - see this project's standing logging policy)
+     * for the "sell quantity exceeds what's held" rejection, added after a real incident: Yew
+     * longbow (u), reported genuinely held as a noted stack, was rejected this way for an entire
+     * multi-hour session despite the ItemNameResolver fix that already resolved this exact
+     * message's two previous root causes (Mystic water staff, Ruby amulet, etc.) - meaning
+     * whatever's wrong this time is a new, not-yet-isolated cause. Dumps every raw
+     * {@link Rs2ItemModel} (id/name/isNoted/quantity) from both inventory and the bank whose name
+     * contains the order's item name (case-insensitive, substring - not exact, since the point is
+     * to see whatever the client actually has under a similar name, including near-misses that
+     * would explain a resolution mismatch) alongside the resolved id and both canonical sub-counts,
+     * so the next occurrence is diagnosable from client.log without needing to reproduce it live.
+     */
+    private void logSellRejectionDiagnostics(PPOFlipperOrder order) {
+        String needle = order.getItemName() == null ? "" : order.getItemName().toLowerCase();
+        int resolvedId = itemNameResolver.resolveId(order.getItemName());
+        StringBuilder sb = new StringBuilder();
+        sb.append("PPOFlipperStar: SELL rejection diagnostics for \"").append(order.getItemName())
+            .append("\" - orderItemId=").append(order.getItemId())
+            .append(" resolvedId=").append(resolvedId)
+            .append(" inventoryOnlyMode=").append(config.inventoryOnlyMode())
+            .append(" inventoryQty(resolvedId)=").append(resolvedId > 0 ? inventoryManager.getQuantity(resolvedId) : -1)
+            .append(" bankQty(resolvedId)=").append(resolvedId > 0 ? Rs2Bank.bankItems().stream()
+                .filter(i -> matchesCanonical(i, resolvedId))
+                .mapToInt(Rs2ItemModel::getQuantity).sum() : -1);
+        sb.append(" | raw inventory matches: ");
+        appendRawMatches(sb, Rs2Inventory.all(), needle);
+        sb.append(" | raw bank matches: ");
+        appendRawMatches(sb, Rs2Bank.bankItems(), needle);
+        log.warn(sb.toString());
+    }
+
+    private boolean matchesCanonical(Rs2ItemModel item, int resolvedId) {
+        if (!item.isNoted()) {
+            return item.getId() == resolvedId;
+        }
+        return itemNameResolver.resolveId(item.getName()) == resolvedId;
+    }
+
+    private void appendRawMatches(StringBuilder sb, java.util.List<Rs2ItemModel> items, String needle) {
+        boolean any = false;
+        for (Rs2ItemModel item : items) {
+            String name = item.getName();
+            if (name == null || !name.toLowerCase().contains(needle)) continue;
+            if (any) sb.append(", ");
+            sb.append(String.format("[id=%d name=\"%s\" noted=%s qty=%d]",
+                item.getId(), name, item.isNoted(), item.getQuantity()));
+            any = true;
+        }
+        if (!any) sb.append("(none)");
+    }
+
     private String checkBuyLimit(PPOFlipperOrder order) {
         int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         if (itemId <= 0) {
