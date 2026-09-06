@@ -5,6 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.plugins.microbot.ppoflipperstar.AdaptiveTimeout;
 
 import java.io.IOException;
 import java.net.URI;
@@ -53,6 +54,15 @@ public class PPOFlipperStarFirestoreClient {
         .connectTimeout(Duration.ofSeconds(10))
         .build();
 
+    // One shared AdaptiveTimeout across every REST call this client makes - see that class's
+    // javadoc for the real incident (every decision/request write timing out for hours on a
+    // degraded connection) this exists to accommodate. Shared rather than per-method: a slow
+    // response from one Firestore document means the Firestore backend/network path itself is
+    // slow right now, not something specific to whichever document happened to be called - a
+    // separate timeout per call site would mean this plugin has to independently rediscover the
+    // same slow stretch up to 10 times over before every call site adapts.
+    private static final AdaptiveTimeout REQUEST_TIMEOUT = new AdaptiveTimeout(Duration.ofSeconds(10), Duration.ofSeconds(30));
+
     private final PPOFlipperStarGoogleAuth auth;
     private final String documentsRootUrl;
 
@@ -64,6 +74,23 @@ public class PPOFlipperStarFirestoreClient {
 
     private String accountRoot(long accountHash) {
         return documentsRootUrl + "/accounts/" + accountHash;
+    }
+
+    /**
+     * Every REST call in this class sends its {@link HttpRequest} through here instead of calling
+     * {@link #HTTP_CLIENT}.send directly, so every one of them feeds the same shared
+     * {@link #REQUEST_TIMEOUT} regardless of which document/method it came from - see that field's
+     * own comment for why a shared instance is the right granularity here.
+     */
+    private HttpResponse<String> send(HttpRequest request) throws IOException, InterruptedException {
+        try {
+            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            REQUEST_TIMEOUT.onSuccess();
+            return response;
+        } catch (java.net.http.HttpTimeoutException e) {
+            REQUEST_TIMEOUT.onTimeout();
+            throw e;
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -112,11 +139,11 @@ public class PPOFlipperStarFirestoreClient {
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(marketHistoryDoc(itemId)))
             .header("Authorization", "Bearer " + auth.getAccessToken())
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .GET()
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         if (response.statusCode() == 404) {
             return null;
         }
@@ -177,11 +204,11 @@ public class PPOFlipperStarFirestoreClient {
             .uri(URI.create(marketHistoryDoc(itemId)))
             .header("Authorization", "Bearer " + auth.getAccessToken())
             .header("Content-Type", "application/json")
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .method("PATCH", HttpRequest.BodyPublishers.ofString(body.toString()))
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         if (response.statusCode() != 200) {
             throw new IOException("putMarketHistory failed: HTTP " + response.statusCode() + " - " + response.body());
         }
@@ -227,11 +254,11 @@ public class PPOFlipperStarFirestoreClient {
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(modelTrainedItemsDoc(gitCommit)))
             .header("Authorization", "Bearer " + auth.getAccessToken())
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .GET()
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         if (response.statusCode() == 404) {
             return Optional.empty();
         }
@@ -412,11 +439,11 @@ public class PPOFlipperStarFirestoreClient {
             .uri(URI.create(accountRoot(accountHash) + "/watchlist/" + itemId))
             .header("Authorization", "Bearer " + auth.getAccessToken())
             .header("Content-Type", "application/json")
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .method("PATCH", HttpRequest.BodyPublishers.ofString(body.toString()))
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         if (response.statusCode() != 200) {
             throw new IOException("watchlist upsert failed: HTTP " + response.statusCode() + " - " + response.body());
         }
@@ -427,11 +454,11 @@ public class PPOFlipperStarFirestoreClient {
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(accountRoot(accountHash) + "/watchlist/" + itemId))
             .header("Authorization", "Bearer " + auth.getAccessToken())
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .DELETE()
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         // Firestore returns 200 with an empty document body even if the document didn't exist -
         // deleting an already-absent doc is not an error condition here.
         if (response.statusCode() != 200) {
@@ -466,11 +493,11 @@ public class PPOFlipperStarFirestoreClient {
             .uri(URI.create(accountRoot(accountHash) + "/presence/heartbeat"))
             .header("Authorization", "Bearer " + auth.getAccessToken())
             .header("Content-Type", "application/json")
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .method("PATCH", HttpRequest.BodyPublishers.ofString(body.toString()))
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         if (response.statusCode() != 200) {
             throw new IOException("presence upsert failed: HTTP " + response.statusCode() + " - " + response.body());
         }
@@ -505,11 +532,11 @@ public class PPOFlipperStarFirestoreClient {
             .uri(URI.create(accountRoot(accountHash) + "/tradeHistory"))
             .header("Authorization", "Bearer " + auth.getAccessToken())
             .header("Content-Type", "application/json")
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         if (response.statusCode() != 200) {
             throw new IOException("append trade history failed: HTTP " + response.statusCode() + " - " + response.body());
         }
@@ -617,11 +644,11 @@ public class PPOFlipperStarFirestoreClient {
             .uri(URI.create(accountRoot(accountHash) + "/decision/request"))
             .header("Authorization", "Bearer " + auth.getAccessToken())
             .header("Content-Type", "application/json")
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .method("PATCH", HttpRequest.BodyPublishers.ofString(body.toString()))
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         if (response.statusCode() != 200) {
             throw new IOException("put decision request failed: HTTP " + response.statusCode() + " - " + response.body());
         }
@@ -670,11 +697,11 @@ public class PPOFlipperStarFirestoreClient {
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(accountRoot(accountHash) + "/decision/response"))
             .header("Authorization", "Bearer " + auth.getAccessToken())
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .GET()
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         if (response.statusCode() == 404) {
             return Optional.empty();
         }
@@ -726,11 +753,11 @@ public class PPOFlipperStarFirestoreClient {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("Authorization", "Bearer " + auth.getAccessToken())
-                .timeout(Duration.ofSeconds(10))
+                .timeout(REQUEST_TIMEOUT.current())
                 .GET()
                 .build();
 
-            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = send(request);
             if (response.statusCode() == 404) {
                 // The parent "accounts/{hash}" document itself doesn't exist yet - an empty
                 // subcollection listing, not an error (Firestore has no explicit collection
@@ -762,11 +789,11 @@ public class PPOFlipperStarFirestoreClient {
             .uri(URI.create(documentUrl + "?" + updateMask))
             .header("Authorization", "Bearer " + auth.getAccessToken())
             .header("Content-Type", "application/json")
-            .timeout(Duration.ofSeconds(10))
+            .timeout(REQUEST_TIMEOUT.current())
             .method("PATCH", HttpRequest.BodyPublishers.ofString(body.toString()))
             .build();
 
-        HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = send(request);
         if (response.statusCode() != 200) {
             throw new IOException("PATCH failed: HTTP " + response.statusCode() + " - " + response.body());
         }

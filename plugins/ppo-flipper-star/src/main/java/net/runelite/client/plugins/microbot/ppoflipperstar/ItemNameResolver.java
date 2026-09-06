@@ -64,6 +64,9 @@ public class ItemNameResolver {
         .connectTimeout(Duration.ofSeconds(10))
         .version(HttpClient.Version.HTTP_1_1)
         .build();
+    // See AdaptiveTimeout's javadoc for the real incident (wiki responses consistently taking
+    // ~6s on a degraded connection, right against this class's own flat timeout) this addresses.
+    private static final AdaptiveTimeout FETCH_TIMEOUT = new AdaptiveTimeout(Duration.ofSeconds(15), Duration.ofSeconds(45));
 
     private final Map<String, Integer> idByLowercaseName = new ConcurrentHashMap<>();
     private volatile long lastFetchAtMillis = 0;
@@ -92,11 +95,12 @@ public class ItemNameResolver {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(MAPPING_URL))
                 .setHeader("User-Agent", USER_AGENT)
-                .timeout(Duration.ofSeconds(15))
+                .timeout(FETCH_TIMEOUT.current())
                 .GET()
                 .build();
 
             HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            FETCH_TIMEOUT.onSuccess();
             if (response.statusCode() != 200) {
                 log.warn("PPOFlipperStar: ItemNameResolver bulk mapping fetch returned HTTP {}", response.statusCode());
                 return;
@@ -112,6 +116,10 @@ public class ItemNameResolver {
             }
             lastFetchAtMillis = System.currentTimeMillis();
             log.info("PPOFlipperStar: ItemNameResolver warmed {} item name(s) from the wiki's mapping data.", count);
+        } catch (java.net.http.HttpTimeoutException e) {
+            FETCH_TIMEOUT.onTimeout();
+            log.warn("PPOFlipperStar: ItemNameResolver bulk mapping fetch timed out (timeout now {}s after repeated slowness) - {}",
+                FETCH_TIMEOUT.current().getSeconds(), e.getMessage());
         } catch (Exception e) {
             log.warn("PPOFlipperStar: ItemNameResolver bulk mapping fetch failed - {}", e.getMessage());
         }

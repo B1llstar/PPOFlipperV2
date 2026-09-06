@@ -107,6 +107,9 @@ public class DecisionEngine {
         .connectTimeout(Duration.ofSeconds(10))
         .version(HttpClient.Version.HTTP_1_1)
         .build();
+    // See AdaptiveTimeout's javadoc for the real incident (wiki responses consistently taking
+    // ~6s on a degraded connection, right against this class's own flat timeout) this addresses.
+    private static final AdaptiveTimeout ITEM_MAPPING_TIMEOUT = new AdaptiveTimeout(Duration.ofSeconds(15), Duration.ofSeconds(45));
     private volatile long lastItemMappingBulkFetchAtMillis = 0;
 
     /**
@@ -142,11 +145,12 @@ public class DecisionEngine {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(ITEM_MAPPING_URL))
                 .setHeader("User-Agent", ITEM_MAPPING_USER_AGENT)
-                .timeout(Duration.ofSeconds(15))
+                .timeout(ITEM_MAPPING_TIMEOUT.current())
                 .GET()
                 .build();
 
             HttpResponse<String> response = ITEM_MAPPING_HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            ITEM_MAPPING_TIMEOUT.onSuccess();
             if (response.statusCode() != 200) {
                 log.warn("PPOFlipperStar: bulk item mapping fetch returned HTTP {}", response.statusCode());
                 return;
@@ -173,6 +177,10 @@ public class DecisionEngine {
             }
             lastItemMappingBulkFetchAtMillis = System.currentTimeMillis();
             log.info("PPOFlipperStar: bulk item mapping fetch warmed {} item(s) in one request.", count);
+        } catch (java.net.http.HttpTimeoutException e) {
+            ITEM_MAPPING_TIMEOUT.onTimeout();
+            log.warn("PPOFlipperStar: bulk item mapping fetch timed out (timeout now {}s after repeated slowness) - {}",
+                ITEM_MAPPING_TIMEOUT.current().getSeconds(), e.getMessage());
         } catch (Exception e) {
             log.warn("PPOFlipperStar: bulk item mapping fetch failed - {}", e.getMessage());
         }

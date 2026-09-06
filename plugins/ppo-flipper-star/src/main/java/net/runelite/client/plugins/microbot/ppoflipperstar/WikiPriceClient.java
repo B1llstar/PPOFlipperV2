@@ -94,6 +94,11 @@ public class WikiPriceClient {
         .version(HttpClient.Version.HTTP_1_1)
         .build();
 
+    // Separate AdaptiveTimeout per endpoint shape (bulk vs per-item) - see that class's javadoc.
+    // A slow stretch on one shouldn't force the other to also assume it's slow.
+    private static final AdaptiveTimeout BULK_TIMEOUT = new AdaptiveTimeout(Duration.ofSeconds(10), Duration.ofSeconds(30));
+    private static final AdaptiveTimeout PER_ITEM_TIMEOUT = new AdaptiveTimeout(Duration.ofSeconds(5), Duration.ofSeconds(15));
+
     // Shared by every WikiPriceClient instance (each caller - the script, Guardrails,
     // DecisionEngine - constructs its own) so a background refresh triggered by any one of them
     // warms the cache for all of them, and so at most one single-item async fetch is ever in
@@ -156,11 +161,12 @@ public class WikiPriceClient {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(LATEST_URL_ALL))
                 .setHeader("User-Agent", USER_AGENT)
-                .timeout(Duration.ofSeconds(10))
+                .timeout(BULK_TIMEOUT.current())
                 .GET()
                 .build();
 
             HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            BULK_TIMEOUT.onSuccess();
             if (response.statusCode() != 200) {
                 log.warn("PPOFlipperStar: bulk wiki price fetch returned HTTP {}", response.statusCode());
                 return;
@@ -186,6 +192,10 @@ public class WikiPriceClient {
             }
             lastBulkFetchAtMillis = now;
             log.debug("PPOFlipperStar: bulk wiki price fetch updated {} item(s).", updated);
+        } catch (java.net.http.HttpTimeoutException e) {
+            BULK_TIMEOUT.onTimeout();
+            log.warn("PPOFlipperStar: bulk wiki price fetch timed out (timeout now {}s after repeated slowness) - {}",
+                BULK_TIMEOUT.current().getSeconds(), e.getMessage());
         } catch (Exception e) {
             log.warn("PPOFlipperStar: bulk wiki price fetch failed - {}", e.getMessage());
         }
@@ -251,11 +261,12 @@ public class WikiPriceClient {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(String.format(LATEST_URL, itemId)))
                 .setHeader("User-Agent", USER_AGENT)
-                .timeout(Duration.ofSeconds(5))
+                .timeout(PER_ITEM_TIMEOUT.current())
                 .GET()
                 .build();
 
             HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            PER_ITEM_TIMEOUT.onSuccess();
             if (response.statusCode() != 200) {
                 log.warn("PPOFlipperStar: wiki price lookup for item {} returned HTTP {}", itemId, response.statusCode());
                 return;
@@ -276,6 +287,10 @@ public class WikiPriceClient {
             }
 
             cache.put(itemId, new CachedPrice(price, System.currentTimeMillis()));
+        } catch (java.net.http.HttpTimeoutException e) {
+            PER_ITEM_TIMEOUT.onTimeout();
+            log.warn("PPOFlipperStar: wiki price lookup for item {} timed out (timeout now {}s after repeated slowness) - {}",
+                itemId, PER_ITEM_TIMEOUT.current().getSeconds(), e.getMessage());
         } catch (Exception e) {
             log.warn("PPOFlipperStar: wiki price lookup failed for item {} - {}", itemId, e.getMessage());
         }
