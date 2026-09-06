@@ -42,7 +42,7 @@ public interface PPOFlipperStarConfig extends Config {
         section = ordersSection
     )
     default boolean withdrawFromBank() {
-        return false;
+        return true;
     }
 
     @ConfigItem(
@@ -91,7 +91,7 @@ public interface PPOFlipperStarConfig extends Config {
         section = ordersSection
     )
     default int bankRefreshIntervalSeconds() {
-        return 0;
+        return 60;
     }
 
     @ConfigItem(
@@ -476,7 +476,7 @@ public interface PPOFlipperStarConfig extends Config {
         section = ppoSection
     )
     default boolean autonomousModeEnabled() {
-        return false;
+        return true;
     }
 
     @ConfigItem(
@@ -518,7 +518,7 @@ public interface PPOFlipperStarConfig extends Config {
         section = ppoSection
     )
     default boolean stalePositionAutoSellEnabled() {
-        return false;
+        return true;
     }
 
     @ConfigItem(
@@ -531,7 +531,7 @@ public interface PPOFlipperStarConfig extends Config {
         section = ppoSection
     )
     default int stalePositionThresholdHours() {
-        return 4;
+        return 8;
     }
 
     @ConfigSection(
@@ -614,7 +614,7 @@ public interface PPOFlipperStarConfig extends Config {
         section = rapidFlippingSection
     )
     default boolean rapidPpoEnabled() {
-        return false;
+        return true;
     }
 
     @ConfigItem(
