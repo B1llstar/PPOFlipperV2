@@ -101,16 +101,18 @@ public interface PPOFlipperStarConfig extends Config {
             "SELL_PRICE_OFFSET_FRAC - a SELL_100 can concede up to 30% of the spread for a faster fill), with no " +
             "awareness of what you actually paid for the position - it can undersell a real profit margin to " +
             "guarantee a quicker fill. When this is above 0, a SELL is never actually offered below your tracked " +
-            "average cost for that item plus this percentage - the price is raised to meet that floor if needed " +
-            "(the order still submits, just less aggressively priced, which may fill slower). Only applies when a " +
-            "real tracked average cost exists for the item (0 for untracked/pre-existing stock, e.g. holdings from " +
-            "before this ledger started tracking it) - in that case only the live insta-sell floor above applies, " +
-            "same as before this setting existed. 0 disables this floor entirely.",
+            "weighted-average cost for that item (see CostBasisEntry - every buy of the same item blends into one " +
+            "running average, not tracked as separate lots) plus this percentage, net of the 2% GE sell tax (see " +
+            "GeTax) - the price is raised to meet that floor if needed (the order still submits, just less " +
+            "aggressively priced, which may fill slower rather than ever executing at a loss). Defaults to 5%, " +
+            "not 0: with no tracked cost data (0 for untracked/pre-existing stock, e.g. holdings from before this " +
+            "ledger started tracking it) this silently no-ops and only the live insta-sell floor above applies - " +
+            "0 would leave a genuinely tracked position free to sell at a real loss with no guardrail at all.",
         position = 4,
         section = ordersSection
     )
     default double minSellProfitMarginPercent() {
-        return 0;
+        return 5.0;
     }
 
     @ConfigSection(
