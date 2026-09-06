@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -83,7 +84,19 @@ public class PPOFlipperStarScript extends Script {
     private Guardrails guardrails;
 
     private State state = State.IDLE;
-    private final Map<GrandExchangeSlots, PPOFlipperOrder> activeOrders = new LinkedHashMap<>();
+    // ConcurrentHashMap, not a plain LinkedHashMap - a real incident: this field is written from
+    // the script's own executor threads (submitNextOrder/checkForFinishedOffers) and read from
+    // PPOFlipperStarGeSlotOverlay#render(), which runs on RuneLite's own client/render thread, a
+    // genuinely different thread with no synchronization between the two. Confirmed live: an order
+    // that had visibly, successfully submitted into a real GE slot (per this script's own "submitted
+    // ..." log line) was read back as an empty activeOrders map from getActiveOrders() a few
+    // seconds later on the render thread - a plain HashMap/LinkedHashMap gives no memory-visibility
+    // guarantee across threads with no explicit synchronization, so a write from one thread is not
+    // guaranteed to ever become visible to a reader on another. Slot ordering is never actually
+    // relied upon anywhere this map is read (GrandExchangeSlots is a fixed 8-value enum, not
+    // something iterated in a meaningful order), so losing LinkedHashMap's insertion order for a
+    // real cross-thread visibility guarantee is a strict improvement, not a tradeoff.
+    private final Map<GrandExchangeSlots, PPOFlipperOrder> activeOrders = new ConcurrentHashMap<>();
     private PPOFlipperOrder orderAwaitingFunds;
     private PPOFlipperOrder lastFundsShortfallOrder;
 
