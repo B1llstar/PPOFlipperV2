@@ -16,6 +16,7 @@ import net.runelite.client.plugins.microbot.util.antiban.Rs2AntibanSettings;
 import net.runelite.client.plugins.microbot.util.antiban.enums.ActivityIntensity;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeAction;
+import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeRequest;
 import net.runelite.client.plugins.microbot.util.grandexchange.GrandExchangeSlots;
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.grandexchange.models.GrandExchangeOfferDetails;
@@ -1443,9 +1444,28 @@ public class PPOFlipperStarScript extends Script {
             return;
         }
 
-        boolean submitted = order.getAction() == GrandExchangeAction.BUY
-            ? Rs2GrandExchange.buyItem(geSearchName, submitPrice, order.getQuantity())
-            : Rs2GrandExchange.sellItem(geSearchName, order.getQuantity(), submitPrice);
+        // Built directly via GrandExchangeRequest/processOffer rather than the simpler
+        // buyItem()/sellItem() convenience methods - both of those hardcode exact(true)
+        // internally (confirmed via bytecode decompilation), which requires an exact,
+        // case-insensitive match against the GE search result widget's own text. Real incident:
+        // "Salve graveyard teleport (tablet)" (34 chars) failed to submit every single tick
+        // indefinitely - searchItemName's own widget-WAIT step truncates long names to 25 chars
+        // before searching (so the wait itself succeeds), but the exact-match CLICK lookup right
+        // after still uses the full untruncated name, and getSearchResultWidget's exact branch
+        // requires the search result's own displayed text to equalIgnoreCase that full string
+        // exactly - any mismatch (the client's own text rendering/truncation of a long
+        // parenthetical name, e.g.) means no result ever matches, silently failing forever with
+        // no path to succeed on retry. exact(false) instead uses a case-insensitive
+        // *contains* match, which is what the truncated wait step already relies on working - far
+        // more robust for a long or parenthetical item name, and no worse for a short/plain one.
+        GrandExchangeRequest request = GrandExchangeRequest.builder()
+            .action(order.getAction())
+            .itemName(geSearchName)
+            .exact(false)
+            .quantity(order.getQuantity())
+            .price(submitPrice)
+            .build();
+        boolean submitted = Rs2GrandExchange.processOffer(request);
 
         if (submitted) {
             if (order.getAction() == GrandExchangeAction.BUY) {
