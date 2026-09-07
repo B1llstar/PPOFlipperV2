@@ -1501,6 +1501,22 @@ public class PPOFlipperStarScript extends Script {
         // attempt if this retry doesn't clamp.
         order.setStatusDetail(null);
         int submitPrice = clampToLivePrice(order);
+        if (submitPrice < 0) {
+            // clampToLivePrice's SELL branch found no trustworthy live price AND the order's own
+            // proposed price failed the same sanity check - see that method's own comment for the
+            // real incident (Purple robe bottoms submitted at 67,550gp, ~137x above its real
+            // value, because the model's own decision was itself computed from the same tainted
+            // wiki data the live-price floor had already correctly learned to reject - rejecting
+            // the live floor alone left nothing to fall back to but an equally poisoned order
+            // price). Deferred, not skipped/marked FAILED: the order stays QUEUED and is retried
+            // next tick, by which point the wiki's bad one-off data point may have aged out (its
+            // own timestamp already shows it's stale) or genuinely current data may have arrived.
+            log.warn("PPOFlipperStar: deferring submission of {} - no live price could be trusted for this item " +
+                    "and the order's own price ({} gp) failed the same sanity check, so nothing safe to submit " +
+                    "at this tick; will retry next tick.",
+                order, order.getPrice());
+            return;
+        }
 
         // NOTE: Rs2GrandExchange.buyItem and .sellItem have inconsistent parameter order with
         // each other - buyItem(name, price, quantity) but sellItem(name, quantity, price). Do
@@ -1590,6 +1606,20 @@ public class PPOFlipperStarScript extends Script {
      * paying a little more than strictly necessary, not giving real GP away outright, and BUY
      * submissions can be far more frequent (Rapid non-PPO's own scanner) than the one-off SELL
      * path this fixes - not worth the added network-wait risk on that side too.
+     *
+     * <p><b>Returns -1 (never a real price) for a SELL when {@code price == null} - a follow-up
+     * incident to the one above.</b> {@code getLatestPriceBlocking} returning {@code null} means
+     * {@link WikiPriceClient}'s own sanity check (see its {@code parsePrice}) actively rejected an
+     * inverted/nonsensical spread for this item - not merely "no data yet." A real incident: Purple
+     * robe bottoms submitted at 67,550gp (~137x its real ~494gp value) even after that sanity check
+     * was live and correctly rejecting the wiki's bad data for this exact item on this exact tick
+     * (confirmed in the log immediately before the submission) - because the model's OWN decision
+     * price had already been computed from that same tainted data before the check caught it, and
+     * this method's old fallback ("no live floor -> trust the order's own price unchanged") had
+     * nothing better to offer once the live floor was correctly rejected. There is no independent
+     * way to validate the order's own price once the live reference itself is known-untrustworthy,
+     * so the only safe move is deferring the whole submission - see the caller's own handling of a
+     * negative return.
      */
     private int clampToLivePrice(PPOFlipperOrder order) {
         int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
@@ -1611,13 +1641,17 @@ public class PPOFlipperStarScript extends Script {
             return capped;
         } else {
             WikiPriceClient.Price price = wikiPriceClient.getLatestPriceBlocking(itemId);
+            if (price == null) {
+                // WikiPriceClient's own sanity check actively rejected this item's live data as
+                // untrustworthy (not merely absent) - see this method's own javadoc for the real
+                // incident this guards against. No safe fallback exists once the live reference
+                // itself is known-bad, so this signals the caller to defer the whole submission
+                // rather than trust an order price that may be equally poisoned.
+                return -1;
+            }
             int floored = order.getPrice();
-            if (price != null && price.instaSellPrice > 0) {
+            if (price.instaSellPrice > 0) {
                 floored = Math.max(floored, price.instaSellPrice);
-            } else {
-                log.warn("PPOFlipperStar: no live price available for {} even after a blocking fetch - " +
-                        "submitting at the order's own price {} gp with no live-market floor applied this time.",
-                    order.getItemName(), order.getPrice());
             }
             if (floored > order.getPrice()) {
                 log.info("PPOFlipperStar: raised sell price for {} from {} to live insta-sell price {}",
