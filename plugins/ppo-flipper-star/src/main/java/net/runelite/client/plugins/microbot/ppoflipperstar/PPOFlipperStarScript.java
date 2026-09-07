@@ -1901,7 +1901,7 @@ public class PPOFlipperStarScript extends Script {
                     // the next tick's check retries it.
                     log.warn("PPOFlipperStar: collectOffer failed for slot {} - {}, will retry next tick", slot, order);
                 }
-            } else if (isDud(order) && isStale(order) && queue.nextQueued().isPresent()) {
+            } else if (isDud(order) && isStale(order)) {
                 abortStaleOffer(slot, order);
             }
             queue.notifyChanged();
@@ -1954,12 +1954,18 @@ public class PPOFlipperStarScript extends Script {
      * it would strand the already-filled portion's exit strategy along with the cancelled
      * remainder.
      *
-     * <p>Being stale by itself is NOT sufficient to abort an offer - see that same call site's
-     * additional {@code queue.nextQueued().isPresent()} check: a stale offer only actually gets
-     * pulled once something else is genuinely waiting on the slot it occupies. An idle GE slot
-     * holding a slow-moving offer costs nothing while nothing else wants that slot, so there's no
-     * reason to force a re-decide just because a timer elapsed - only do it when the freed slot
-     * would immediately go to real, queued work instead of sitting empty.
+     * <p><b>No longer gated on something else being QUEUED to take the freed slot</b> (a previous
+     * version of {@link #checkForFinishedOffers}'s call site additionally required
+     * {@code queue.nextQueued().isPresent()}, on the reasoning that an idle slot holding a
+     * slow-moving offer costs nothing while nothing else wants it). Confirmed live as a real
+     * deadlock: when every GE slot is occupied by a stale dud AND the DECIDE tick's fresh
+     * suggestions are themselves being rejected before ever reaching QUEUED (e.g. rapid PPO's own
+     * margin-bar gate), {@code nextQueued()} is permanently empty, so every stuck offer sat
+     * un-aborted indefinitely - nothing queues, so nothing evicts, so nothing sells, so nothing
+     * queues. A stale, dud offer (see {@link #isDud} - a real, meaningful partial fill is still
+     * never touched regardless of age) is now aborted on its own merits and sent back through a
+     * fresh DECIDE tick purely because it's stale, not conditioned on anything else needing the
+     * room first.
      */
     private boolean isStale(PPOFlipperOrder order) {
         int timeoutMinutes = config.staleOfferTimeoutMinutes();
