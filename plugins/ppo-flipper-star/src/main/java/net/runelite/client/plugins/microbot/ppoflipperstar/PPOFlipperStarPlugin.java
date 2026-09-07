@@ -282,24 +282,35 @@ public class PPOFlipperStarPlugin extends Plugin {
      * Reacts to a disconnect by dismissing whatever prompt/dialog is currently on screen and
      * clicking back in via the active profile's saved login (the "Existing user" button showing
      * the profile's own username) - same fix, same reasoning, and the same
-     * {@code LoginManager.login()} call as the sibling {@code nmz-debug} plugin's
+     * {@code LoginManager.login(int)} call as the sibling {@code nmz-debug} plugin's
      * {@code NmzDebugPlugin#reconnect} (see that method's own javadoc for the full bytecode-level
-     * confirmation of what {@code login()} does internally: {@code handleDisconnectDialogs} to
-     * dismiss a stuck dialog, then set world/credentials from the active profile and submit).
-     * {@code login()} already self-throttles and no-ops during an in-flight attempt, so firing it
-     * once per disconnect event is enough - RuneLite keeps re-firing
-     * {@code CONNECTION_LOST}/{@code LOGIN_SCREEN} while still disconnected, so a failed attempt
-     * gets retried on the next one without this needing its own retry loop.
+     * confirmation of what {@code login(int)} does internally: {@code handleDisconnectDialogs} to
+     * dismiss a stuck dialog, then set the given world/the profile's own credentials and submit).
      *
-     * <p>Dispatched via {@code runOnSeperateThread} - {@code login()} clicks widgets and sleeps
+     * <p>Explicitly forces a members world via {@link LoginManager#getRandomWorld(boolean)} (true)
+     * rather than the plain no-arg {@link LoginManager#login()} - same fix as nmz-debug's own
+     * reconnect (see that method's javadoc for the real incident: a disconnect reconnected onto a
+     * free world instead, hitting a blocking "log into a members world" dialog this reconnect
+     * logic had no handling for). Applied here too even though ordinary GE trading itself doesn't
+     * require membership, since the account this plugin runs against is a members account and
+     * there's no reason to risk the same ambiguity the no-arg overload showed live elsewhere.
+     *
+     * <p>{@code login(int)} already self-throttles and no-ops during an in-flight attempt, so
+     * firing it once per disconnect event is enough - RuneLite keeps re-firing
+     * {@code CONNECTION_LOST}/{@code LOGIN_SCREEN} while still disconnected, so a failed attempt
+     * gets retried on the next one (picking a fresh random members world each time) without this
+     * needing its own retry loop.
+     *
+     * <p>Dispatched via {@code runOnSeperateThread} - {@code login(int)} clicks widgets and sleeps
      * between steps internally, which must never run directly on the event-bus callback's thread
      * (effectively the client thread) {@code onGameStateChanged} is itself invoked on.
      */
     private void reconnect(String reason) {
-        log.warn("PPOFlipperStar: reconnect - disconnect detected ({}) - dismissing prompt and logging back in via LoginManager.login()", reason);
+        log.warn("PPOFlipperStar: reconnect - disconnect detected ({}) - dismissing prompt and logging back in via LoginManager.login() on a members world", reason);
         Microbot.getClientThread().runOnSeperateThread(() -> {
-            boolean success = LoginManager.login();
-            log.warn("PPOFlipperStar: reconnect - LoginManager.login() -> {}", success);
+            int membersWorld = LoginManager.getRandomWorld(true);
+            boolean success = LoginManager.login(membersWorld);
+            log.warn("PPOFlipperStar: reconnect - LoginManager.login({}) -> {}", membersWorld, success);
             return true;
         });
     }

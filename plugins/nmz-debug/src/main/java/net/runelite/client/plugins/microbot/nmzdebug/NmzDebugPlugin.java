@@ -99,31 +99,46 @@ public class NmzDebugPlugin extends Plugin {
     /**
      * Reacts to a disconnect by dismissing whatever prompt/dialog is currently on screen and
      * clicking back in via the active profile's saved login (the "Existing user" button showing
-     * the profile's own username) - {@link LoginManager#login()} does exactly this in one call
+     * the profile's own username) - {@link LoginManager#login(int)} does exactly this in one call
      * (confirmed via bytecode: it runs {@code handleDisconnectDialogs} first, which dismisses a
      * stuck disconnect dialog by index, then sets the world/credentials and submits), reading
      * whatever profile {@link LoginManager#getActiveProfile()} already resolves to - the same
      * profile this plugin already trusts for bank-pin decryption in
      * {@link NmzDebugScript#handleStore}, so this needs no separate credential source of its own.
      *
+     * <p><b>Explicitly forces a members world via {@link LoginManager#getRandomWorld(boolean)}
+     * (true) rather than the plain no-arg {@link LoginManager#login()}.</b> Real incident: a
+     * disconnect that happened while genuinely inside the (members-only) Nightmare Zone instance
+     * reconnected onto a free-to-play world instead, hitting a blocking "To access this free
+     * world, log into a members world" dialog with a "Try again" button - one this reconnect logic
+     * had no handling for at all, so the account was stuck at the login screen indefinitely rather
+     * than actually getting back in. The no-arg {@code login()} resolves its world from the active
+     * profile's own {@code selectedWorld}/membership flag (per its own bytecode), which is
+     * apparently not reliably set to a members world for this profile - NMZ specifically can never
+     * be played on a free world, so this reconnect path has no reason to ever risk that ambiguity;
+     * it should always explicitly demand a members world regardless of what the profile itself
+     * happens to have configured.
+     *
      * <p>Dispatched via {@code runOnSeperateThread}, matching {@link #onActorDeath}'s own pattern
      * in this class - {@code login()} clicks widgets and sleeps between steps internally (per its
      * bytecode), which must never run directly on the event-bus callback's thread (effectively the
      * client thread) the way {@code onGameStateChanged} itself is invoked on.
      *
-     * <p>Deliberately fire-and-forget beyond a single attempt: {@link LoginManager#login()} is
+     * <p>Deliberately fire-and-forget beyond a single attempt: {@link LoginManager#login(int)} is
      * already self-throttling (a 1500ms minimum gap between attempts, tracked internally) and a
      * no-op while a login attempt is already active, so calling it once per disconnect event here
      * is enough - if this attempt doesn't land (e.g. the world is full, a "world 302 is currently
      * full" dialog needing a different response), the very next tick's {@code CONNECTION_LOST}/
      * {@code LOGIN_SCREEN} transition (RuneLite keeps firing these while disconnected) triggers
-     * another attempt rather than this needing its own retry loop.
+     * another attempt (picking a fresh random members world each time) rather than this needing
+     * its own retry loop.
      */
     private void reconnect(String reason) {
-        NmzDebugLog.log("[NMZDEBUG] reconnect: disconnect detected (" + reason + ") - dismissing prompt and logging back in via LoginManager.login()");
+        NmzDebugLog.log("[NMZDEBUG] reconnect: disconnect detected (" + reason + ") - dismissing prompt and logging back in via LoginManager.login() on a members world");
         Microbot.getClientThread().runOnSeperateThread(() -> {
-            boolean success = LoginManager.login();
-            NmzDebugLog.log("[NMZDEBUG] reconnect: LoginManager.login() -> " + success);
+            int membersWorld = LoginManager.getRandomWorld(true);
+            boolean success = LoginManager.login(membersWorld);
+            NmzDebugLog.log("[NMZDEBUG] reconnect: LoginManager.login(" + membersWorld + ") -> " + success);
             return true;
         });
     }
