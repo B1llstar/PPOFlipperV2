@@ -442,11 +442,29 @@ public class DecisionEngine {
      * available for it right now (an item with no recent wiki trade data can't usefully be
      * scored - skipped for this tick rather than sent with fabricated zeros, matching
      * {@link WikiPriceClient#getLatestPrice}'s own "return null, let the caller decide" contract).
+     *
+     * <p><b>Exception: a currently-HELD item falls back to a stale-but-sane cached price</b> (see
+     * {@link WikiPriceClient#getLatestPriceEvenIfStale}'s javadoc for the real incident this
+     * closes) rather than being dropped entirely - a position waiting to be sold shouldn't become
+     * invisible to every single DECIDE tick for as long as its live wiki data happens to be
+     * rejected/stale, which was confirmed live to persist for a large, non-trivial fraction of the
+     * whole tradeable item universe at any given moment.
      */
     private Optional<PPOFlipperStarFirestoreClient.DecisionRequestItem> buildRequestItem(int itemId, int maxActiveOffers, double freeSlotsNorm, double availableGpNorm, Map<Integer, Integer> allHoldings) {
         WikiPriceClient.Price price = wikiPriceClient.getLatestPrice(itemId);
         if (price == null || price.instaBuyPrice <= 0 || price.instaSellPrice <= 0) {
-            return Optional.empty();
+            boolean isHeld = allHoldings.getOrDefault(itemId, 0) > 0;
+            if (!isHeld) {
+                return Optional.empty();
+            }
+            WikiPriceClient.Price stalePrice = wikiPriceClient.getLatestPriceEvenIfStale(itemId);
+            if (stalePrice == null || stalePrice.instaBuyPrice <= 0 || stalePrice.instaSellPrice <= 0) {
+                return Optional.empty();
+            }
+            log.debug("PPOFlipperStar: item {} is held but its live price is currently rejected/stale - " +
+                "using last known-good cached price ({} / {}) so this position stays visible to DECIDE.",
+                itemId, stalePrice.instaBuyPrice, stalePrice.instaSellPrice);
+            price = stalePrice;
         }
 
         double avgHigh = price.instaBuyPrice;

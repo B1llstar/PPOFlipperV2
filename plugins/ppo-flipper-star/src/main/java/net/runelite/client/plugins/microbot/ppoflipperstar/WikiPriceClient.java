@@ -257,6 +257,41 @@ public class WikiPriceClient {
     }
 
     /**
+     * Same cache as {@link #getLatestPrice(int)}, but returns whatever price is cached
+     * REGARDLESS of {@link #CACHE_TTL_MILLIS} staleness - only {@code null} if nothing has ever
+     * been cached for this item at all. Still triggers the same background refresh as
+     * {@link #getLatestPrice(int)} on a stale/missing entry, so a fresher price naturally takes
+     * over on a later call once the fetch lands - this only changes what's returned RIGHT NOW on
+     * a stale hit, from "treat as unusable" to "use it anyway."
+     *
+     * <p>Exists specifically for {@link DecisionEngine#buildRequestItem} to use for a currently-
+     * HELD item whose live price was just rejected by {@link #parsePrice}'s inversion sanity
+     * check (or is simply too old): a real incident found ~250 distinct items failing that check
+     * at any given time (a stale one-off trade lingering in the wiki's "most recent trade" field -
+     * see {@link #MAX_SANE_LOW_OVER_HIGH_RATIO}'s own javadoc), which meant a held position in one
+     * of those items got dropped from the DECIDE request entirely, every single tick the bad data
+     * persisted - the model literally never saw it, so it could never be proposed for SELL no
+     * matter how badly it needed to be. The LAST price that DID pass the sanity check is still
+     * sitting in {@link #cache} (a rejected fetch never overwrites or clears a prior good entry -
+     * see {@link #fetchOneSynchronously}), it just ages past {@link #CACHE_TTL_MILLIS} and
+     * {@link #getLatestPrice(int)} stops returning it. For a non-held item this staleness
+     * distinction is the right call (no urgency, wait for genuinely fresh data before proposing a
+     * fresh BUY) - for a held item already waiting to exit, a slightly-stale-but-trustworthy price
+     * is strictly better than total blindness to it.
+     */
+    public Price getLatestPriceEvenIfStale(int itemId) {
+        CachedPrice cached = cache.get(itemId);
+        if (cached == null) {
+            triggerBackgroundFetch(itemId);
+            return null;
+        }
+        if (System.currentTimeMillis() - cached.fetchedAtMillis >= CACHE_TTL_MILLIS) {
+            triggerBackgroundFetch(itemId);
+        }
+        return cached.price;
+    }
+
+    /**
      * Same cache as {@link #getLatestPrice(int)}, but on a cache miss/stale entry, BLOCKS the
      * calling thread on a real, synchronous HTTP fetch instead of returning a stale/null price and
      * triggering a background refresh for next time. Exists specifically for
