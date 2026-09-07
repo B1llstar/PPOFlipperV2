@@ -16,6 +16,8 @@ import ItemIcon from '@/components/ItemIcon.vue'
 import ActivityTicker from '@/components/ActivityTicker.vue'
 import PnlSparkline from '@/components/PnlSparkline.vue'
 import DecisionHeartbeat from '@/components/DecisionHeartbeat.vue'
+import MatchedTradesTable from '@/components/MatchedTradesTable.vue'
+import { useMatchedTrades } from '@/composables/useMatchedTrades'
 
 const props = defineProps({
   accountHash: { type: String, required: true },
@@ -30,6 +32,12 @@ const { request: decisionRequest, response: decisionResponse } = useDecision(acc
 const { prices, loading: pricesLoading, load: loadPrices, getSellPrice } = useWikiPrices()
 const { mapping, loading: mappingLoading, load: loadMapping, getName, getIconUrl, getBuyLimit } = useItemMapping()
 const { trades: recentTrades } = useTradeHistory(accountHashRef, { rowLimit: 30 })
+// A much larger window than recentTrades above (which only backs the live ticker/sparkline) - FIFO
+// matching needs enough history to actually find the BUY lot(s) behind an older SELL, not just the
+// last handful of fills. Still bounded (matches useTradeHistory's own default) rather than
+// unbounded, per that composable's own reasoning for capping it at all.
+const { trades: matchingTrades } = useTradeHistory(accountHashRef, { rowLimit: 500 })
+const { matches: matchedTrades } = useMatchedTrades(matchingTrades)
 
 const latestAnsweredAtMillis = computed(() => {
   const answeredAt = decisionResponse.value?.answeredAt
@@ -367,6 +375,9 @@ const actionTone = (action) => {
           </table>
         </div>
       </section>
+
+      <!-- Per-trade FIFO-matched profit -->
+      <MatchedTradesTable :matches="matchedTrades" :get-icon-url="getIconUrl" />
 
       <!-- Buy-limit ledger -->
       <section class="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
