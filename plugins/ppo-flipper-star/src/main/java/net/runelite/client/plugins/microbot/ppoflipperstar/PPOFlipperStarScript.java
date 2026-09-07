@@ -2265,11 +2265,39 @@ public class PPOFlipperStarScript extends Script {
             // overstate realized profit by that same 2% on every SELL, every time - GeTax mirrors
             // the exact formula data/ppo/env.py trained the model's reward signal against, so the
             // ledger reflects what was actually received, matching what the model itself expects.
+            int averageCostBeforeSell = portfolio.getAverageCost(itemId);
             long netProceeds = GeTax.netProceeds(details.getPrice(), filled, details.getSpent());
             portfolio.recordSell(itemId, filled, netProceeds);
+            warnIfSoldBelowCost(order.getItemName(), averageCostBeforeSell, netProceeds, filled);
             resetMinSellMarginIfFullySold(itemId);
         }
         recordTradeHistory(order, details, filled, now);
+    }
+
+    /**
+     * Tripwire, not a guardrail: with {@code minSellProfitMarginPercent} disabled (0), nothing
+     * stops a SELL from filling below the tracked average cost - the model's own live-spread price
+     * is trusted directly (see {@link #applyMinSellMargin}'s javadoc for why that guardrail was
+     * turned off: it was pricing SELLs above what the market would actually pay, causing
+     * cycle-after-cycle 0-filled stale aborts). This doesn't change what was submitted or block
+     * anything after the fact - it only logs, once a fill has already landed, so an actual loss is
+     * visible in the log rather than silently absorbed, without reintroducing the forced-markup
+     * behavior that was starving fills in the first place.
+     *
+     * <p>Compares against {@code averageCostBeforeSell} (read before {@link PortfolioManager#recordSell}
+     * runs, not after) since a weighted-average cost ledger's average is only ever moved by a BUY,
+     * not a SELL - but reading it beforehand is the correct/safe order regardless of that detail,
+     * not dependent on knowing it. No-ops for untracked cost data ({@code <= 0}, e.g. pre-ledger
+     * holdings) - there's nothing honest to compare against.
+     */
+    private void warnIfSoldBelowCost(String itemName, int averageCostBeforeSell, long netProceeds, int filled) {
+        if (averageCostBeforeSell <= 0 || filled <= 0) return;
+        double netProceedsPerUnit = netProceeds / (double) filled;
+        if (netProceedsPerUnit >= averageCostBeforeSell) return;
+        double lossPercent = (averageCostBeforeSell - netProceedsPerUnit) * 100.0 / averageCostBeforeSell;
+        log.warn("PPOFlipperStar: SOLD BELOW COST - {} sold at {} gp/unit net of tax, {} gp/unit below avg cost {} ({}% loss on this fill)",
+            itemName, String.format("%.1f", netProceedsPerUnit), String.format("%.1f", averageCostBeforeSell - netProceedsPerUnit),
+            averageCostBeforeSell, String.format("%.1f", lossPercent));
     }
 
     /**
