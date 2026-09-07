@@ -135,9 +135,59 @@ mapping name verbatim — fixes the general case rather than adding another spec
   logs out of the NMZ instance, walks to Bob at Lumbridge, repairs, walks back. Two assumptions in
   it were never live-verified: Bob's exact coordinate, and the repair-all widget's exact button
   text (both flagged inline in `DharokRepairScript.java`).
-- **`fe7b05e`, `6dd6e74`** — four real-time features added to the web dashboard (ActivityTicker,
-  PnlSparkline, DecisionHeartbeat, CelebrationToast) plus a FIFO-matched per-trade profit table
-  (`useMatchedTrades.js`), deployed live to `ppoflipperopus.web.app`.
+- **`fe7b05e`, `6dd6e74`** — dashboard work, detailed below.
+
+## Dashboard changes (Firebase/Vue, `firebase/web/`)
+
+Two separate additions, both deployed live to `ppoflipperopus.web.app` via
+`firebase deploy --only hosting`. Neither touches the plugin or trading logic — pure read-only
+views over data the plugin already writes to Firestore.
+
+**Important:** `f0a8c77` (what `ppo-flipper-star-reverted` is checked out at) predates both of
+these commits — the source files described below (`useMatchedTrades.js`, `MatchedTradesTable.vue`,
+`ActivityTicker.vue`, etc.) **do not exist in this checkout**. The revert only affects the local
+git branch, not the already-deployed Firebase Hosting site — the live dashboard at
+`ppoflipperopus.web.app` still has all of this running, since a deploy is a separate static build
+artifact, independent of which branch is checked out locally. If a future deploy happens from
+`ppo-flipper-star-reverted` without first cherry-picking `fe7b05e`/`6dd6e74` back, it would
+overwrite the live site and remove these features from it.
+
+### Per-trade FIFO profit table
+**Commit:** `6dd6e74`
+**Why:** direct user request — the existing "Profit by item" table shows a running weighted-average
+blend across every purchase of an item ever, which answers "am I profitable on this item overall"
+but not "was *this specific* sale profitable." The user wanted the latter.
+**New files:**
+- `useGeTax.js` — a JS port of the plugin's own `GeTax.java` (2% of gross, floored, capped at
+  5,000,000gp, exempt below 50gp/unit) so the dashboard computes net proceeds the exact same way
+  the plugin does, not an approximation.
+- `useMatchedTrades.js` — walks the trade-history feed chronologically and matches each SELL
+  against the oldest not-yet-consumed BUY lot(s) for that item, FIFO-style, splitting a lot across
+  multiple sells (or a sell across multiple lots) as real accounting would. A SELL whose funding
+  BUY happened before the trade-history window started (default 500-row limit) is marked
+  "unmatched" — cost basis genuinely unknown — rather than guessed at, matching the same
+  don't-fabricate-what-isn't-known principle the plugin's own `CostBasisEntry` already follows.
+- `MatchedTradesTable.vue` — renders it as "Profit by trade," with All/Profitable/Losses filters.
+**Wired into:** `DashboardView.vue`, added right after the existing "Profit by item" section — a
+second `useTradeHistory` subscription at `rowLimit: 500` (separate from the existing `rowLimit: 30`
+one used for the recent-trades feed), feeding `useMatchedTrades`.
+
+### Four "fun real-time" features
+**Commit:** `fe7b05e`
+**Why:** direct user request — "find some fun real time ways to make the dashboard more
+interesting." All four were proposed and the user picked all four.
+**New files, all in `firebase/web/src/components/`:**
+- `ActivityTicker.vue` — a live-scrolling feed of recent BUY/SELL fills as they happen (backed by
+  the same `useTradeHistory` at `rowLimit: 30` the recent-trades table already used).
+- `PnlSparkline.vue` — a small running profit/loss line chart, built from the same trade feed.
+- `DecisionHeartbeat.vue` — shows how recently the model actually answered a DECIDE tick, from
+  `decisionResponse.value?.answeredAt?.toMillis()` — a live "is the model actually responding"
+  pulse, not just "is the plugin running."
+- `CelebrationToast.vue` — a toast/animation that fires on a new profitable SELL, mounted app-wide
+  in `App.vue` (not per-view) with its own `useTradeHistory` subscription, so it fires regardless of
+  which dashboard view is open.
+**Wired into:** `DashboardView.vue` (Ticker, Sparkline, Heartbeat) and `App.vue` (Toast, mounted
+once at the app root).
 
 ## Live config values changed by hand (not in git, won't come back on their own)
 
