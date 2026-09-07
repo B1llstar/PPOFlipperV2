@@ -9,6 +9,8 @@ import javax.inject.Singleton;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Thin wrapper over {@link Rs2Inventory} - a live, always-up-to-date client-side read, no
@@ -32,6 +34,15 @@ import java.util.Map;
 public class InventoryManager {
 
     private final ItemNameResolver itemNameResolver;
+
+    // Raw (noted) item ids this class has already warned about - see canonicalItemId's javadoc.
+    // Some items (e.g. a generic noted "Yak-hide armour" stack, id 10823) are structurally
+    // unresolvable by name: the wiki's mapping only lists the distinct unnoted pieces
+    // ("Yak-hide armour (legs)"/"(top)"), never a plain "Yak-hide armour" to resolve to, so no
+    // retry or cache refresh will ever fix this for that item - warning on every single poll
+    // (multiple times a second, from every InventoryManager caller) is pure spam once the
+    // limitation is known. Warn once per raw id per plugin session instead.
+    private final Set<Integer> alreadyWarnedUnresolvableNotedIds = ConcurrentHashMap.newKeySet();
 
     @Inject
     public InventoryManager(ItemNameResolver itemNameResolver) {
@@ -87,10 +98,15 @@ public class InventoryManager {
         }
         int resolvedId = itemNameResolver.resolveId(item.getName());
         if (resolvedId <= 0) {
-            log.warn("PPOFlipperStar: canonicalItemId - noted item \"{}\" (rawId={}) - ItemNameResolver found no " +
-                "unnoted id at all, falling back to the raw noted id unchanged - this item's held quantity will " +
-                "be invisible to anything keyed by its real unnoted id.",
-                item.getName(), item.getId());
+            if (alreadyWarnedUnresolvableNotedIds.add(item.getId())) {
+                log.warn("PPOFlipperStar: canonicalItemId - noted item \"{}\" (rawId={}) - ItemNameResolver found no " +
+                    "unnoted id at all, falling back to the raw noted id unchanged - this item's held quantity will " +
+                    "be invisible to anything keyed by its real unnoted id. (Logged once for this item id this " +
+                    "session - this can be a structurally unresolvable case, e.g. a generic noted stack whose " +
+                    "wiki mapping only lists distinct sub-items like \"(legs)\"/\"(top)\", not a transient failure " +
+                    "that a retry would fix.)",
+                    item.getName(), item.getId());
+            }
             return item.getId();
         }
         return resolvedId;
