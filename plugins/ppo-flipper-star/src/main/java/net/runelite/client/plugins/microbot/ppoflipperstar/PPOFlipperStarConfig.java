@@ -361,6 +361,26 @@ public interface PPOFlipperStarConfig extends Config {
         return 10;
     }
 
+    @ConfigItem(
+        keyName = "fillStallTimeoutSeconds",
+        name = "Fill stall timeout (seconds)",
+        description = "The ramped threshold above (dudFillPercentThreshold) still gives a partial fill up to half " +
+            "of staleOfferTimeoutMinutes of protection no matter how long ago it actually last filled anything - " +
+            "e.g. an offer that filled 5% in its first few seconds and then hasn't moved at all since is still " +
+            "'protected' for minutes under that ramp alone, because the ramp only looks at cumulative percent vs. " +
+            "total age, not whether the fill is actually still progressing. This adds an independent check on top: " +
+            "regardless of cumulative fill % or age, an offer that hasn't filled ANY additional units in this many " +
+            "seconds is also treated as a dud - catching a fill that has genuinely stopped moving much sooner than " +
+            "waiting for the percent-vs-age ramp to catch up. A fresh submission's clock starts at the moment it's " +
+            "submitted (or adopted/reconciled), same as the fill percentage ramp. 0 disables this check entirely " +
+            "(only the percent-vs-age ramp above applies).",
+        position = 8,
+        section = behaviorSection
+    )
+    default int fillStallTimeoutSeconds() {
+        return 45;
+    }
+
     @ConfigSection(
         name = "PPO",
         description = "The PPO policy, consulted every decision tick over Firestore (PROPOSAL.md §3.6). By " +

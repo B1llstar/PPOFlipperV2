@@ -55,6 +55,21 @@ public class PPOFlipperOrder {
     private volatile int quantityFilled = 0;
 
     /**
+     * When {@link #quantityFilled} last actually INCREASED (0 until the first fill, or if never
+     * submitted) - distinct from merely being read/refreshed, which happens every tick in
+     * {@code PPOFlipperStarScript#checkForFinishedOffers} regardless of whether the value changed.
+     * Used by {@code PPOFlipperStarScript#isDud}'s fill-velocity check: an order that filled some
+     * amount once and then hasn't moved AT ALL for a while is functionally stalled even if its
+     * cumulative percentage-vs-age ramp still calls it "not a dud" - this timestamp is what lets
+     * that check tell "still slowly filling" apart from "filled a bit, then completely stopped."
+     * Reset to 0 alongside {@link #submittedAtMillis} on resubmission, same reasoning as that
+     * field's own javadoc: a fresh submission gets a fresh velocity clock, not one inherited from
+     * a previous attempt.
+     */
+    @Setter
+    private volatile long lastFillProgressAtMillis = 0;
+
+    /**
      * The price actually offered to the GE, once submitted - 0 until then. Distinct from
      * {@link #price} (what was requested) because {@code PPOFlipperStarScript.clampToLivePrice}
      * can lower a BUY (or raise a SELL) to the live Wiki insta-buy/insta-sell price at submit

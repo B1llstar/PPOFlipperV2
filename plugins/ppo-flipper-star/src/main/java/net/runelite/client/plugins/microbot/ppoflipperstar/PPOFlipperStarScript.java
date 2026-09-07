@@ -334,6 +334,7 @@ public class PPOFlipperStarScript extends Script {
                 match.setQuantityFilled(liveAction == GrandExchangeAction.BUY
                     ? Rs2GrandExchange.getItemsBoughtFromOffer(slot)
                     : Rs2GrandExchange.getItemsSoldFromOffer(slot));
+                match.setLastFillProgressAtMillis(System.currentTimeMillis());
                 activeOrders.put(slot, match);
                 log.info("PPOFlipperStar: reconciled SUBMITTED order {} to live slot {}", match, slot);
             } else {
@@ -365,6 +366,7 @@ public class PPOFlipperStarScript extends Script {
                 adopted.setQuantityFilled(liveAction == GrandExchangeAction.BUY
                     ? Rs2GrandExchange.getItemsBoughtFromOffer(slot)
                     : Rs2GrandExchange.getItemsSoldFromOffer(slot));
+                adopted.setLastFillProgressAtMillis(System.currentTimeMillis());
                 queue.add(adopted);
                 activeOrders.put(slot, adopted);
                 log.info("PPOFlipperStar: adopted untracked live offer in slot {} - {}", slot, adopted);
@@ -1575,6 +1577,7 @@ public class PPOFlipperStarScript extends Script {
             order.setSubmittedPrice(submitPrice);
             order.setStatus(PPOFlipperOrder.Status.SUBMITTED);
             order.setSubmittedAtMillis(System.currentTimeMillis());
+            order.setLastFillProgressAtMillis(System.currentTimeMillis());
             queue.notifyChanged();
             if (slot != null) {
                 activeOrders.put(slot, order);
@@ -1779,6 +1782,14 @@ public class PPOFlipperStarScript extends Script {
             int filled = order.getAction() == GrandExchangeAction.BUY
                 ? Rs2GrandExchange.getItemsBoughtFromOffer(slot)
                 : Rs2GrandExchange.getItemsSoldFromOffer(slot);
+            // Only stamp "progress" when the fill actually MOVED since last tick, not on every
+            // tick this method runs (which is every tick, regardless of whether anything changed)
+            // - this timestamp is what isDud's velocity check measures "time since it last
+            // actually filled anything" against, so refreshing it unconditionally would make a
+            // genuinely-stalled offer look perpetually fresh forever.
+            if (filled > order.getQuantityFilled()) {
+                order.setLastFillProgressAtMillis(System.currentTimeMillis());
+            }
             order.setQuantityFilled(filled);
 
             GrandExchangeOfferState offerState = details.getState();
@@ -1901,11 +1912,33 @@ public class PPOFlipperStarScript extends Script {
      * flat threshold the whole time. A fully-unfilled order (0%) always counts as a dud regardless
      * of age. {@code dudFillPercentThreshold} <= 0 restores the old strict "only filled == 0"
      * behavior (the ramp is skipped entirely).
+     *
+     * <p><b>Fill velocity, independent of the ramp above:</b> the percent-vs-age ramp alone still
+     * gives a partial fill up to half of {@code staleOfferTimeoutMinutes} of protection no matter
+     * how long ago it actually last filled anything, since it only ever looks at the CUMULATIVE
+     * percentage reached so far against total age - an offer that filled 5% in its first few
+     * seconds and then hasn't moved at all since looks identical, to that ramp, to one that's still
+     * slowly-but-genuinely filling. {@code fillStallTimeoutSeconds} closes that gap: regardless of
+     * cumulative percent or age, an offer is also a dud if it hasn't filled any ADDITIONAL units in
+     * that many seconds (tracked by {@link PPOFlipperOrder#getLastFillProgressAtMillis}, bumped
+     * only when {@code quantityFilled} actually increases - see
+     * {@code PPOFlipperStarScript#checkForFinishedOffers}). This is an OR with the ramp, not a
+     * replacement for it: either check finding a dud is enough, since either condition independently
+     * means the offer isn't behaving like a real, still-progressing partial fill.
      */
     private boolean isDud(PPOFlipperOrder order) {
         if (order.getQuantityFilled() == 0) {
             return true;
         }
+
+        int stallSeconds = config.fillStallTimeoutSeconds();
+        if (stallSeconds > 0 && order.getLastFillProgressAtMillis() > 0) {
+            long sinceLastProgressMillis = System.currentTimeMillis() - order.getLastFillProgressAtMillis();
+            if (sinceLastProgressMillis >= stallSeconds * 1000L) {
+                return true;
+            }
+        }
+
         int thresholdPercent = config.dudFillPercentThreshold();
         if (thresholdPercent <= 0 || order.getQuantity() <= 0) {
             return false;
