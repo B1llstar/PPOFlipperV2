@@ -15,6 +15,13 @@ A new branch, `ppo-flipper-star-reverted`, was created at `f0a8c77` and is what'
 out going forward. Nothing was deleted — every commit below is still reachable by hash from either
 branch, or via `git cherry-pick <hash>` onto whatever comes next.
 
+**Update, same day:** `ppo-flipper-star-reverted` immediately hit the "Yak-hide armour (legs)"
+stuck-BUY bug (root cause #9 below) live, since the fix for it (`f0ca99d`) was one of the 15
+commits this branch doesn't have. Cherry-picked `f0ca99d` onto `ppo-flipper-star-reverted` alone
+(clean, no conflicts) — that one fix is now present on this branch even though the rest of the
+session isn't. If this keeps happening for other commits, it's a sign more of the session's fixes
+were load-bearing than "too much extra stuff" first suggested.
+
 Full commit range: `f0a8c77..18c6f2e` on `ppo-flipper-star` (15 commits, 18 files, +1338/-42 lines).
 Live artifact version of this document (nicer to read, has the exact live-config-value table):
 `https://claude.ai/code/artifact/859e7a62-eba6-4169-85aa-867d25fcb907`
