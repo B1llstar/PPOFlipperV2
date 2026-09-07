@@ -203,11 +203,33 @@ public class WikiPriceClient {
         }
     }
 
+    // A real incident: the wiki's own /latest data for one item returned high=494 (insta-buy) but
+    // low=67550 (insta-sell) - a 136x INVERTED spread (the "low" side priced dramatically ABOVE
+    // the "high" side), traced to lowTime being ~40 hours older than highTime - a single stale,
+    // one-off trade (almost certainly a fat-fingered real-world sale) lingering in the API's
+    // "most recent trade" field long after the market itself moved on. clampToLivePrice's SELL
+    // floor (Math.max(order price, instaSellPrice)) trusted this blindly and priced a real SELL
+    // order ~67,000gp above what the item is actually worth. In a genuinely liquid, current
+    // market, insta-sell can legitimately sit somewhat below insta-buy (that's the spread) but
+    // should never sit far ABOVE it - that direction has no honest explanation, only stale/bad
+    // data. This class's own javadoc already documents a near-identical prior incident (a wrong
+    // ge-tracker.com price trusted with no sanity check) as the reason this whole client exists
+    // instead of Rs2GrandExchange.getRealTimePrices - the same category of gap just resurfaced
+    // one level deeper, in the wiki's own data instead of a third-party aggregator's.
+    private static final double MAX_SANE_LOW_OVER_HIGH_RATIO = 2.0;
+
     private static Price parsePrice(JsonObject itemPrice) {
         // Same "high" (insta-buy)/"low" (insta-sell) convention as getLatestPrice - do not swap.
         Integer high = itemPrice.has("high") && !itemPrice.get("high").isJsonNull() ? itemPrice.get("high").getAsInt() : null;
         Integer low = itemPrice.has("low") && !itemPrice.get("low").isJsonNull() ? itemPrice.get("low").getAsInt() : null;
-        return (high != null && low != null) ? new Price(high, low) : null;
+        if (high == null || low == null) return null;
+        if (high > 0 && low > high * MAX_SANE_LOW_OVER_HIGH_RATIO) {
+            log.warn("PPOFlipperStar: rejecting wiki price data as unreliable - insta-sell {} is more than {}x " +
+                    "insta-buy {} (an inverted spread this wide has no honest explanation, only stale/bad data)",
+                low, MAX_SANE_LOW_OVER_HIGH_RATIO, high);
+            return null;
+        }
+        return new Price(high, low);
     }
 
     /**
