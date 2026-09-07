@@ -97,7 +97,25 @@ public class PortfolioManager {
         for (PPOFlipperStarFirestoreClient.RemotePortfolioEntry remote : remoteEntries.values()) {
             CostBasisEntry entry = new CostBasisEntry(remote.itemId);
             if (remote.quantityHeld > 0) {
-                entry.recordBuy(remote.quantityHeld, remote.totalCostBasis, remote.weightedAcquisitionTimestampMillis);
+                // A real, recurring incident: a remote entry with a missing/epoch-zero
+                // weightedAcquisitionTimestampMillis (data that predates this field being
+                // tracked, or a genuinely absent Firestore field defaulting to 0) was trusted
+                // verbatim, producing a reported holding duration of tens of millions of minutes
+                // (~56+ YEARS) - a dead giveaway of bad data, not a real position age. Confirmed
+                // still live: stalePositionAutoSellEnabled reads this exact figure via
+                // CostBasisEntry#getHoldingDurationMillis to decide whether a position is overdue
+                // for a forced exit, so an epoch-zero timestamp doesn't just display wrong, it
+                // permanently, immediately satisfies ANY stalePositionThresholdHours - forcing a
+                // SELL_100% suggestion for that item every single tick, forever, regardless of
+                // whether it was actually acquired recently. Falling back to "now" for an
+                // obviously-invalid timestamp is the safer default: treating an unknown
+                // acquisition time as "just acquired" only delays a genuinely-overdue forced exit
+                // by one threshold period, while trusting the epoch value wrongly forces one
+                // immediately and permanently for a position that may not be stale at all.
+                long acquisitionTimestamp = remote.weightedAcquisitionTimestampMillis > 0
+                    ? remote.weightedAcquisitionTimestampMillis
+                    : System.currentTimeMillis();
+                entry.recordBuy(remote.quantityHeld, remote.totalCostBasis, acquisitionTimestamp);
                 // Pre-warms getItemName's cache here, on this already-background reconcile thread
                 // (see this method's caller javadoc: "never the client thread"), rather than
                 // leaving the panel's first refresh to resolve potentially hundreds of names one
