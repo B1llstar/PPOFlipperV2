@@ -121,7 +121,7 @@ public class Guardrails {
         // a GE slot, a fill wait, and the attention to notice/react to it are worth more than the
         // gp involved either way - not worth doing at all regardless of direction. Applies to
         // both BUY and SELL for the same reason (a trivially small BUY wastes a slot identically).
-        long minOrderValue = config.minOrderValueGp();
+        int minOrderValue = config.minOrderValueGp();
         if (minOrderValue > 0 && order.totalValue() < minOrderValue) {
             return String.format(
                 "total order value %d gp is below the minimum worth trading (%d gp)",

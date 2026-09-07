@@ -203,8 +203,8 @@ public interface PPOFlipperStarConfig extends Config {
         position = 6,
         section = guardrailsSection
     )
-    default long minOrderValueGp() {
-        return 10_000L;
+    default int minOrderValueGp() {
+        return 10_000;
     }
 
     @ConfigItem(
