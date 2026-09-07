@@ -1397,22 +1397,45 @@ public class PPOFlipperStarScript extends Script {
      * withdrawal via the panel, or a different script) that isn't expecting it.
      */
     private void withdrawPreferringNotes(int itemId, String itemName, int quantity) {
-        boolean notable = Rs2ItemModel.getNotedId(itemId) != -1;
+        int notedId = Rs2ItemModel.getNotedId(itemId);
+        boolean notable = notedId != -1;
+        int beforeInventoryQty = Rs2Inventory.itemQuantity(itemName);
+        int bankQty = Rs2Bank.count(itemName);
+        log.info("PPOFlipperStar: withdrawPreferringNotes: item=\"{}\" itemId={} notedId={} notable={} " +
+                "requestedQuantity={} inventoryQtyBefore={} bankQty={}",
+            itemName, itemId, notedId, notable, quantity, beforeInventoryQty, bankQty);
+
         if (!notable) {
-            Rs2Bank.withdrawX(itemName, quantity);
+            boolean withdrew = Rs2Bank.withdrawX(itemName, quantity);
+            int afterQty = Rs2Inventory.itemQuantity(itemName);
+            log.info("PPOFlipperStar: withdrawPreferringNotes: unnoted path - Rs2Bank.withdrawX(\"{}\", {}) -> {} " +
+                    "inventoryQtyAfter={} (delta={})",
+                itemName, quantity, withdrew, afterQty, afterQty - beforeInventoryQty);
             return;
         }
 
-        Rs2Bank.setWithdrawAsNote();
+        boolean noteModeClicked = Rs2Bank.setWithdrawAsNote();
         sleep(300, 600);
-        if (!Rs2Bank.hasWithdrawAsNote()) {
+        boolean confirmedNoteMode = Rs2Bank.hasWithdrawAsNote();
+        log.info("PPOFlipperStar: withdrawPreferringNotes: setWithdrawAsNote() -> {} hasWithdrawAsNote() -> {}",
+            noteModeClicked, confirmedNoteMode);
+        if (!confirmedNoteMode) {
             log.warn("PPOFlipperStar: could not switch bank to note mode for {}, withdrawing unnoted instead.", itemName);
-            Rs2Bank.withdrawX(itemName, quantity);
+            boolean withdrew = Rs2Bank.withdrawX(itemName, quantity);
+            int afterQty = Rs2Inventory.itemQuantity(itemName);
+            log.info("PPOFlipperStar: withdrawPreferringNotes: note-mode-failed fallback - Rs2Bank.withdrawX(\"{}\", {}) -> {} " +
+                    "inventoryQtyAfter={} (delta={})",
+                itemName, quantity, withdrew, afterQty, afterQty - beforeInventoryQty);
             return;
         }
 
-        Rs2Bank.withdrawX(itemName, quantity);
-        Rs2Bank.setWithdrawAsItem();
+        boolean withdrew = Rs2Bank.withdrawX(itemName, quantity);
+        int afterNoteWithdrawQty = Rs2Inventory.itemQuantity(itemName);
+        log.info("PPOFlipperStar: withdrawPreferringNotes: noted path - Rs2Bank.withdrawX(\"{}\", {}) -> {} " +
+                "inventoryQtyAfter={} (delta={})",
+            itemName, quantity, withdrew, afterNoteWithdrawQty, afterNoteWithdrawQty - beforeInventoryQty);
+        boolean restoredItemMode = Rs2Bank.setWithdrawAsItem();
+        log.info("PPOFlipperStar: withdrawPreferringNotes: setWithdrawAsItem() -> {}", restoredItemMode);
     }
 
     /**
