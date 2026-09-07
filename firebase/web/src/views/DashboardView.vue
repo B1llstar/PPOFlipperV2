@@ -6,12 +6,16 @@ import { useWatchlist } from '@/composables/useWatchlist'
 import { useDecision } from '@/composables/useDecision'
 import { useWikiPrices } from '@/composables/useWikiPrices'
 import { useItemMapping } from '@/composables/useItemMapping'
+import { useTradeHistory } from '@/composables/useTradeHistory'
 import { formatGp, formatGpExact, formatPercent, formatDurationShort, formatRelativeTime } from '@/composables/useFormat'
 import StatCard from '@/components/StatCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import ItemIcon from '@/components/ItemIcon.vue'
+import ActivityTicker from '@/components/ActivityTicker.vue'
+import PnlSparkline from '@/components/PnlSparkline.vue'
+import DecisionHeartbeat from '@/components/DecisionHeartbeat.vue'
 
 const props = defineProps({
   accountHash: { type: String, required: true },
@@ -25,6 +29,12 @@ const { items: watchlistItems, loading: watchlistLoading } = useWatchlist(accoun
 const { request: decisionRequest, response: decisionResponse } = useDecision(accountHashRef)
 const { prices, loading: pricesLoading, load: loadPrices, getSellPrice } = useWikiPrices()
 const { mapping, loading: mappingLoading, load: loadMapping, getName, getIconUrl, getBuyLimit } = useItemMapping()
+const { trades: recentTrades } = useTradeHistory(accountHashRef, { rowLimit: 30 })
+
+const latestAnsweredAtMillis = computed(() => {
+  const answeredAt = decisionResponse.value?.answeredAt
+  return answeredAt?.toMillis ? answeredAt.toMillis() : null
+})
 
 onMounted(() => {
   loadPrices()
@@ -159,6 +169,12 @@ const actionTone = (action) => {
     />
 
     <template v-else>
+      <!-- Live activity + recent P&L -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <ActivityTicker class="lg:col-span-2" :trades="recentTrades" :get-name="getName" :get-icon-url="getIconUrl" />
+        <PnlSparkline :trades="recentTrades" />
+      </div>
+
       <!-- Top-line stats -->
       <section class="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
@@ -396,7 +412,8 @@ const actionTone = (action) => {
               confirmed or executed from this dashboard.
             </p>
           </div>
-          <div class="flex items-center gap-3 text-xs text-[var(--color-text-dim)] shrink-0">
+          <div class="flex items-center gap-4 text-xs text-[var(--color-text-dim)] shrink-0">
+            <DecisionHeartbeat :answered-at-millis="latestAnsweredAtMillis" />
             <span v-if="decisionResponse?.checkpointVersion" class="font-mono-nums">
               checkpoint: {{ decisionResponse.checkpointVersion }}
             </span>

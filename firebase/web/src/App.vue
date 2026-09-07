@@ -4,10 +4,12 @@ import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { useAccounts } from '@/composables/useAccounts'
 import { usePresence } from '@/composables/usePresence'
+import { useTradeHistory } from '@/composables/useTradeHistory'
 import AccountPicker from '@/components/AccountPicker.vue'
 import PresenceBadge from '@/components/PresenceBadge.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
+import CelebrationToast from '@/components/CelebrationToast.vue'
 
 const route = useRoute()
 const {
@@ -24,6 +26,10 @@ const {
 const { accounts, loading: accountsLoading, error: accountsError, selectedAccountHash, discoverAccounts, selectAccount } =
   useAccounts()
 const { isOnline, lastSeenMillis } = usePresence(selectedAccountHash)
+// Mounted app-wide (not per-view) so a celebration fires regardless of which page is open - a
+// small, cheap subscription (rowLimit default 500) shared with the Dashboard's own instance
+// rather than something CelebrationToast needs its own bespoke data source for.
+const { trades: recentTrades } = useTradeHistory(selectedAccountHash, { rowLimit: 30 })
 
 const isPermissionDenied = computed(() => accountsError.value?.code === 'permission-denied')
 
@@ -160,6 +166,7 @@ const navItems = [
 
     <!-- Fully authorized -->
     <template v-else>
+      <CelebrationToast v-if="selectedAccountHash" :trades="recentTrades" />
       <header class="border-b border-[var(--color-border)] bg-[var(--color-surface)]/60 backdrop-blur sticky top-0 z-20">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 flex items-center justify-between h-16 gap-4">
           <div class="flex items-center gap-8 min-w-0">
