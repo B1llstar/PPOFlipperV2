@@ -154,6 +154,19 @@ public class NmzDebugScript extends Script {
                     NmzDebugLog.log("[NMZDEBUG] BLOCKED: Rs2AntibanSettings.actionCooldownActive=true, skipping tick");
                     return;
                 }
+                // Checked before the normal inside/outside dispatch below, regardless of which
+                // side of the NMZ door the player is currently on - a broken Dharok piece can be
+                // noticed the instant this tick starts, not only while actively inside the arena.
+                // DharokRepairScript.runRepairTrip() is fully synchronous/blocking (logout, walk,
+                // repair, walk back) and returns only once the whole trip is done, so this single
+                // call replaces this tick's entire normal dispatch rather than needing its own
+                // state to resume across multiple ticks.
+                if (config.autoRepairDharoks() && DharokRepairScript.hasAnyBrokenDharokPiece()) {
+                    NmzDebugLog.log("[NMZDEBUG] -> DharokRepairScript.runRepairTrip()");
+                    DharokRepairScript.runRepairTrip();
+                    NmzDebugLog.log("[NMZDEBUG] ===== tick end (repair trip) =====");
+                    return;
+                }
                 Rs2Combat.setAutoRetaliate(true);
                 boolean isOutsideNmz = isOutside();
                 useOverload = Microbot.getClient().getBoostedSkillLevel(Skill.RANGED) == Microbot.getClient().getRealSkillLevel(Skill.RANGED) && config.overloadPotionAmount() > 0;

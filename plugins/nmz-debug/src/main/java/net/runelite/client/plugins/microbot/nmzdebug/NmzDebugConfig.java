@@ -158,4 +158,17 @@ public interface NmzDebugConfig extends Config {
     {
         return true;
     }
+
+    @ConfigItem(
+            keyName = "Auto repair Dharok's",
+            name = "Auto repair Dharok's",
+            description = "When a Dharok's piece fully degrades (broken, needs repair), automatically log out of " +
+                    "the NMZ instance, travel to Bob at Lumbridge, repair everything, and travel back.",
+            position = 9,
+            section = generalSection
+    )
+    default boolean autoRepairDharoks()
+    {
+        return true;
+    }
 }
