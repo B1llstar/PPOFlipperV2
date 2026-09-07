@@ -865,7 +865,17 @@ public class PPOFlipperStarScript extends Script {
      *
      * <p>Skipped entirely for an item that already has a real (model-proposed) SELL suggestion
      * this tick - never overrides or duplicates one, only fills the gap when the model proposed
-     * nothing for that item at all. Priced via {@link DecisionEngine#getLatestPrice} (the same
+     * nothing for that item at all. <b>Also skipped for an item with a model-proposed BUY
+     * suggestion this same tick</b> - a real, observed incident: a stale Iron nails position kept
+     * forcing a SELL_100% every tick while the model separately, concurrently proposed a fresh
+     * BUY of more Iron nails - buying more of the exact item this mechanism exists to force an
+     * exit from is directly self-defeating, even though each side individually cleared its own
+     * guardrails (neither ever actually submitted here, since Rapid PPO's margin check happened
+     * to reject the SELL every time, but the same contradiction could just as easily let both
+     * submit on a different item/spread). Skipping this tick for a genuine BUY-suggested item is
+     * a wait, not a cancellation of the stale-exit intent - the position is still open and still
+     * past the threshold, so it's simply reconsidered again next tick once (if) the model stops
+     * proposing a fresh BUY for it. Priced via {@link DecisionEngine#getLatestPrice} (the same
      * non-blocking, cache-backed live price the model's own suggestions use); a position with no
      * live price available yet is skipped for this tick rather than guessed at - it'll be
      * reconsidered next tick once a price is cached.
@@ -898,6 +908,10 @@ public class PPOFlipperStarScript extends Script {
             .filter(d -> d.getGeAction() == GrandExchangeAction.SELL)
             .map(PPOFlipperDecision::getItemId)
             .collect(Collectors.toSet());
+        Set<Integer> alreadySuggestedBuy = suggestions.stream()
+            .filter(d -> d.getGeAction() == GrandExchangeAction.BUY)
+            .map(PPOFlipperDecision::getItemId)
+            .collect(Collectors.toSet());
 
         Map<Integer, Integer> liveHoldings = portfolio.getAllHoldings();
         long now = System.currentTimeMillis();
@@ -905,6 +919,12 @@ public class PPOFlipperStarScript extends Script {
             if (entry.getQuantityHeld() <= 0) continue;
             if (entry.getHoldingDurationMillis(now) < thresholdMillis) continue;
             if (alreadySuggestedSell.contains(entry.getItemId())) continue;
+            if (alreadySuggestedBuy.contains(entry.getItemId())) {
+                log.info("PPOFlipperStar: holding off forcing a stale-position sell for item {} this tick - " +
+                        "the model concurrently proposed a BUY for the same item, which would be self-defeating.",
+                    entry.getItemId());
+                continue;
+            }
 
             int liveQuantity = liveHoldings.getOrDefault(entry.getItemId(), 0);
             if (liveQuantity <= 0) continue;
