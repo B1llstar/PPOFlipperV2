@@ -100,6 +100,17 @@ public class PPOFlipperStarScript extends Script {
     private PPOFlipperOrder orderAwaitingFunds;
     private PPOFlipperOrder lastFundsShortfallOrder;
 
+    /**
+     * Per-item override of {@code minSellProfitMarginPercent}, only present for an item whose SELL
+     * has genuinely gotten stuck at the configured margin and been cancelled/re-evaluated at least
+     * once - see {@link #decayMinSellMargin} (where an entry is created/lowered) and
+     * {@link #resolveMinSellMarginPercent} (where {@link #applyMinSellMargin} reads it in place of
+     * the flat config value). Absent = "no override yet, use the config default," exactly like a
+     * brand-new position - this is deliberately NOT prepopulated for every item, only ever created
+     * reactively once a real stuck-SELL cycle for that specific item is observed.
+     */
+    private final Map<Integer, Double> minSellMarginOverridePercent = new ConcurrentHashMap<>();
+
     // True right after Execute, until the first reconcile pass has run once the GE is open -
     // see reconcileSubmittedOrders' javadoc for why this matters (Stop never cancels real
     // in-game offers, only this script's own loop).
@@ -1693,10 +1704,10 @@ public class PPOFlipperStarScript extends Script {
      * rather than waiting forever) instead of silently not happening at all this tick.
      */
     private int applyMinSellMargin(PPOFlipperOrder order, int candidatePrice) {
-        double marginPercent = config.minSellProfitMarginPercent();
+        int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
+        double marginPercent = resolveMinSellMarginPercent(itemId);
         if (marginPercent <= 0) return candidatePrice;
 
-        int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         int averageCost = itemId > 0 ? portfolio.getAverageCost(itemId) : 0;
         if (averageCost <= 0) return candidatePrice;
 
@@ -1724,6 +1735,65 @@ public class PPOFlipperStarScript extends Script {
         order.setStatusDetail(String.format(
             "Price raised to %d gp to guarantee %.1f%% margin over avg cost %d gp (net of GE tax)", minPrice, marginPercent, averageCost));
         return minPrice;
+    }
+
+    /**
+     * The margin {@link #applyMinSellMargin} actually enforces for {@code itemId} - the item's
+     * decayed override from {@link #minSellMarginOverridePercent} if a stuck-SELL cycle has ever
+     * lowered it (see {@link #decayMinSellMarginForStuckSell}), otherwise the flat
+     * {@code minSellProfitMarginPercent} config value, exactly as before this decay mechanism
+     * existed. {@code itemId <= 0} (unresolvable item name) can't have an override, so it always
+     * falls through to the flat config value.
+     */
+    private double resolveMinSellMarginPercent(int itemId) {
+        double configured = config.minSellProfitMarginPercent();
+        if (itemId <= 0) return configured;
+        Double override = minSellMarginOverridePercent.get(itemId);
+        return override != null ? override : configured;
+    }
+
+    /**
+     * Lowers {@code itemId}'s next SELL margin by {@code sellMarginDecayStepPercent}, floored at
+     * {@code sellMarginDecayFloorPercent} - called whenever a SELL for this item is cancelled as a
+     * stale/dud/evicted offer (see {@link #abortStaleOffer}/{@link #evictForBlockedSell}, both of
+     * which route through {@link #cancelAndFreeSlot}), never on a successful fill. A real stuck
+     * cycle is evidence {@code minSellProfitMarginPercent} is asking for more than the current
+     * market will actually pay for this item right now - each re-attempt asks for a little less
+     * instead of retrying the exact same losing price forever. Starts from whatever's currently in
+     * effect for this item (the flat config value on the first stuck cycle, its own previously
+     * decayed value on a later one), so repeated stuck cycles keep compounding downward rather than
+     * each one independently stepping down from the flat config value. No-ops if decay is disabled
+     * (step <= 0) or the item id couldn't be resolved.
+     */
+    private void decayMinSellMarginForStuckSell(int itemId) {
+        double step = config.sellMarginDecayStepPercent();
+        if (step <= 0 || itemId <= 0) return;
+
+        double floor = config.sellMarginDecayFloorPercent();
+        double current = resolveMinSellMarginPercent(itemId);
+        double next = Math.max(floor, current - step);
+        if (next >= current) return;
+
+        minSellMarginOverridePercent.put(itemId, next);
+        log.info("PPOFlipperStar: lowered SELL margin for item {} from {}% to {}% after a stuck SELL cycle (floor {}%)",
+            itemId, current, next, floor);
+    }
+
+    /**
+     * Clears any decayed SELL-margin override for {@code itemId} (see
+     * {@link #decayMinSellMarginForStuckSell}) once its position is fully sold - called from
+     * {@link #recordCostBasis} after a SELL fill lands, only when the item is no longer held at
+     * all. A position that's fully exited and later rebought is a genuinely fresh position, not a
+     * continuation of whatever liquidity problem caused the earlier decay, so it starts back at full
+     * {@code minSellProfitMarginPercent} protection rather than inheriting a stale discount
+     * indefinitely. A no-op if this item never had an override to begin with.
+     */
+    private void resetMinSellMarginIfFullySold(int itemId) {
+        if (itemId <= 0 || minSellMarginOverridePercent.isEmpty()) return;
+        if (portfolio.getHeldQuantity(itemId) > 0) return;
+        if (minSellMarginOverridePercent.remove(itemId) != null) {
+            log.info("PPOFlipperStar: reset SELL margin override for item {} - position fully sold.", itemId);
+        }
     }
 
     private boolean hasFundsOrItems(PPOFlipperOrder order) {
@@ -1991,6 +2061,15 @@ public class PPOFlipperStarScript extends Script {
         Rs2GrandExchange.cancelSpecificOffers(List.of(slot), config.collectToBank());
         markSkipped(order, skippedReason);
         activeOrders.remove(slot);
+
+        // A cancelled SELL (never a BUY - see decayMinSellMarginForStuckSell's javadoc) is real
+        // evidence this item's required margin is asking for more than the market will currently
+        // pay - lower the bar a little for its next attempt rather than retrying the same price
+        // forever.
+        if (order.getAction() == GrandExchangeAction.SELL) {
+            int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
+            decayMinSellMarginForStuckSell(itemId);
+        }
     }
 
     /**
@@ -2135,6 +2214,7 @@ public class PPOFlipperStarScript extends Script {
             // ledger reflects what was actually received, matching what the model itself expects.
             long netProceeds = GeTax.netProceeds(details.getPrice(), filled, details.getSpent());
             portfolio.recordSell(itemId, filled, netProceeds);
+            resetMinSellMarginIfFullySold(itemId);
         }
         recordTradeHistory(order, details, filled, now);
     }

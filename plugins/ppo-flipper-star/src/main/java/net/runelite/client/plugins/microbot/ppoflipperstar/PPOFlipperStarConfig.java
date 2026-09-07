@@ -115,6 +115,41 @@ public interface PPOFlipperStarConfig extends Config {
         return 5.0;
     }
 
+    @ConfigItem(
+        keyName = "sellMarginDecayStepPercent",
+        name = "SELL margin decay per stuck cycle (%)",
+        description = "Each time a SELL for a given item gets cancelled (stale/dud/evicted - see " +
+            "staleOfferTimeoutMinutes/sellSlotEvictionWaitSeconds) and re-proposed, that item's required " +
+            "minSellProfitMarginPercent is lowered by this much for its next attempt, down to " +
+            "sellMarginDecayFloorPercent - a real stuck order is evidence the configured margin is asking for " +
+            "more than the current market will actually pay, so each re-attempt asks for a little less instead of " +
+            "retrying the exact same price forever. Resets back to the full minSellProfitMarginPercent once the " +
+            "item's position is fully sold (held quantity reaches 0) - a fresh position always starts at full " +
+            "margin protection; only a position that's demonstrably struggling to sell gets discounted. 0 disables " +
+            "decay entirely (every SELL always uses the flat minSellProfitMarginPercent, matching behavior before " +
+            "this setting existed).",
+        position = 5,
+        section = ordersSection
+    )
+    default double sellMarginDecayStepPercent() {
+        return 1.0;
+    }
+
+    @ConfigItem(
+        keyName = "sellMarginDecayFloorPercent",
+        name = "SELL margin decay floor (%)",
+        description = "The lowest minSellProfitMarginPercent a stuck item's repeated decay (see " +
+            "sellMarginDecayStepPercent above) is ever allowed to reach - decay stops here rather than continuing " +
+            "toward 0, so a genuinely illiquid item still won't be sold at a trivial or negative margin no matter " +
+            "how many times it gets stuck. Has no effect if it's above minSellProfitMarginPercent itself (there's " +
+            "nothing to decay down to in that case).",
+        position = 6,
+        section = ordersSection
+    )
+    default double sellMarginDecayFloorPercent() {
+        return 10.0;
+    }
+
     @ConfigSection(
         name = "Guardrails",
         description = "Safety limits enforced before any offer is submitted",
