@@ -334,7 +334,12 @@ public class PPOFlipperStarScript extends Script {
                 match.setQuantityFilled(liveAction == GrandExchangeAction.BUY
                     ? Rs2GrandExchange.getItemsBoughtFromOffer(slot)
                     : Rs2GrandExchange.getItemsSoldFromOffer(slot));
-                match.setLastFillProgressAtMillis(System.currentTimeMillis());
+                // lastFillProgressAtMillis deliberately left at 0 (unknown), not stamped "now" -
+                // see that field's javadoc for the real incident this avoids: a reconciled offer
+                // may have been genuinely filling the whole time this plugin wasn't watching it,
+                // so claiming "just progressed now" (or the equally wrong "hasn't progressed since
+                // now") is a guess either way. 0 tells isDud's velocity check to skip rather than
+                // assume the worst about an offer it has no history for yet.
                 activeOrders.put(slot, match);
                 log.info("PPOFlipperStar: reconciled SUBMITTED order {} to live slot {}", match, slot);
             } else {
@@ -366,7 +371,8 @@ public class PPOFlipperStarScript extends Script {
                 adopted.setQuantityFilled(liveAction == GrandExchangeAction.BUY
                     ? Rs2GrandExchange.getItemsBoughtFromOffer(slot)
                     : Rs2GrandExchange.getItemsSoldFromOffer(slot));
-                adopted.setLastFillProgressAtMillis(System.currentTimeMillis());
+                // lastFillProgressAtMillis deliberately left at 0 (unknown) - see the field's
+                // javadoc and the matching comment at the "reconciled" call site above.
                 queue.add(adopted);
                 activeOrders.put(slot, adopted);
                 log.info("PPOFlipperStar: adopted untracked live offer in slot {} - {}", slot, adopted);

@@ -62,9 +62,21 @@ public class PPOFlipperOrder {
      * amount once and then hasn't moved AT ALL for a while is functionally stalled even if its
      * cumulative percentage-vs-age ramp still calls it "not a dud" - this timestamp is what lets
      * that check tell "still slowly filling" apart from "filled a bit, then completely stopped."
-     * Reset to 0 alongside {@link #submittedAtMillis} on resubmission, same reasoning as that
-     * field's own javadoc: a fresh submission gets a fresh velocity clock, not one inherited from
-     * a previous attempt.
+     * Reset to 0 alongside {@link #submittedAtMillis} on a FRESH submission - a genuinely new
+     * order gets a fresh velocity clock, not one inherited from a previous attempt.
+     *
+     * <p><b>Deliberately left at 0 (unknown) when adopting or reconciling a pre-existing live
+     * offer</b> (an offer this plugin didn't itself just submit - e.g. recovered after a plugin
+     * restart) - unlike a fresh submission, there's no way to know when that offer last actually
+     * progressed, since it may have been filling steadily for the entire time this plugin wasn't
+     * watching it. Stamping "now" there would be actively wrong, not just imprecise: it would make
+     * a perfectly healthy, already-well-progressed offer look like it just stalled the moment it's
+     * observed, and get it wrongly cancelled roughly one {@code fillStallTimeoutSeconds} later -
+     * exactly what happened to a genuinely-progressing 205/529 Marrentill seed SELL that had been
+     * quietly filling for 84 minutes before a plugin reload "reconciled" it and then killed it 51
+     * seconds later. {@link #getLastFillProgressAtMillis} of 0 means "no velocity data yet," and
+     * {@code PPOFlipperStarScript#isDud} treats that as "don't know, don't flag" rather than
+     * assuming the worst.
      */
     @Setter
     private volatile long lastFillProgressAtMillis = 0;
