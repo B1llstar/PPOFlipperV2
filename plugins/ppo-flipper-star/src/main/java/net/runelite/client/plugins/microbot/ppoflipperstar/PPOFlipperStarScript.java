@@ -22,6 +22,7 @@ import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.grandexchange.models.GrandExchangeOfferDetails;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
+import net.runelite.client.plugins.microbot.util.item.Rs2ItemManager;
 
 import javax.inject.Inject;
 import java.util.ArrayList;
@@ -79,6 +80,12 @@ public class PPOFlipperStarScript extends Script {
     private final DecisionEngine decisionEngine;
     private final DecisionSuggestions decisionSuggestions;
     private final WikiPriceClient wikiPriceClient = new WikiPriceClient();
+    private final Rs2ItemManager itemManager = new Rs2ItemManager();
+
+    // itemId -> the live client's own item composition name, resolved once per item and reused
+    // forever after (item names never change at runtime) - see resolveGeSearchName's javadoc for
+    // why this exists instead of trusting the wiki's mapping name verbatim for the GE search box.
+    private final Map<Integer, String> geSearchNameCache = new ConcurrentHashMap<>();
 
     private PPOFlipperStarConfig config;
     private Guardrails guardrails;
@@ -1409,6 +1416,46 @@ public class PPOFlipperStarScript extends Script {
         return itemName.replaceAll("(?i)\\s*\\((item|tablet)\\)$", "");
     }
 
+    /**
+     * The name actually typed into the GE search box for {@code itemId}, resolved from the live
+     * client's own {@code ItemComposition} rather than the wiki's mapping name
+     * ({@code order.getItemName()}) - the same class of bug {@link #stripWikiDisambiguationSuffix}
+     * exists for ("(item)"/"(tablet)" suffixes the wiki's naming carries but the GE search doesn't
+     * recognize), except this covers it generally instead of one more special-cased suffix pattern.
+     * Real incident: "Yak-hide armour (legs)" (a real, distinct tradeable item - there's no plain
+     * "Yak-hide armour" to fall back to) failed to submit on every single tick for 7+ minutes
+     * despite {@code stripWikiDisambiguationSuffix} correctly leaving it untouched (its suffix
+     * isn't "(item)"/"(tablet)") and the request already using {@code exact(false)} - the wiki's
+     * own text for this item apparently isn't exactly what the in-game search widget indexes.
+     * {@code ItemComposition.getName()} is the client's own canonical rendered name for the item,
+     * guaranteed to be whatever the GE search actually recognizes, since it comes from the same
+     * client data the search widget itself reads.
+     *
+     * <p>Cached per item id in {@link #geSearchNameCache} - an item's composition name never
+     * changes at runtime, and {@code Rs2ItemManager.getItemComposition} is a client-thread round
+     * trip (cheap for the single order this method is called for once per tick, but no reason to
+     * repeat it for the same item across every future submission attempt/resubmission either).
+     * Falls back to {@link #stripWikiDisambiguationSuffix}'s result if {@code itemId <= 0}
+     * (unresolvable) or the composition lookup itself returns null - same graceful degradation the
+     * wiki-name path already had before this existed, not a new failure mode.
+     */
+    private String resolveGeSearchName(int itemId, String wikiItemName) {
+        String fallback = stripWikiDisambiguationSuffix(wikiItemName);
+        if (itemId <= 0) return fallback;
+
+        return geSearchNameCache.computeIfAbsent(itemId, id -> {
+            var composition = itemManager.getItemComposition(id);
+            String liveName = (composition != null && composition.getName() != null && !composition.getName().isEmpty())
+                ? composition.getName()
+                : null;
+            if (liveName == null) {
+                log.warn("PPOFlipperStar: could not resolve live item composition name for id {}, falling back to wiki name \"{}\" for GE search", id, fallback);
+                return fallback;
+            }
+            return liveName;
+        });
+    }
+
     private void submitNextOrder() {
         // Holds submission (retried next tick, not a terminal state) while the startup Firestore
         // reconcile is still in flight - see PPOFlipperStarFirestoreSync.reconcilePending's
@@ -1495,7 +1542,7 @@ public class PPOFlipperStarScript extends Script {
         // each other - buyItem(name, price, quantity) but sellItem(name, quantity, price). Do
         // not "fix" this to look symmetric without re-verifying against the client jar - it
         // really is asymmetric (confirmed against microbot-2.6.21.jar's own method signatures).
-        String geSearchName = stripWikiDisambiguationSuffix(order.getItemName());
+        String geSearchName = resolveGeSearchName(order.getItemId(), order.getItemName());
         GrandExchangeSlots slotBefore = Rs2GrandExchange.getAvailableSlot();
 
         // Real incident: activeOrders.size() < maxActiveOffers() (the check above) disagreed with
