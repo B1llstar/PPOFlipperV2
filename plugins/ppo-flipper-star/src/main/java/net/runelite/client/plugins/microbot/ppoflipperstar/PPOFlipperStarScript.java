@@ -1922,18 +1922,33 @@ public class PPOFlipperStarScript extends Script {
 
     /**
      * A QUEUED SELL represents capital/inventory already committed - if every GE slot is tied up
-     * with dud BUYs (see {@link #isDud} - unfilled or negligibly filled, still-speculative
-     * opportunities either way) and the SELL has been waiting past {@code sellSlotEvictionWaitSeconds},
-     * this cancels the single oldest eligible BUY to make room for it, rather than making it wait
-     * on {@link #isStale}'s much longer {@code staleOfferTimeoutMinutes} timer. Deliberately
-     * narrow: only fires when {@link OrderQueue#nextQueued()} itself resolves to a SELL (i.e.
-     * nothing else already jumps the line ahead of it - see that method's javadoc) AND every slot
-     * is full AND that SELL has actually been queued long enough. "Eligible" BUY means a dud per
-     * {@link #isDud} (a real, meaningful partial fill is never touched, same protection
-     * {@link #isStale} already applies) and at least {@code sellSlotEvictionMinBuyAgeSeconds} old,
-     * so a BUY that hasn't had a fair chance to fill yet is never sacrificed just because it
-     * happens to be the only one active. If no BUY qualifies yet, the SELL simply keeps waiting -
-     * this never forces an eviction, only offers one once a genuinely reasonable candidate exists.
+     * and the SELL has been waiting past {@code sellSlotEvictionWaitSeconds}, this cancels one
+     * eligible active order to make room for it, rather than making it wait on {@link #isStale}'s
+     * much longer {@code staleOfferTimeoutMinutes} timer. Deliberately narrow: only fires when
+     * {@link OrderQueue#nextQueued()} itself resolves to a SELL (i.e. nothing else already jumps
+     * the line ahead of it - see that method's javadoc) AND every slot is full AND that SELL has
+     * actually been queued long enough.
+     *
+     * <p>Prefers evicting a dud BUY first (a still-speculative opportunity, never a real
+     * committed position) - "eligible" means a dud per {@link #isDud} (a real, meaningful partial
+     * fill is never touched, same protection {@link #isStale} already applies) and at least
+     * {@code sellSlotEvictionMinBuyAgeSeconds} old, so a BUY that hasn't had a fair chance to fill
+     * yet is never sacrificed just because it happens to be active.
+     *
+     * <p><b>Falls back to evicting a dud SELL (never the blocked SELL itself) if no eligible BUY
+     * exists at all</b> - a real incident: with 5 of 8 slots held by SELLs and only 3 by BUYs, all
+     * 3 BUYs happened to be either too young or genuinely partially filled, leaving zero eligible
+     * BUYs ever, while a blocked SELL sat waiting 700+ seconds (12x this setting's own grace
+     * period) with no other candidate this method would previously even consider. A dud SELL
+     * occupying a slot is exactly as stuck/wasteful as a dud BUY would be, and freeing it for a
+     * different, still-queued SELL is no worse than what {@code staleOfferTimeoutMinutes} would
+     * eventually do to it anyway - just sooner, and specifically because something else is
+     * genuinely waiting right now, the same "only if actually needed" principle this whole method
+     * already follows for BUYs.
+     *
+     * <p>If nothing (neither a BUY nor a SELL) qualifies yet, the blocked SELL simply keeps
+     * waiting - this never forces an eviction, only offers one once a genuinely reasonable
+     * candidate exists.
      */
     private void evictForBlockedSell() {
         int waitSeconds = config.sellSlotEvictionWaitSeconds();
@@ -1977,22 +1992,51 @@ public class PPOFlipperStarScript extends Script {
                 && now - e.getValue().getSubmittedAtMillis() >= minBuyAgeMillis)
             .min(Comparator.comparingLong(e -> e.getValue().getSubmittedAtMillis()))
             .orElse(null);
-        if (oldestEligibleBuy == null) {
-            // No BUY is both a dud (see isDud - unfilled or negligibly filled) and old enough yet
-            // - let the SELL keep waiting rather than sacrificing one that hasn't had a fair
+        if (oldestEligibleBuy != null) {
+            log.info("PPOFlipperStar: evicting BUY in slot {} - {} - to free a slot for blocked SELL {} (queued {}s)",
+                oldestEligibleBuy.getKey(), oldestEligibleBuy.getValue(), blockedSell, queuedForMillis / 1000L);
+            cancelAndFreeSlot(oldestEligibleBuy.getKey(), oldestEligibleBuy.getValue(),
+                "Evicted to free a GE slot for a blocked SELL (" + blockedSell.getItemName() + ")");
+            return;
+        }
+
+        // Real incident: with 5 of 8 active slots all held by SELLs and only 3 by BUYs, every one
+        // of those 3 BUYs happened to be either too young or a real partial fill - leaving NO
+        // eligible BUY at all, ever, while a blocked SELL sat waiting 700+ seconds (12x this
+        // setting's own grace period) with the eviction check correctly, repeatedly declining to
+        // act, tick after tick, with no other fallback. A dud SELL occupying a slot is exactly as
+        // wasteful as a dud BUY would be - it's just as unfilled/stuck, and freeing it for a
+        // DIFFERENT, still-queued SELL is no worse than what staleOfferTimeoutMinutes would
+        // eventually do to it anyway, just sooner, and specifically because something else is
+        // genuinely waiting on a slot right now (same "only if actually needed" principle this
+        // whole method already follows for BUYs). Never considers blockedSell itself (that's the
+        // order waiting for room, not a candidate to evict) or a SELL with any real fill (isDud
+        // already protects a partial fill the same way it does for a BUY).
+        Map.Entry<GrandExchangeSlots, PPOFlipperOrder> oldestEligibleSell = activeOrders.entrySet().stream()
+            .filter(e -> e.getValue().getAction() == GrandExchangeAction.SELL)
+            .filter(e -> e.getValue() != blockedSell)
+            .filter(e -> isDud(e.getValue()))
+            .filter(e -> e.getValue().getSubmittedAtMillis() > 0
+                && now - e.getValue().getSubmittedAtMillis() >= minBuyAgeMillis)
+            .min(Comparator.comparingLong(e -> e.getValue().getSubmittedAtMillis()))
+            .orElse(null);
+        if (oldestEligibleSell == null) {
+            // Nothing evictable at all (neither a dud BUY nor a dud SELL, old enough) - let the
+            // blocked SELL keep waiting rather than sacrificing something that hasn't had a fair
             // chance, or a real partial fill worth protecting.
             log.info("PPOFlipperStar: evictForBlockedSell - SELL {} has waited {}s past the grace period, but no " +
-                    "active BUY is both a dud (unfilled or negligibly filled) and at least {}s old yet - holding " +
-                    "off eviction this tick. Active orders: {}",
+                    "active order (BUY or SELL) is both a dud (unfilled or negligibly filled) and at least {}s " +
+                    "old yet - holding off eviction this tick. Active orders: {}",
                 blockedSell, queuedForMillis / 1000L, config.sellSlotEvictionMinBuyAgeSeconds(),
                 activeOrders.values());
             return;
         }
 
-        log.info("PPOFlipperStar: evicting BUY in slot {} - {} - to free a slot for blocked SELL {} (queued {}s)",
-            oldestEligibleBuy.getKey(), oldestEligibleBuy.getValue(), blockedSell, queuedForMillis / 1000L);
-        cancelAndFreeSlot(oldestEligibleBuy.getKey(), oldestEligibleBuy.getValue(),
-            "Evicted to free a GE slot for a blocked SELL (" + blockedSell.getItemName() + ")");
+        log.info("PPOFlipperStar: evicting dud SELL in slot {} - {} - no eligible BUY existed, freeing a slot " +
+                "for a different blocked SELL {} (queued {}s)",
+            oldestEligibleSell.getKey(), oldestEligibleSell.getValue(), blockedSell, queuedForMillis / 1000L);
+        cancelAndFreeSlot(oldestEligibleSell.getKey(), oldestEligibleSell.getValue(),
+            "Evicted (as a dud SELL, no eligible BUY existed) to free a GE slot for a blocked SELL (" + blockedSell.getItemName() + ")");
     }
 
     /**
