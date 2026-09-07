@@ -39,9 +39,14 @@ public class PPOFlipperStarOverlay extends OverlayPanel {
             .right(script.getState().name())
             .build());
 
+        // getCachedTotalGold(), NOT getTotalGold() - this method runs on RuneLite's own
+        // client/render thread every single frame. getTotalGold() blocks on a live bank scan
+        // (the same chain PPOFlipperStarPanel.refreshFromScriptState's javadoc documents freezing
+        // the client's UI for 155+ seconds when called from the Swing EDT) - calling it here would
+        // do the same thing to the render thread instead, every frame, not just once.
         panelComponent.getChildren().add(LineComponent.builder()
             .left("Gold (inv+bank)")
-            .right(String.format("%,d", goldManager.getTotalGold()))
+            .right(String.format("%,d", goldManager.getCachedTotalGold()))
             .build());
 
         panelComponent.getChildren().add(LineComponent.builder()
