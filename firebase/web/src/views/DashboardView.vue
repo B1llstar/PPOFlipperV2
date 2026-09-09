@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch, onMounted } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { usePortfolio } from '@/composables/usePortfolio'
 import { useBuyLimitLedger } from '@/composables/useBuyLimitLedger'
 import { useWatchlist } from '@/composables/useWatchlist'
@@ -122,6 +122,28 @@ const totalBotDrivenRealizedProfit = computed(() =>
 // alongside it so the figure's own sample size is visible at a glance, since a couple of large
 // trades can otherwise make a thin sample look more conclusive than it is.
 const matchedTradeCount = computed(() => matchedTrades.value.filter((m) => m.profit != null).length)
+
+// Rolling last-24h window on top of the same matched-trade data, recomputed every minute rather
+// than once - a real gap found live: the all-time figures above answer "how much has the bot ever
+// made," but tuning a live setting (e.g. minSellProfitMarginPercent) needs "how's it doing under
+// the CURRENT setting," which the all-time count/total can't isolate on its own once several
+// tuning passes have happened. A rolling 24h window is a simpler, more durable anchor than "since
+// the last config change" (which has no fixed point once something is tuned again) while still
+// answering "how are we doing lately" directly on the dashboard, without a manual one-off query.
+const nowMillis = ref(Date.now())
+let nowInterval = null
+onMounted(() => {
+  nowInterval = setInterval(() => { nowMillis.value = Date.now() }, 60_000)
+})
+onUnmounted(() => { if (nowInterval) clearInterval(nowInterval) })
+
+const matchedTradesLast24h = computed(() => {
+  const cutoff = nowMillis.value - 24 * 60 * 60 * 1000
+  return matchedTrades.value.filter((m) => m.sellTimestampMillis >= cutoff && m.profit != null)
+})
+const totalBotDrivenRealizedProfitLast24h = computed(() =>
+  matchedTradesLast24h.value.reduce((sum, m) => sum + m.profit, 0),
+)
 const totalUnrealizedProfit = computed(() => {
   const withPrice = enrichedPositions.value.filter((p) => p.unrealized != null)
   if (withPrice.length === 0) return null
@@ -230,6 +252,17 @@ const actionTone = (action) => {
           label="Matched trades"
           :value="matchedTradeCount.toLocaleString()"
           sub="sample size behind the bot-driven figure — small samples can be misleading"
+        />
+        <StatCard
+          label="Bot-driven P&amp;L (last 24h)"
+          :value="formatGp(totalBotDrivenRealizedProfitLast24h)"
+          :tone="totalBotDrivenRealizedProfitLast24h > 0 ? 'profit' : totalBotDrivenRealizedProfitLast24h < 0 ? 'loss' : 'neutral'"
+          sub="rolling window, for judging a recently-changed setting"
+        />
+        <StatCard
+          label="Matched trades (last 24h)"
+          :value="matchedTradesLast24h.length.toLocaleString()"
+          sub="sample size behind the 24h figure"
         />
         <StatCard
           label="Cost basis held"
