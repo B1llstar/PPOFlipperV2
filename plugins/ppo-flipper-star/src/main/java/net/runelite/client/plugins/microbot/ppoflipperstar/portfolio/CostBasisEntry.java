@@ -16,6 +16,14 @@ public class CostBasisEntry {
     private long realizedProfit;
     private long weightedAcquisitionTimestampMillis;
 
+    // Any acquisition timestamp before this (2024-01-01T00:00:00Z) is treated as invalid data,
+    // not a real position age - see getHoldingDurationMillis's javadoc for the real incident.
+    // This plugin (and PPOFlipperStar as a concept) didn't exist before this date, so a genuine
+    // acquisition can never legitimately predate it; anything that does is corrupted data (an
+    // epoch-zero/near-zero timestamp from before PortfolioManager.reconcileFromFirestore's own
+    // db06d77 fix existed, or some other path that never sanity-checked what it stored).
+    private static final long EARLIEST_PLAUSIBLE_ACQUISITION_MILLIS = 1_704_067_200_000L;
+
     public CostBasisEntry(int itemId) {
         this.itemId = itemId;
     }
@@ -25,9 +33,27 @@ public class CostBasisEntry {
         return (int) (totalCostBasis / quantityHeld);
     }
 
-    /** How long the current position has been held, weighted-average across topped-up buys. 0 if nothing is currently held. */
+    /**
+     * How long the current position has been held, weighted-average across topped-up buys. 0 if
+     * nothing is currently held.
+     *
+     * <p><b>Also 0 if {@link #weightedAcquisitionTimestampMillis} is itself invalid</b> (see
+     * {@link #EARLIEST_PLAUSIBLE_ACQUISITION_MILLIS}) - a real, recurring incident: db06d77 fixed
+     * {@code PortfolioManager.reconcileFromFirestore} trusting an epoch-zero remote timestamp
+     * verbatim, but that fix only guards ONE write path. An entry already corrupted before that
+     * fix existed (or corrupted by some other path that never validated what it stored) persists
+     * its bad timestamp indefinitely - {@link #recordBuy}'s weighted-average blend only DILUTES a
+     * bad value proportionally to new purchase volume, it never resets it outright, so a stale
+     * position with no further real buys keeps reporting a reported age of tens of millions of
+     * minutes (confirmed live: "Ham robe ... held 14911037 min", ~28 years) forever. Checking here,
+     * at the point of use, fixes this and any other already-corrupted entry immediately with no
+     * data migration needed, and can't be reintroduced by some future write path that forgets to
+     * validate its own input the way the reconcile fix required remembering to.
+     */
     public long getHoldingDurationMillis(long nowMillis) {
-        return quantityHeld > 0 ? Math.max(0, nowMillis - weightedAcquisitionTimestampMillis) : 0;
+        if (quantityHeld <= 0) return 0;
+        if (weightedAcquisitionTimestampMillis < EARLIEST_PLAUSIBLE_ACQUISITION_MILLIS) return 0;
+        return Math.max(0, nowMillis - weightedAcquisitionTimestampMillis);
     }
 
     /**
