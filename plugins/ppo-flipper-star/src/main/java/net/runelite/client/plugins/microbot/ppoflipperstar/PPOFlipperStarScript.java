@@ -1104,6 +1104,24 @@ public class PPOFlipperStarScript extends Script {
             .thenComparing(Comparator.comparingDouble(PPOFlipperDecision::getConfidence).reversed()));
 
         for (PPOFlipperDecision decision : ordered) {
+            // Confirmed-empty check FIRST, before any other gate - see
+            // confirmedEmptyDespiteLedger's own field javadoc for the real incident. Deliberately
+            // not scoped to just the forced-stale-position path (addStalePositionSells already
+            // skips a confirmed-empty item when building its own suggestion) - the model's OWN
+            // trained policy independently proposes a SELL for an item too, fed by the exact same
+            // underlying live-holdings read, and was confirmed live to keep re-proposing this
+            // same unfillable SELL every tick even after the forced-path suggestion was
+            // suppressed. One central guard here covers every source of a SELL suggestion, not
+            // just one of them.
+            if (decision.getGeAction() == GrandExchangeAction.SELL && decision.getItemId() > 0
+                    && confirmedEmptyDespiteLedger.contains(decision.getItemId())) {
+                log.info("PPOFlipperStar: skipping autonomous {} - item {} was confirmed empty by an actual bank " +
+                        "visit despite the live-holdings read disagreeing; suppressed until a real fill is seen.",
+                    decision, decision.getItemId());
+                decisionSuggestions.remove(decision.getId());
+                continue;
+            }
+
             // The backlog-depth cap only ever gates BUY, never SELL - see incident-notes/
             // fix-guide-autonomous-item-clustering.md's "related, separate bug" section. Only a
             // BUY actually grows OrderQueue's backlog, so only BUY needs to be bounded by it; a
