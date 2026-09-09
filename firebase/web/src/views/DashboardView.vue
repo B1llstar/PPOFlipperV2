@@ -104,6 +104,20 @@ const itemProfitRows = computed(() => {
 
 const totalCostBasis = computed(() => positions.value.reduce((sum, p) => sum + (p.totalCostBasis ?? 0), 0))
 const totalRealizedProfit = computed(() => positions.value.reduce((sum, p) => sum + (p.realizedProfit ?? 0), 0))
+// Distinct from totalRealizedProfit above on purpose: that figure sums the ledger's
+// realizedProfit, which includes profit/loss computed against a SEEDED cost basis for stock
+// already held before this bot ever tracked it (PortfolioManager.reconcileFromFirestore can
+// adopt a remote quantityHeld/totalCostBasis with no real recorded BUY behind it at all) - mixed
+// in indistinguishably with genuine bot-driven buy-then-sell flips, which was reported as making
+// it hard to tell "how much has the bot actually made" from the headline number. useMatchedTrades
+// already solves this correctly per-trade (FIFO-matches each SELL only against BUYs it can
+// actually trace within the trade-history window, leaving the rest as profit: null/"unmatched"
+// rather than guessing) - this sums only the matched (traceable) portion of that same computation,
+// so it's a second, narrower, more trustworthy "bot-driven only" figure alongside the existing
+// broader one, not a replacement for it.
+const totalBotDrivenRealizedProfit = computed(() =>
+  matchedTrades.value.reduce((sum, m) => sum + (m.profit ?? 0), 0),
+)
 const totalUnrealizedProfit = computed(() => {
   const withPrice = enrichedPositions.value.filter((p) => p.unrealized != null)
   if (withPrice.length === 0) return null
@@ -184,7 +198,7 @@ const actionTone = (action) => {
       </div>
 
       <!-- Top-line stats -->
-      <section class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <section class="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard
           label="Portfolio value"
           :value="portfolioLoading || pricesLoading ? '…' : formatGp(portfolioValue)"
@@ -200,7 +214,13 @@ const actionTone = (action) => {
           label="Realized P&amp;L (all-time)"
           :value="portfolioLoading ? '…' : formatGp(totalRealizedProfit)"
           :tone="totalRealizedProfit > 0 ? 'profit' : totalRealizedProfit < 0 ? 'loss' : 'neutral'"
-          sub="from closed trades, per Firestore ledger"
+          sub="from closed trades, per Firestore ledger — includes pre-existing stock"
+        />
+        <StatCard
+          label="Realized P&amp;L (bot-driven only)"
+          :value="formatGp(totalBotDrivenRealizedProfit)"
+          :tone="totalBotDrivenRealizedProfit > 0 ? 'profit' : totalBotDrivenRealizedProfit < 0 ? 'loss' : 'neutral'"
+          sub="FIFO-matched buy→sell pairs only, excludes pre-existing/unmatched stock"
         />
         <StatCard
           label="Cost basis held"
@@ -211,8 +231,11 @@ const actionTone = (action) => {
 
       <p class="text-xs text-[var(--color-text-faint)] -mt-3">
         Note: session gold-on-hand / net-worth isn't tracked here — <code class="font-mono-nums">GoldManager</code>'s
-        live coin count is local to the running RuneLite client and never synced to Firestore. The figures above are
-        reconstructed purely from the portfolio cost-basis ledger and live Wiki prices.
+        live coin count is local to the running RuneLite client and never synced to Firestore. "Realized P&amp;L
+        (all-time)" is reconstructed from the portfolio cost-basis ledger and can include stock held before the bot
+        started tracking it; "bot-driven only" instead sums just the trades in "Profit by trade" below that could be
+        FIFO-matched to an actual tracked buy, so it won't include a sell whose funding buy fell outside the trade
+        history window.
       </p>
 
       <!-- Portfolio + presence-adjacent panels -->
