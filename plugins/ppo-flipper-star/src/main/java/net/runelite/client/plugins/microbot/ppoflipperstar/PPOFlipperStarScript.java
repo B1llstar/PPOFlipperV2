@@ -1818,28 +1818,31 @@ public class PPOFlipperStarScript extends Script {
      * it's less aggressively priced, but that's now bounded by {@code staleOfferTimeoutMinutes}
      * rather than waiting forever) instead of silently not happening at all this tick.
      *
-     * <p><b>Exempt below {@link GeTax#EXEMPT_BELOW_UNIT_PRICE}</b> (the same 50gp/unit floor GE
-     * tax itself waives at) - a real, confirmed incident: at a low unit price, a percentage margin
-     * doesn't degrade gracefully, it becomes wildly unstable because the result has to round up to
-     * a whole gp. A nominal 3% margin turned into a real 30-40%+ markup over the live market price
-     * for items like Water rune (5gp &rarr; 7gp, a 40% hike) and Sapphire bolt tips (6gp &rarr; 8gp,
-     * a 33% hike) - confirmed live to leave 7 of 8 active GE slots sitting at 0% filled, all
-     * mispriced this same way. Below this threshold the percentage math simply can't produce a
-     * sane result, so the model's own live-spread-informed price is trusted directly instead - the
-     * same behavior as {@code minSellProfitMarginPercent} being disabled entirely, just scoped only
-     * to items where a percentage margin was never going to work regardless of the configured
-     * value.
+     * <p><b>The rounding-instability exemption below is keyed on {@code averageCost}, NOT
+     * {@code candidatePrice}</b> - a real, confirmed regression from the first version of this
+     * fix. At a low unit COST, a percentage margin doesn't degrade gracefully, it becomes wildly
+     * unstable because the result has to round up to a whole gp - e.g. a nominal 3% margin turned
+     * into a real 30-40%+ markup over the live market price for items like Water rune (avg cost
+     * 6gp, model wanted 5gp, margin demanded 7gp - a 40% hike) and Sapphire bolt tips (avg cost
+     * 7gp, margin demanded 8gp - a 33% hike), confirmed live to leave 7 of 8 active GE slots
+     * sitting at 0% filled. The FIRST fix for that checked {@code candidatePrice} instead, which
+     * is a different number - it let through any order whose PROPOSED price happened to be under
+     * 50gp regardless of the item's real cost basis, so a genuinely mid-priced position like Raw
+     * chicken (avg cost 32gp, model proposing 27-31gp - a real, ordinary underwater situation, not
+     * a rounding artifact at all) got waved through this guardrail entirely and sold below cost
+     * twice for a combined -60,680gp, confirmed live within hours of that first fix shipping.
+     * Checking {@code averageCost} instead only exempts an item whose COST BASIS itself is low
+     * enough that the percentage math is unstable - it can no longer be tripped by a merely
+     * low-priced SELL on an item with a perfectly ordinary, mid-range cost basis.
      */
     private int applyMinSellMargin(PPOFlipperOrder order, int candidatePrice) {
-        if (candidatePrice < GeTax.EXEMPT_BELOW_UNIT_PRICE) {
-            return candidatePrice;
-        }
         int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         double marginPercent = resolveMinSellMarginPercent(itemId);
         if (marginPercent <= 0) return candidatePrice;
 
         int averageCost = itemId > 0 ? portfolio.getAverageCost(itemId) : 0;
         if (averageCost <= 0) return candidatePrice;
+        if (averageCost < GeTax.EXEMPT_BELOW_UNIT_PRICE) return candidatePrice;
 
         // The margin this guardrail promises must survive GE tax (see GeTax) - a price solved
         // purely against gross proceeds (the old formula here) overstates the real margin by
