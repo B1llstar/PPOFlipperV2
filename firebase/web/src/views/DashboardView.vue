@@ -118,6 +118,10 @@ const totalRealizedProfit = computed(() => positions.value.reduce((sum, p) => su
 const totalBotDrivenRealizedProfit = computed(() =>
   matchedTrades.value.reduce((sum, m) => sum + (m.profit ?? 0), 0),
 )
+// Count of trades actually feeding totalBotDrivenRealizedProfit above (profit !== null) - shown
+// alongside it so the figure's own sample size is visible at a glance, since a couple of large
+// trades can otherwise make a thin sample look more conclusive than it is.
+const matchedTradeCount = computed(() => matchedTrades.value.filter((m) => m.profit != null).length)
 const totalUnrealizedProfit = computed(() => {
   const withPrice = enrichedPositions.value.filter((p) => p.unrealized != null)
   if (withPrice.length === 0) return null
@@ -198,7 +202,7 @@ const actionTone = (action) => {
       </div>
 
       <!-- Top-line stats -->
-      <section class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+      <section class="grid grid-cols-2 lg:grid-cols-6 gap-4">
         <StatCard
           label="Portfolio value"
           :value="portfolioLoading || pricesLoading ? '…' : formatGp(portfolioValue)"
@@ -221,6 +225,11 @@ const actionTone = (action) => {
           :value="formatGp(totalBotDrivenRealizedProfit)"
           :tone="totalBotDrivenRealizedProfit > 0 ? 'profit' : totalBotDrivenRealizedProfit < 0 ? 'loss' : 'neutral'"
           sub="FIFO-matched buy→sell pairs only, excludes pre-existing/unmatched stock"
+        />
+        <StatCard
+          label="Matched trades"
+          :value="matchedTradeCount.toLocaleString()"
+          sub="sample size behind the bot-driven figure — small samples can be misleading"
         />
         <StatCard
           label="Cost basis held"
