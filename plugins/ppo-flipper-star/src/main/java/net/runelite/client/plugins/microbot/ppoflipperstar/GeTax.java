@@ -27,7 +27,8 @@ public final class GeTax {
     /** Exposed (not private) for callers that need to solve for a price given a target net margin - see PPOFlipperStarScript.applyMinSellMargin. */
     public static final double RATE = 0.02;
     private static final long CAP = 5_000_000L;
-    private static final int EXEMPT_BELOW_UNIT_PRICE = 50;
+    /** Exposed (not private) for PPOFlipperStarScript.applyMinSellMargin - see that method's own javadoc for why a percentage-based margin is exempted below this same price point. */
+    public static final int EXEMPT_BELOW_UNIT_PRICE = 50;
 
     private GeTax() {
     }

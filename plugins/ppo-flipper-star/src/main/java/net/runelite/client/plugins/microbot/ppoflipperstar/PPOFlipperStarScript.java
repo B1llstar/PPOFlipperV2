@@ -1817,8 +1817,23 @@ public class PPOFlipperStarScript extends Script {
      * insta-sell floor's own behavior above - the trade still goes out (may fill slower now that
      * it's less aggressively priced, but that's now bounded by {@code staleOfferTimeoutMinutes}
      * rather than waiting forever) instead of silently not happening at all this tick.
+     *
+     * <p><b>Exempt below {@link GeTax#EXEMPT_BELOW_UNIT_PRICE}</b> (the same 50gp/unit floor GE
+     * tax itself waives at) - a real, confirmed incident: at a low unit price, a percentage margin
+     * doesn't degrade gracefully, it becomes wildly unstable because the result has to round up to
+     * a whole gp. A nominal 3% margin turned into a real 30-40%+ markup over the live market price
+     * for items like Water rune (5gp &rarr; 7gp, a 40% hike) and Sapphire bolt tips (6gp &rarr; 8gp,
+     * a 33% hike) - confirmed live to leave 7 of 8 active GE slots sitting at 0% filled, all
+     * mispriced this same way. Below this threshold the percentage math simply can't produce a
+     * sane result, so the model's own live-spread-informed price is trusted directly instead - the
+     * same behavior as {@code minSellProfitMarginPercent} being disabled entirely, just scoped only
+     * to items where a percentage margin was never going to work regardless of the configured
+     * value.
      */
     private int applyMinSellMargin(PPOFlipperOrder order, int candidatePrice) {
+        if (candidatePrice < GeTax.EXEMPT_BELOW_UNIT_PRICE) {
+            return candidatePrice;
+        }
         int itemId = order.getItemId() > 0 ? order.getItemId() : itemNameResolver.resolveId(order.getItemName());
         double marginPercent = resolveMinSellMarginPercent(itemId);
         if (marginPercent <= 0) return candidatePrice;
