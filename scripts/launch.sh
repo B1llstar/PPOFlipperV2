@@ -73,4 +73,10 @@ if [ -z "$JAVA_BIN" ]; then
 fi
 
 echo "    using java: $JAVA_BIN"
-exec "$JAVA_BIN" -ea -Xmx2g -jar "$CLIENT_JAR"
+# Xmx3g, not the original 2g - a real incident: periodic stutter observed on an 8GB Mac after
+# the watchlist grew to 800+ items (vs ~150 earlier), consistent with GC pressure from a tight
+# heap under much larger per-tick allocation (suggestion lists, wiki price/history caches for
+# every watchlisted item). 3g leaves real headroom on an 8GB machine for the OS/everything else
+# while giving the JVM meaningfully more room before GC has to work hard - not raised to 4g+
+# specifically to avoid starving an 8GB machine's other memory needs.
+exec "$JAVA_BIN" -ea -Xmx3g -jar "$CLIENT_JAR"

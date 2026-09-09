@@ -361,7 +361,12 @@ if (-not $SkipClient) {
     }
 
     Write-Host "    using java: $JavaBin"
-    Start-Process -FilePath $JavaBin -ArgumentList "-ea", "-Xmx2g", "-jar", "`"$ClientJar`""
+    # Xmx3g, matching launch.sh's own bump from 2g - see that script's comment for the real
+    # incident (GC-pressure stutter on an 8GB Mac once the watchlist grew to 800+ items). Not
+    # confirmed as a problem on Windows specifically, but the same larger-watchlist memory
+    # pressure applies on any platform, so this keeps both launch paths consistent rather than
+    # leaving Windows on the old, tighter default.
+    Start-Process -FilePath $JavaBin -ArgumentList "-ea", "-Xmx3g", "-jar", "`"$ClientJar`""
 }
 
 # ---------------------------------------------------------------------------
