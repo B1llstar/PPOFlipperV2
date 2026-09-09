@@ -133,16 +133,14 @@ public class PPOFlipperStarPanel extends PluginPanel {
         add(buildCancelAllButton());
         add(Box.createRigidArea(new Dimension(0, 10)));
         add(buildStatusPanel());
-        add(Box.createRigidArea(new Dimension(0, 10)));
-        add(buildSuggestionsHeader());
 
-        suggestionsListPanel = new JPanel();
-        suggestionsListPanel.setLayout(new BoxLayout(suggestionsListPanel, BoxLayout.Y_AXIS));
-        add(suggestionsListPanel);
-
-        add(Box.createRigidArea(new Dimension(0, 10)));
-        add(buildSeedWatchlistButton());
-
+        // Order queue and portfolio moved ABOVE Model suggestions - a real, direct report:
+        // suggestions (one row per still-pending PPO proposal, uncapped) could run into the
+        // hundreds with a large watchlist, pushing the queue/portfolio - what a user actually
+        // wants to check first - off the bottom of a very long scroll. Suggestions are still here,
+        // just after the two sections people actually look for first; see refreshSuggestions'
+        // own comment for the separate row-count cap that keeps this section itself bounded even
+        // when there's a genuine flood of pending suggestions.
         add(Box.createRigidArea(new Dimension(0, 10)));
         add(buildAddOrderForm());
         add(Box.createRigidArea(new Dimension(0, 10)));
@@ -158,6 +156,16 @@ public class PPOFlipperStarPanel extends PluginPanel {
         portfolioListPanel = new JPanel();
         portfolioListPanel.setLayout(new BoxLayout(portfolioListPanel, BoxLayout.Y_AXIS));
         add(portfolioListPanel);
+
+        add(Box.createRigidArea(new Dimension(0, 10)));
+        add(buildSuggestionsHeader());
+
+        suggestionsListPanel = new JPanel();
+        suggestionsListPanel.setLayout(new BoxLayout(suggestionsListPanel, BoxLayout.Y_AXIS));
+        add(suggestionsListPanel);
+
+        add(Box.createRigidArea(new Dimension(0, 10)));
+        add(buildSeedWatchlistButton());
 
         queue.addListener(() -> SwingUtilities.invokeLater(this::refreshOrderList));
         decisionSuggestions.addListener(() -> SwingUtilities.invokeLater(this::refreshSuggestions));
@@ -911,6 +919,15 @@ public class PPOFlipperStarPanel extends PluginPanel {
     // Confirm click before anything reaches OrderQueue. See buildSuggestionsHeader's javadoc.
     // ---------------------------------------------------------------------------------------
 
+    // A real, direct report: with a large watchlist, DECIDE ticks can produce hundreds of
+    // suggestions still awaiting a manual decision (autonomous mode off, or below the confidence
+    // threshold) - rendering every single one made this section (and therefore the whole panel)
+    // extremely tall, on top of already being moved below the queue/portfolio sections above.
+    // Capping the row count keeps this section itself bounded regardless of how large the
+    // underlying suggestion count gets; the "+N more" label makes the truncation visible rather
+    // than silently hiding suggestions with no indication more exist.
+    private static final int MAX_RENDERED_SUGGESTIONS = 20;
+
     private void refreshSuggestions() {
         suggestionsListPanel.removeAll();
 
@@ -922,9 +939,17 @@ public class PPOFlipperStarPanel extends PluginPanel {
             empty.setAlignmentX(Component.LEFT_ALIGNMENT);
             suggestionsListPanel.add(empty);
         } else {
-            for (PPOFlipperDecision decision : suggestions) {
+            int shown = Math.min(suggestions.size(), MAX_RENDERED_SUGGESTIONS);
+            for (PPOFlipperDecision decision : suggestions.subList(0, shown)) {
                 suggestionsListPanel.add(buildSuggestionRow(decision));
                 suggestionsListPanel.add(Box.createRigidArea(new Dimension(0, 4)));
+            }
+            if (suggestions.size() > shown) {
+                JLabel more = new JLabel((suggestions.size() - shown) + " more pending suggestion(s) not shown");
+                more.setFont(FontManager.getRunescapeSmallFont());
+                more.setForeground(Color.LIGHT_GRAY);
+                more.setAlignmentX(Component.LEFT_ALIGNMENT);
+                suggestionsListPanel.add(more);
             }
         }
 
