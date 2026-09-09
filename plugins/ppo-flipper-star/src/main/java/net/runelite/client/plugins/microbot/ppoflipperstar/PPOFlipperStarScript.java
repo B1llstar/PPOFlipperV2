@@ -107,6 +107,20 @@ public class PPOFlipperStarScript extends Script {
     private PPOFlipperOrder orderAwaitingFunds;
     private PPOFlipperOrder lastFundsShortfallOrder;
 
+    // Item ids confirmed genuinely empty by an actual bank+inventory visit, despite
+    // PortfolioManager.getAllHoldings() (used by addStalePositionSells) still reporting a nonzero
+    // live quantity - see hasFundsOrItems' "still short after a bank visit" call site's own
+    // comment for the real, confirmed incident this exists for. A held-quantity read can disagree
+    // with itself indefinitely for a specific item (e.g. a noted stack whose canonical-id
+    // resolution silently diverges between the two read paths - see BankManager/InventoryManager's
+    // own canonicalItemId javadoc for the general class of bug), which without this would mean
+    // addStalePositionSells keeps re-proposing the exact same unfillable SELL forever, every tick,
+    // wasting a suggestion slot and a real bank visit each time. A confirmed-empty bank visit is
+    // ground truth - it's not a stale cache, it's the actual current contents - so this suppresses
+    // future stale-position forcing for that item until a real BUY/SELL fill for it is observed
+    // again (see recordCostBasis, which removes the item from this set on any real fill).
+    private final Set<Integer> confirmedEmptyDespiteLedger = ConcurrentHashMap.newKeySet();
+
     /**
      * Per-item override of {@code minSellProfitMarginPercent}, only present for an item whose SELL
      * has genuinely gotten stuck at the configured margin and been cancelled/re-evaluated at least
@@ -942,6 +956,7 @@ public class PPOFlipperStarScript extends Script {
             if (entry.getQuantityHeld() <= 0) continue;
             if (entry.getHoldingDurationMillis(now) < thresholdMillis) continue;
             if (alreadySuggestedSell.contains(entry.getItemId())) continue;
+            if (confirmedEmptyDespiteLedger.contains(entry.getItemId())) continue;
 
             int liveQuantity = liveHoldings.getOrDefault(entry.getItemId(), 0);
             if (liveQuantity <= 0) continue;
@@ -1576,6 +1591,18 @@ public class PPOFlipperStarScript extends Script {
                 log.warn("PPOFlipperStar: still short funds/items for {} after a bank visit, skipping.", order);
                 markSkipped(order, "Insufficient funds/items after bank visit");
                 lastFundsShortfallOrder = null;
+                // A SELL confirmed short AFTER an actual bank visit (not just the pre-visit
+                // guess) is ground truth, not a stale cache read - see confirmedEmptyDespiteLedger's
+                // own field javadoc for the real incident (a held-quantity read that disagreed with
+                // an actual bank visit, indefinitely, for the same item, every tick). Suppresses
+                // addStalePositionSells from proposing this exact unfillable SELL again until a
+                // real fill for this item is observed.
+                if (order.getAction() == GrandExchangeAction.SELL && order.getItemId() > 0) {
+                    confirmedEmptyDespiteLedger.add(order.getItemId());
+                    log.info("PPOFlipperStar: marking item {} as confirmed-empty despite the ledger - " +
+                        "suppressing further stale-position SELL proposals for it until a real fill is seen.",
+                        order.getItemId());
+                }
                 return;
             }
             lastFundsShortfallOrder = order;
@@ -2149,34 +2176,36 @@ public class PPOFlipperStarScript extends Script {
     }
 
     /**
-     * A QUEUED SELL represents capital/inventory already committed - if every GE slot is tied up
-     * and the SELL has been waiting past {@code sellSlotEvictionWaitSeconds}, this cancels one
-     * eligible active order to make room for it, rather than making it wait on {@link #isStale}'s
-     * much longer {@code staleOfferTimeoutMinutes} timer. Deliberately narrow: only fires when
-     * {@link OrderQueue#nextQueued()} itself resolves to a SELL (i.e. nothing else already jumps
-     * the line ahead of it - see that method's javadoc) AND every slot is full AND that SELL has
-     * actually been queued long enough.
+     * A QUEUED order (BUY or SELL) represents a decision already made - if every GE slot is tied
+     * up and it's been waiting past {@code sellSlotEvictionWaitSeconds}, this cancels one eligible
+     * active order to make room for it, rather than making it wait on {@link #isStale}'s much
+     * longer {@code staleOfferTimeoutMinutes} timer.
      *
-     * <p>Prefers evicting a dud BUY first (a still-speculative opportunity, never a real
-     * committed position) - "eligible" means a dud per {@link #isDud} (a real, meaningful partial
-     * fill is never touched, same protection {@link #isStale} already applies) and at least
-     * {@code sellSlotEvictionMinBuyAgeSeconds} old, so a BUY that hasn't had a fair chance to fill
-     * yet is never sacrificed just because it happens to be active.
+     * <p><b>Originally SELL-only, generalized to whichever action {@link OrderQueue#nextQueued()}
+     * actually is.</b> A real incident: with only a couple of real GE slots in practice (far fewer
+     * than the configured {@code maxActiveOffers}), both held by SELLs, a blocked BUY had
+     * absolutely no eviction path at all - the old version's very first check
+     * (\"is {@code nextQueued()} a SELL? if not, do nothing\") meant a blocked BUY was silently,
+     * permanently ineligible for this mechanism no matter how long it waited, with zero logging to
+     * even show it was happening. The exact same "only if actually needed" reasoning that already
+     * justified evicting a dud SELL for a blocked SELL applies identically in the other direction -
+     * a dud order sitting on a slot is exactly as wasteful whether the thing genuinely waiting for
+     * that room is a SELL or a BUY.
      *
-     * <p><b>Falls back to evicting a dud SELL (never the blocked SELL itself) if no eligible BUY
-     * exists at all</b> - a real incident: with 5 of 8 slots held by SELLs and only 3 by BUYs, all
-     * 3 BUYs happened to be either too young or genuinely partially filled, leaving zero eligible
-     * BUYs ever, while a blocked SELL sat waiting 700+ seconds (12x this setting's own grace
-     * period) with no other candidate this method would previously even consider. A dud SELL
-     * occupying a slot is exactly as stuck/wasteful as a dud BUY would be, and freeing it for a
-     * different, still-queued SELL is no worse than what {@code staleOfferTimeoutMinutes} would
-     * eventually do to it anyway - just sooner, and specifically because something else is
-     * genuinely waiting right now, the same "only if actually needed" principle this whole method
-     * already follows for BUYs.
+     * <p>Prefers evicting a dud order of the OPPOSITE action from the blocked one first (e.g. a
+     * dud BUY to make room for a blocked SELL, or a dud SELL to make room for a blocked BUY) -
+     * "eligible" means a dud per {@link #isDud} (a real, meaningful partial fill is never touched,
+     * same protection {@link #isStale} already applies) and at least
+     * {@code sellSlotEvictionMinBuyAgeSeconds} old, so nothing that hasn't had a fair chance to
+     * fill yet is ever sacrificed just because it happens to be active. Falls back to evicting a
+     * dud order of the SAME action (never the blocked order itself) if no opposite-action
+     * candidate exists - freeing a dud SELL for a different, still-queued SELL (or a dud BUY for a
+     * different, still-queued BUY) is no worse than what {@code staleOfferTimeoutMinutes} would
+     * eventually do to it anyway, just sooner, and specifically because something else is
+     * genuinely waiting right now.
      *
-     * <p>If nothing (neither a BUY nor a SELL) qualifies yet, the blocked SELL simply keeps
-     * waiting - this never forces an eviction, only offers one once a genuinely reasonable
-     * candidate exists.
+     * <p>If nothing qualifies yet, the blocked order simply keeps waiting - this never forces an
+     * eviction, only offers one once a genuinely reasonable candidate exists.
      */
     private void evictForBlockedSell() {
         int waitSeconds = config.sellSlotEvictionWaitSeconds();
@@ -2185,8 +2214,8 @@ public class PPOFlipperStarScript extends Script {
             return;
         }
         if (activeOrders.size() < Math.max(1, config.maxActiveOffers())) {
-            // A slot is already free - nextQueued() (SELL-first) will claim it on the normal
-            // SUBMITTING_ORDERS path next, no eviction needed.
+            // A slot is already free - nextQueued() will claim it on the normal SUBMITTING_ORDERS
+            // path next, no eviction needed.
             log.debug("PPOFlipperStar: evictForBlockedSell - {} of {} slots active, a slot is already free.",
                 activeOrders.size(), Math.max(1, config.maxActiveOffers()));
             return;
@@ -2197,74 +2226,67 @@ public class PPOFlipperStarScript extends Script {
             log.debug("PPOFlipperStar: evictForBlockedSell - all {} slots full, nothing QUEUED.", activeOrders.size());
             return;
         }
-        if (nextQueued.get().getAction() != GrandExchangeAction.SELL) {
-            log.debug("PPOFlipperStar: evictForBlockedSell - all {} slots full, but next QUEUED order is a {} not a SELL - {}.",
-                activeOrders.size(), nextQueued.get().getAction(), nextQueued.get());
-            return;
-        }
-        PPOFlipperOrder blockedSell = nextQueued.get();
-        long queuedForMillis = System.currentTimeMillis() - blockedSell.getQueuedAtMillis();
+        PPOFlipperOrder blocked = nextQueued.get();
+        GrandExchangeAction blockedAction = blocked.getAction();
+        long queuedForMillis = System.currentTimeMillis() - blocked.getQueuedAtMillis();
         if (queuedForMillis < waitSeconds * 1000L) {
-            log.info("PPOFlipperStar: evictForBlockedSell - SELL {} is next in queue but all {} slots are full; " +
+            log.info("PPOFlipperStar: evictForBlockedSell - {} {} is next in queue but all {} slots are full; " +
                     "waiting {}s more (queued {}s ago, grace period {}s) before considering an eviction.",
-                blockedSell, activeOrders.size(), waitSeconds - (queuedForMillis / 1000L), queuedForMillis / 1000L, waitSeconds);
+                blockedAction, blocked, activeOrders.size(), waitSeconds - (queuedForMillis / 1000L), queuedForMillis / 1000L, waitSeconds);
             return;
         }
 
-        long minBuyAgeMillis = Math.max(0, config.sellSlotEvictionMinBuyAgeSeconds()) * 1000L;
+        long minAgeMillis = Math.max(0, config.sellSlotEvictionMinBuyAgeSeconds()) * 1000L;
         long now = System.currentTimeMillis();
-        Map.Entry<GrandExchangeSlots, PPOFlipperOrder> oldestEligibleBuy = activeOrders.entrySet().stream()
-            .filter(e -> e.getValue().getAction() == GrandExchangeAction.BUY)
+        GrandExchangeAction oppositeAction = blockedAction == GrandExchangeAction.SELL ? GrandExchangeAction.BUY : GrandExchangeAction.SELL;
+        Map.Entry<GrandExchangeSlots, PPOFlipperOrder> oldestEligibleOpposite = activeOrders.entrySet().stream()
+            .filter(e -> e.getValue().getAction() == oppositeAction)
             .filter(e -> isDud(e.getValue()))
             .filter(e -> e.getValue().getSubmittedAtMillis() > 0
-                && now - e.getValue().getSubmittedAtMillis() >= minBuyAgeMillis)
+                && now - e.getValue().getSubmittedAtMillis() >= minAgeMillis)
             .min(Comparator.comparingLong(e -> e.getValue().getSubmittedAtMillis()))
             .orElse(null);
-        if (oldestEligibleBuy != null) {
-            log.info("PPOFlipperStar: evicting BUY in slot {} - {} - to free a slot for blocked SELL {} (queued {}s)",
-                oldestEligibleBuy.getKey(), oldestEligibleBuy.getValue(), blockedSell, queuedForMillis / 1000L);
-            cancelAndFreeSlot(oldestEligibleBuy.getKey(), oldestEligibleBuy.getValue(),
-                "Evicted to free a GE slot for a blocked SELL (" + blockedSell.getItemName() + ")");
+        if (oldestEligibleOpposite != null) {
+            log.info("PPOFlipperStar: evicting {} in slot {} - {} - to free a slot for blocked {} {} (queued {}s)",
+                oppositeAction, oldestEligibleOpposite.getKey(), oldestEligibleOpposite.getValue(), blockedAction, blocked, queuedForMillis / 1000L);
+            cancelAndFreeSlot(oldestEligibleOpposite.getKey(), oldestEligibleOpposite.getValue(),
+                "Evicted to free a GE slot for a blocked " + blockedAction + " (" + blocked.getItemName() + ")");
             return;
         }
 
-        // Real incident: with 5 of 8 active slots all held by SELLs and only 3 by BUYs, every one
-        // of those 3 BUYs happened to be either too young or a real partial fill - leaving NO
-        // eligible BUY at all, ever, while a blocked SELL sat waiting 700+ seconds (12x this
-        // setting's own grace period) with the eviction check correctly, repeatedly declining to
-        // act, tick after tick, with no other fallback. A dud SELL occupying a slot is exactly as
-        // wasteful as a dud BUY would be - it's just as unfilled/stuck, and freeing it for a
-        // DIFFERENT, still-queued SELL is no worse than what staleOfferTimeoutMinutes would
-        // eventually do to it anyway, just sooner, and specifically because something else is
-        // genuinely waiting on a slot right now (same "only if actually needed" principle this
-        // whole method already follows for BUYs). Never considers blockedSell itself (that's the
-        // order waiting for room, not a candidate to evict) or a SELL with any real fill (isDud
-        // already protects a partial fill the same way it does for a BUY).
-        Map.Entry<GrandExchangeSlots, PPOFlipperOrder> oldestEligibleSell = activeOrders.entrySet().stream()
-            .filter(e -> e.getValue().getAction() == GrandExchangeAction.SELL)
-            .filter(e -> e.getValue() != blockedSell)
+        // Fallback: no eligible opposite-action order existed (e.g. every active BUY was too
+        // young or genuinely partially filled) - a dud order of the SAME action as the blocked one
+        // is exactly as stuck/wasteful, and freeing it for a different, still-queued order of that
+        // same action is no worse than what staleOfferTimeoutMinutes would eventually do to it
+        // anyway, just sooner. Never considers the blocked order itself, or an order with any real
+        // fill (isDud already protects a partial fill the same way for either action).
+        Map.Entry<GrandExchangeSlots, PPOFlipperOrder> oldestEligibleSameAction = activeOrders.entrySet().stream()
+            .filter(e -> e.getValue().getAction() == blockedAction)
+            .filter(e -> e.getValue() != blocked)
             .filter(e -> isDud(e.getValue()))
             .filter(e -> e.getValue().getSubmittedAtMillis() > 0
-                && now - e.getValue().getSubmittedAtMillis() >= minBuyAgeMillis)
+                && now - e.getValue().getSubmittedAtMillis() >= minAgeMillis)
             .min(Comparator.comparingLong(e -> e.getValue().getSubmittedAtMillis()))
             .orElse(null);
-        if (oldestEligibleSell == null) {
-            // Nothing evictable at all (neither a dud BUY nor a dud SELL, old enough) - let the
-            // blocked SELL keep waiting rather than sacrificing something that hasn't had a fair
-            // chance, or a real partial fill worth protecting.
-            log.info("PPOFlipperStar: evictForBlockedSell - SELL {} has waited {}s past the grace period, but no " +
+        if (oldestEligibleSameAction == null) {
+            // Nothing evictable at all (neither an opposite-action nor same-action dud, old
+            // enough) - let the blocked order keep waiting rather than sacrificing something that
+            // hasn't had a fair chance, or a real partial fill worth protecting.
+            log.info("PPOFlipperStar: evictForBlockedSell - {} {} has waited {}s past the grace period, but no " +
                     "active order (BUY or SELL) is both a dud (unfilled or negligibly filled) and at least {}s " +
                     "old yet - holding off eviction this tick. Active orders: {}",
-                blockedSell, queuedForMillis / 1000L, config.sellSlotEvictionMinBuyAgeSeconds(),
+                blockedAction, blocked, queuedForMillis / 1000L, config.sellSlotEvictionMinBuyAgeSeconds(),
                 activeOrders.values());
             return;
         }
 
-        log.info("PPOFlipperStar: evicting dud SELL in slot {} - {} - no eligible BUY existed, freeing a slot " +
-                "for a different blocked SELL {} (queued {}s)",
-            oldestEligibleSell.getKey(), oldestEligibleSell.getValue(), blockedSell, queuedForMillis / 1000L);
-        cancelAndFreeSlot(oldestEligibleSell.getKey(), oldestEligibleSell.getValue(),
-            "Evicted (as a dud SELL, no eligible BUY existed) to free a GE slot for a blocked SELL (" + blockedSell.getItemName() + ")");
+        log.info("PPOFlipperStar: evicting dud {} in slot {} - {} - no eligible {} existed, freeing a slot " +
+                "for a different blocked {} {} (queued {}s)",
+            blockedAction, oldestEligibleSameAction.getKey(), oldestEligibleSameAction.getValue(), oppositeAction,
+            blockedAction, blocked, queuedForMillis / 1000L);
+        cancelAndFreeSlot(oldestEligibleSameAction.getKey(), oldestEligibleSameAction.getValue(),
+            "Evicted (as a dud " + blockedAction + ", no eligible " + oppositeAction + " existed) to free a GE slot for a blocked "
+                + blockedAction + " (" + blocked.getItemName() + ")");
     }
 
     /**
@@ -2277,6 +2299,10 @@ public class PPOFlipperStarScript extends Script {
         if (filled <= 0) return;
         int itemId = details.getItemId();
         long now = System.currentTimeMillis();
+        // A genuine fill (BUY or SELL) is fresh, real evidence about this item's holdings - clears
+        // any earlier confirmed-empty suppression from addStalePositionSells, since whatever
+        // caused that mismatch clearly isn't blocking this item anymore.
+        confirmedEmptyDespiteLedger.remove(itemId);
         if (order.getAction() == GrandExchangeAction.BUY) {
             // No GE tax on BUY - it spends exactly what it's charged, nothing withheld.
             portfolio.recordBuy(itemId, filled, details.getSpent(), now);
